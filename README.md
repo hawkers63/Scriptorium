@@ -19,6 +19,10 @@ Built in Python with a native-style CustomTkinter interface.
 - **Adjustable strength** — Light, Standard, or Substantial.
 - **Optional tone control** — Formal, Neutral, Friendly, Concise, Confident,
   Diplomatic.
+- **Writing roles** — an optional context (Creative, Software Developer,
+  Executive, Client Relations, Academic, Legal & Compliance) that steers
+  vocabulary and register without ever adding facts or bending the rules.
+  Role, mode, strength and tone are independent controls that stack.
 - **Side-by-side diff** — the revision sits beside the original with changed
   words highlighted.
 - **Review controls** — Accept, Reject, Copy, Undo, plus Import and Export.
@@ -88,7 +92,6 @@ fallback.
 ## Roadmap
 
 - `.docx` import/export via `python-docx`.
-- A Role / writing-context system (Software Developer, Executive, Academic, …).
 - Placeholder protection for letter templates (`[Name]`, `{{Date}}`).
 - British letter conventions (salutation and sign-off normalisation).
 - Inline deletion display in the diff view.

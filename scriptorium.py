@@ -19,6 +19,8 @@ Design principles
       licence/license, -ise endings, etc.).
     * Names, numbers, quotations, URLs and technical terms are left untouched.
     * If the model spots genuine ambiguity it flags it rather than guessing.
+    * An optional writing role (Software Developer, Academic, and so on) steers
+      vocabulary and register without ever adding facts or bending the rules.
     * Two backends: the Claude API (best quality, text leaves your machine) or
       a local Ollama model (fully private, nothing leaves your machine).
 
@@ -29,7 +31,7 @@ Dependencies
     The API call uses only the Python standard library (urllib), so no extra
     HTTP package is required. The Anthropic SDK is not needed.
 
-Author: built with Mark, August 2026. Version 1.0.
+Author: built with Mark, August 2026. Version 1.1.
 """
 
 import os
@@ -51,7 +53,7 @@ import customtkinter as ctk
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "1.0"
+APP_VERSION = "1.1"
 
 # Config lives next to the script by default. Change CONFIG_PATH if you would
 # rather keep it on, say, E:\ with your other project data.
@@ -79,6 +81,47 @@ MODES = ["Paraphrase", "Correct", "Clarify"]
 STRENGTHS = ["Light", "Standard", "Substantial"]
 TONES = ["(keep original)", "Formal", "Neutral", "Friendly",
          "Concise", "Confident", "Diplomatic"]
+
+# Writing roles are data-driven *contexts*, not model personas. Each one steers
+# vocabulary, register and rhythm only — it never licenses adding facts or
+# jargon. Role, mode, strength and tone are independent knobs that stack.
+ROLES = [
+    "(none)",
+    "Creative",
+    "Software Developer",
+    "Executive",
+    "Client Relations",
+    "Academic",
+    "Legal & Compliance",
+]
+
+ROLE_INSTRUCTIONS = {
+    "Creative": (
+        "favour vivid, engaging phrasing and a lively narrative rhythm, with "
+        "active voice and evocative word choice where the material suits it."
+    ),
+    "Software Developer": (
+        "favour precise, unambiguous technical language and a logical, concise "
+        "structure; keep existing terminology exact and cut waffle and "
+        "corporate buzzwords."
+    ),
+    "Executive": (
+        "favour a decisive, authoritative, outcome-focused register that is "
+        "polite but direct, foregrounding decisions and clear next steps."
+    ),
+    "Client Relations": (
+        "favour a warm, empathetic and reassuring register that stays courteous "
+        "and solution-focused, gently de-escalating where the tone is tense."
+    ),
+    "Academic": (
+        "favour a formal, objective and measured register with careful hedging "
+        "(indicates, suggests) and orderly, well-signposted transitions."
+    ),
+    "Legal & Compliance": (
+        "favour cautious, precise and tightly bounded phrasing that avoids "
+        "accidental commitments, absolutes and ambiguous obligations."
+    ),
+}
 
 
 DEFAULT_CONFIG = {
@@ -138,8 +181,15 @@ STRENGTH_INSTRUCTIONS = {
 }
 
 
-def build_system_prompt(mode, strength, tone):
+def build_system_prompt(mode, strength, tone, role="(none)"):
     """Assemble the system prompt that governs a single rewrite."""
+    role_line = ""
+    if role and role != "(none)" and role in ROLE_INSTRUCTIONS:
+        role_line = (f"\n- Writing role: {ROLE_INSTRUCTIONS[role]} Apply this to "
+                     "vocabulary, register and sentence rhythm only; never add "
+                     "facts, technical claims or jargon that are not already "
+                     "present or clearly implied in the source.")
+
     tone_line = ""
     if tone and tone != "(keep original)":
         tone_line = (f"\n- Steer the tone towards: {tone.lower()}. "
@@ -151,7 +201,7 @@ experience in professional publishing.
 
 # Task
 {MODE_INSTRUCTIONS[mode]}
-{STRENGTH_INSTRUCTIONS[strength]}{tone_line}
+{STRENGTH_INSTRUCTIONS[strength]}{role_line}{tone_line}
 
 # Non-negotiable rules
 - Write in British English throughout: use -ise not -ize (organise, realise), \
@@ -440,14 +490,19 @@ class Scriptorium(ctk.CTk):
         ctk.CTkSegmentedButton(bar, values=STRENGTHS, variable=self.strength_var
                                ).grid(row=0, column=3, padx=4)
 
-        ctk.CTkLabel(bar, text="Tone").grid(row=0, column=4, padx=(20, 4))
-        self.tone_var = ctk.StringVar(value="(keep original)")
-        ctk.CTkOptionMenu(bar, values=TONES, variable=self.tone_var, width=150
+        ctk.CTkLabel(bar, text="Role").grid(row=0, column=4, padx=(20, 4))
+        self.role_var = ctk.StringVar(value="(none)")
+        ctk.CTkOptionMenu(bar, values=ROLES, variable=self.role_var, width=170
                           ).grid(row=0, column=5, padx=4)
 
+        ctk.CTkLabel(bar, text="Tone").grid(row=0, column=6, padx=(20, 4))
+        self.tone_var = ctk.StringVar(value="(keep original)")
+        ctk.CTkOptionMenu(bar, values=TONES, variable=self.tone_var, width=150
+                          ).grid(row=0, column=7, padx=4)
+
         ctk.CTkButton(bar, text="⚙ Settings", width=100, fg_color="gray30",
-                      command=self.open_settings).grid(row=0, column=7, padx=(20, 14))
-        bar.grid_columnconfigure(6, weight=1)
+                      command=self.open_settings).grid(row=0, column=9, padx=(20, 14))
+        bar.grid_columnconfigure(8, weight=1)
 
     def _build_panes(self):
         panes = ctk.CTkFrame(self, fg_color="transparent")
@@ -578,7 +633,8 @@ class Scriptorium(ctk.CTk):
         self._refresh_status("contacting the model…")
 
         system_prompt = build_system_prompt(
-            self.mode_var.get(), self.strength_var.get(), self.tone_var.get())
+            self.mode_var.get(), self.strength_var.get(),
+            self.tone_var.get(), self.role_var.get())
 
         def worker():
             try:
