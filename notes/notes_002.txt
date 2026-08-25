@@ -1,0 +1,146 @@
+### Executive Assessment / Antigravity
+
+**Version 1 of Scriptorium Overview**
+
+The inaugural version of Scriptorium is characterised by its clean architecture, well-structured design, and thoughtful engineering. By leveraging CustomTkinter and utilising native urllib API calls, the dependency footprint remains minimal. The dual-backend architecture, featuring Claude versus Local Ollama, complemented by explicit privacy indicators, represents an exemplary design choice.
+
+**Code Review & Analysis of Version 1**
+
+┌────────────────────────────────────────────────────────────────────────┐  
+│                          Scriptorium V1 Flow                           │  
+│                                                                        │  
+│  [ Input Text ] ──► [ Prompt Engine ] ──► [ Backend: Claude / Ollama ]  │  
+│                            │                          │                │  
+│                            ▼                          ▼                │  
+│                   (Mode + Strength + Tone)     (JSON Parser)           │  
+│                                                       │                │  
+│  [ Diff Renderer ] ◄── [ Suggested Revision ] ◄───────┘                │  
+└────────────────────────────────────────────────────────────────────────┘  
+
+**Strengths Identified**
+
+- **Asynchronous Processing & UI Responsiveness**: Executing backend calls on a daemon thread within the `process()` function and dispatching updates through `self.after(0, ...)` effectively mitigates UI freezing during periods of network latency or local model inference.
+  
+- **Deterministic Output Contract**: The enforcement of structured JSON (revised, ambiguities, note) within the `build_system_prompt()` function facilitates seamless parsing and the identification of ambiguities within the UI.
+  
+- **Word-Level Diff Highlighting**: The tokenisation methodology employed in `_tokenise()` and `render_diff()`, utilising Python's standard `difflib.SequenceMatcher`, functions effectively.
+  
+- **British English Conventions**: The incorporation of hardcoded stylistic rules within the prompt (e.g., -ise endings, licence versus license, practise versus practice) ensures regional consistency.
+
+**Opportunities for Enhancement in the Current Codebase**
+
+- **API Key Security in Configuration**: The API key is currently stored in plain text within `scriptorium_config.json`. If this repository is tracked using Git, it is advisable to add `scriptorium_config.json` to `.gitignore` and to provide a `scriptorium_config.example.json` template.
+  
+- **JSON Resilience for Local Models**: While Claude consistently adheres to the schema, smaller local models (such as llama3.1:8b in Ollama) may occasionally produce trailing commas, single quotes, or unescaped characters. Enhancing `_extract_json()` with fallback regex repair will help prevent unhandled parsing errors.
+  
+- **Live Character/Word Counters**: The character counts in `_refresh_status()` are only updated upon explicit actions (Process, Accept, Reject). Binding `<KeyRelease>` to `original_box` would enable real-time metrics (word count, character count, reading time).
+
+**Designing the Role/Persona System (RewritePal-Style)**
+
+In RewritePal, roles influence the vocabulary, sentence cadence, technical density, and rhetorical perspective of the output.
+
+1. **Proposed Role Taxonomy**
+
+| Role                        | Focus & Stylistic Direction                                             | Target Use Case                                      |
+|-----------------------------|------------------------------------------------------------------------|-----------------------------------------------------|
+| (General / None)            | Neutral, standard British English copy-editing.                        | Everyday correspondence.                             |
+| Creative Professional        | Vivid imagery, evocative phrasing, engaging narrative rhythm, and active voice. | Portfolios, pitch decks, proposals, creative copy.  |
+| Software Developer / Technical| Precise terminology, logical structure, concise explanations, and elimination of fluff. | Bug reports, RFCs, technical emails, architecture notes. |
+| Executive / Leadership       | Decisive, authoritative, outcome-focused, strategic, and polite yet direct. | Board updates, management directives, stakeholder memos. |
+| Client & Customer Relations  | Empathetic, reassuring, solution-oriented, polite, and de-escalating.  | Customer service, client onboarding, status updates. |
+| Academic & Researcher       | Rigorous, objective, nuanced hedging (e.g., indicates, suggests), formal transitions. | Papers, peer reviews, research grant proposals.     |
+| Legal & Compliance Minded   | Cautious, unambiguous, strictly bounded statements, risk-averse phrasing. | Formal notices, contractual communications, policy letters. |
+
+2. **Integration of Prompt Architecture**
+
+We propose the introduction of `ROLE_INSTRUCTIONS` alongside `MODE_INSTRUCTIONS`, to be injected into `build_system_prompt()`:
+
+```python
+ROLES = [
+    "(none)",
+    "Creative Professional",
+    "Software Developer",
+    "Executive / Leadership",
+    "Client & Customer Relations",
+    "Academic & Researcher",
+    "Legal & Compliance",
+]
+
+ROLE_INSTRUCTIONS = {
+    "Creative Professional": (
+        "Adopt the persona of a Creative Professional. Use engaging, evocative phrasing, "
+        "dynamic rhythm, and compelling narrative flow while keeping the text natural."
+    ),
+    "Software Developer": (
+        "Adopt the persona of a Senior Software Engineer. Use precise, unambiguous language, "
+        "technical clarity, and concise structure. Avoid unnecessary fluff or corporate buzzwords."
+    ),
+    "Executive / Leadership": (
+        "Adopt the persona of an Executive Leader. Write with authority, brevity, and strategic "
+        "focus. Highlight outcomes, decisions, and clear next steps."
+    ),
+    "Client & Customer Relations": (
+        "Adopt the persona of a Client Relations Specialist. Use warm, empathetic, reassuring, "
+        "and solution-focused language, maintaining a courteous and professional demeanor."
+    ),
+    "Academic & Researcher": (
+        "Adopt the persona of an Academic Researcher. Use formal, objective, and analytical "
+        "phrasing with appropriate scholarly nuance and precision."
+    ),
+    "Legal & Compliance": (
+        "Adopt the persona of a Compliance Officer. Use rigorous, precise, and legally "
+        "cautious language that avoids accidental commitments or ambiguous obligations."
+    ),
+}
+```
+
+Subsequently, the prompt builder should be updated:
+
+```python
+def build_system_prompt(mode, strength, tone, role="(none)"):
+    role_line = ""
+    if role and role != "(none)" and role in ROLE_INSTRUCTIONS:
+        role_line = f"\n- Role Persona: {ROLE_INSTRUCTIONS[role]}"
+        
+    tone_line = ""
+    if tone and tone != "(keep original)":
+        tone_line = (f"\n- Steer the tone towards: {tone.lower()}. "
+                     "Adjust word choice and phrasing accordingly, but never at "
+                     "the expense of the original meaning.")
+    return f"""You are a meticulous British English copy-editor with decades of \
+experience in professional publishing and communications.
+# Task
+{MODE_INSTRUCTIONS[mode]}
+{STRENGTH_INSTRUCTIONS[strength]}{role_line}{tone_line}
+# Non-negotiable rules
+...
+```
+
+3. **Toolbar UI Integration**
+
+In `_build_toolbar()`, a Role selector dropdown can be added between the Strength and Tone options:
+
+```python
+ctk.CTkLabel(bar, text="Role").grid(row=0, column=4, padx=(20, 4))
+self.role_var = ctk.StringVar(value="(none)")
+ctk.CTkOptionMenu(bar, values=ROLES, variable=self.role_var, width=170
+                  ).grid(row=0, column=5, padx=4)
+```
+
+**Enhancements for Letter & Email Rewriting**
+
+Given that the primary use case involves letter rewriting, the introduction of several domain-specific features will significantly enhance the user experience:
+
+- **Letter Structure & Placeholder Preservation**: Users frequently include placeholders such as [Recipient Name], {{Date}}, or [Company] in business and personal letters. A rule should be added to the system prompt to ensure that any bracketed variables ([Name], <Date>, {amount}) remain unchanged.
+
+- **Letter Presets / Templates Dropdown**: A quick preset selector (e.g., Formal Enquiry, Cover Letter, Polite Refusal/Apology, Follow-up, Negotiation/Counter-offer) should be introduced. Selecting a preset can automatically configure the optimal combination of Mode, Tone, and Role.
+
+- **Salutation & Sign-off Normalisation (British English)**: Adhering to British etiquette guidelines: 
+  - Dear Sir/Madam → Yours faithfully; 
+  - Dear [Name] → Yours sincerely; 
+  - Informal → Kind regards / Warm regards.  
+A toggle for "Enforce British Letter Conventions" can ensure salutations and valedictions align with standard UK business practices.
+
+- **Visual Deletions (Strikethrough Diffing)**: Currently, `render_diff()` displays only additions and replacements. An optional "Inline Diff" mode that shows deleted text with red strikethrough (~deleted~) alongside green additions will provide users with immediate clarity regarding what has been removed.
+
+- **Alternative Variations**: Introduce a "Suggest 3 Alternatives" option, allowing the model to return three slightly different rewrites (e.g., Short/Punchy, Balanced, Eloquent), enabling the user to review these options before making a selection.

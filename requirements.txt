@@ -1,0 +1,3 @@
+# Scriptorium runtime dependency.
+# Everything else (urllib, tkinter, json, difflib) ships with Python.
+customtkinter>=5.2.0

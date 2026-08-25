@@ -1,0 +1,42 @@
+### Assessment by ChatGPT.
+
+Version 1.0 provides a robust foundation: the user interface is intuitive, requests are executed outside the Tkinter thread, privacy measures are evident, revisions necessitate explicit acceptance, and the three editing modes are logically delineated. I recommend stabilising the revision state prior to incorporating the proposed features.
+
+**Key Findings:**
+1. Stale results have the potential to overwrite more recent content. While a request is being processed—or upon the appearance of a result—the original text remains editable. Actions such as import, clear, undo, or other modifications can alter it, but the Accept function may still apply the outdated result. Additionally, the export function could export this stale revision. It is advisable to store a snapshot of the request and invalidate or reject results whenever the source changes. Refer to [scriptorium.py (line 568)](C:/Scriptorium/scriptorium.py:568).
+   
+2. Leading and trailing whitespace is eliminated. Invoking .strip() prior to processing may inadvertently remove intentional blank lines and letter spacing, which contradicts the goal of preservation. Test for emptiness using if not original.strip(), but ensure the unstripped string is sent. Consult [scriptorium.py (line 571)](C:/Scriptorium/scriptorium.py:571) for specifics.
+
+3. Model responses require runtime validation. The _extract_json() function only verifies that the revised element exists. My investigation confirmed that it accepts a list as revised and converts null ambiguities into the visible warning "None". It is essential to validate the complete response schema before interacting with the user interface. See [scriptorium.py (line 208)](C:/Scriptorium/scriptorium.py:208).
+
+4. The API key is currently stored in plaintext. I verified that the existing configuration contains a key. Although it was not exposed during the review process, the configuration file should not be shared or backed up insecurely. For distribution, employ Windows Credential Manager via keyring, and place standard settings under %LOCALAPPDATA%\Scriptorium.
+
+5. The application is not yet truly standalone. The [Scriptorium.bat (line 1)](C:/Scriptorium/Scriptorium.bat:1) file necessitates Python, CustomTkinter, and a fixed C:\Scriptorium location. It is advisable to package the application using PyInstaller or Nuitka, preferably as a windowed single-directory build with an Inno Setup installer.
+
+6. Enhanced handling of long outputs and service errors is required. Monitor Anthropic’s stop_reason, impose an input limit, manage timeouts and rate limits, and differentiate between an unavailable Ollama server and errors such as a missing model.
+
+Your configured Anthropic model identifiers are currently valid; Anthropic specifies that the newer dateless IDs are fixed releases rather than evergreen aliases. Refer to the Anthropic model-ID documentation for further details.
+
+**Proposed Features:**
+All five suggestions align well with the application:
+- **Roles:** Implement these as data-driven "writing contexts," rather than model personas. A Software Developer profile should maintain technical terminology and favour precise language, but must not fabricate technical details. Keep role, mode, tone, and strength as independent parameters.
+  
+- **Presets:** These are particularly beneficial for a letter-focused user experience. Each preset should visibly populate the existing controls, allowing users to amend their selections. Store presets as immutable records mapping mode, strength, tone, context, and the British conventions toggle.
+
+- **Placeholders:** Avoid relying solely on the prompt. Extract and temporarily mask [Name], {{Date}}, {amount}, and <Date> prior to processing; restore them afterwards and validate their exact count and order. Handle angle-bracket syntax with care, as it may represent HTML or code.
+
+- **British Letter Conventions:** This should be implemented as a separate policy layer, distinct from the general rewriting prompt. Identify the opening and closing lines, applying "Dear Sir or Madam" → "Yours faithfully" and a named recipient → "Yours sincerely", while leaving personal or informal letters unaltered unless enforcement is selected.
+
+- **Inline Diff:** This is straightforward with the current SequenceMatcher. Render deleted text from the original in red with overstrike=1; render insertions in green; for replacements, display the red deletion immediately followed by the green insertion. Continue to export only the clean revision.
+
+- **Three Alternatives:** Return all three alternatives in a single request and present them through a segmented selector or tabs. Validate each alternative independently. I recommend enabling this for the Paraphrase and Clarify functions, but generally not for Correct, as multiple answers may undermine the "minimum necessary changes" principle.
+
+**Recommended Implementation Order:**
+1. Address stale-result handling and whitespace preservation.
+2. Incorporate strict result and invariant validation with tests.
+3. Secure the configuration and create the standalone package.
+4. Add roles, presets, and placeholder protection.
+5. Implement British letter conventions and inline deletion display.
+6. Introduce alternatives last, as they will alter the response schema, user interface state, latency, and token cost.
+
+Verification has been completed in a read-only capacity: AST parsing, module imports, all 63 prompt combinations, nominal and malformed response probes, and installed dependency checks have passed. No API calls, visual user interface walkthroughs, or modifications to project files were conducted. There is currently no test suite or Git repository located in C:\Scriptorium.
