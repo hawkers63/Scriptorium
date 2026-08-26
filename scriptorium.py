@@ -21,6 +21,8 @@ Design principles
     * If the model spots genuine ambiguity it flags it rather than guessing.
     * An optional writing role (Software Developer, Academic, and so on) steers
       vocabulary and register without ever adding facts or bending the rules.
+    * Placeholders such as [Name], {{Date}} or {amount} are masked before the
+      text is sent and restored afterwards, so they are never reworded.
     * Two backends: the Claude API (best quality, text leaves your machine) or
       a local Ollama model (fully private, nothing leaves your machine).
 
@@ -31,7 +33,7 @@ Dependencies
     The API call uses only the Python standard library (urllib), so no extra
     HTTP package is required. The Anthropic SDK is not needed.
 
-Author: built with Mark, August 2026. Version 1.1.
+Author: built with Mark, August 2026. Version 1.2.
 """
 
 import os
@@ -53,7 +55,7 @@ import customtkinter as ctk
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "1.1"
+APP_VERSION = "1.2"
 
 # Config lives next to the script by default. Change CONFIG_PATH if you would
 # rather keep it on, say, E:\ with your other project data.
@@ -130,6 +132,7 @@ DEFAULT_CONFIG = {
     "anthropic_model": DEFAULT_ANTHROPIC_MODEL,
     "ollama_model": DEFAULT_OLLAMA_MODEL,
     "privacy_ack": False,            # whether the cloud-privacy notice was shown
+    "protect_placeholders": True,    # mask [Name], {{Date}} etc. during editing
 }
 
 
@@ -181,8 +184,16 @@ STRENGTH_INSTRUCTIONS = {
 }
 
 
-def build_system_prompt(mode, strength, tone, role="(none)"):
+def build_system_prompt(mode, strength, tone, role="(none)",
+                        protect_tokens=False):
     """Assemble the system prompt that governs a single rewrite."""
+    protect_line = ""
+    if protect_tokens:
+        protect_line = ("\n- The text contains protected tokens shaped like "
+                        "⟦PH0⟧, ⟦PH1⟧ and so on. Reproduce every such "
+                        "token exactly and unchanged, in a sensible position; "
+                        "never translate, reword, renumber or drop them.")
+
     role_line = ""
     if role and role != "(none)" and role in ROLE_INSTRUCTIONS:
         role_line = (f"\n- Writing role: {ROLE_INSTRUCTIONS[role]} Apply this to "
@@ -216,7 +227,7 @@ rewriting to your own taste.
 - If a passage is genuinely ambiguous — such that improving it would require you \
 to guess the intended meaning — make the smallest safe edit and record the \
 ambiguity instead of guessing.
-- If the text needs no change, return it unchanged.
+- If the text needs no change, return it unchanged.{protect_line}
 
 # Output format
 Respond with a SINGLE valid JSON object and nothing else — no markdown, no code \
@@ -373,6 +384,71 @@ def render_diff(text_widget, original, revised):
 
 
 # --------------------------------------------------------------------------- #
+#  Placeholder protection
+# --------------------------------------------------------------------------- #
+# Masking beats trusting the prompt: swap each placeholder for an opaque
+# sentinel the model won't touch, then restore the originals afterwards and
+# check none went astray. Mode, strength, role and tone still shape the prose
+# around them as normal.
+
+# Mathematical white square brackets — visually distinct and virtually never
+# seen in ordinary prose, so the sentinel survives the round trip intact.
+_PH_OPEN, _PH_CLOSE = "⟦", "⟧"  # the sentinel brackets
+
+# Ordered longest-first so {{...}} is matched before {...}. Angle brackets are
+# deliberately conservative (a single bare word) to avoid grabbing HTML or code
+# such as <div> attributes or <a href="...">.
+_PLACEHOLDER_PATTERNS = [
+    r"\{\{[^{}\n]+\}\}",           # {{Date}}, {{ recipient }}
+    r"\[[^\[\]\n]+\]",            # [Name], [Recipient Name], [Company]
+    r"\{[^{}\n]+\}",               # {amount}
+    r"<[A-Za-z][A-Za-z0-9 _\-]*>",  # <Date>
+]
+_PLACEHOLDER_RE = re.compile("|".join(_PLACEHOLDER_PATTERNS))
+
+
+def mask_placeholders(text):
+    """Swap placeholders for opaque sentinels.
+
+    Returns (masked_text, mapping), where mapping is an ordered list of
+    (sentinel, original) pairs — one per occurrence, so a placeholder used
+    several times is tracked independently each time.
+    """
+    mapping = []
+
+    def _swap(match):
+        sentinel = f"{_PH_OPEN}PH{len(mapping)}{_PH_CLOSE}"
+        mapping.append((sentinel, match.group(0)))
+        return sentinel
+
+    return _PLACEHOLDER_RE.sub(_swap, text), mapping
+
+
+def restore_placeholders(text, mapping):
+    """Put the original placeholders back.
+
+    Returns (restored_text, warnings). A warning is recorded if the model
+    dropped a token or emitted it more than once, so the user is told rather
+    than silently losing a placeholder.
+    """
+    warnings = []
+    for sentinel, original in mapping:
+        count = text.count(sentinel)
+        if count == 0:
+            warnings.append(
+                f"The placeholder {original} is missing from the revision — the "
+                "model appears to have dropped it. Re-run, or paste it back in "
+                "by hand.")
+            continue
+        text = text.replace(sentinel, original, 1)
+        if count > 1:
+            warnings.append(
+                f"The placeholder {original} appeared more than once in the "
+                "revision; only the first occurrence was restored.")
+    return text, warnings
+
+
+# --------------------------------------------------------------------------- #
 #  Settings dialog
 # --------------------------------------------------------------------------- #
 
@@ -383,7 +459,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self.on_save = on_save
 
         self.title("Settings")
-        self.geometry("520x430")
+        self.geometry("520x500")
         self.resizable(False, False)
         self.grab_set()  # modal
 
@@ -419,6 +495,13 @@ class SettingsDialog(ctk.CTkToplevel):
         self.ollama_entry.insert(0, cfg.get("ollama_model", DEFAULT_OLLAMA_MODEL))
         self.ollama_entry.pack(padx=16, pady=(2, 0))
 
+        self.protect_var = tk.BooleanVar(
+            value=cfg.get("protect_placeholders", True))
+        ctk.CTkCheckBox(
+            self, variable=self.protect_var,
+            text="Protect placeholders — mask [Name], {{Date}}, {amount}, "
+                 "<Date> while editing").pack(anchor="w", padx=16, pady=(16, 0))
+
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
         btn_row.pack(fill="x", padx=16, pady=18, side="bottom")
         ctk.CTkButton(btn_row, text="Cancel", width=100, fg_color="gray30",
@@ -438,6 +521,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self.cfg["anthropic_api_key"] = self.key_entry.get().strip()
         self.cfg["anthropic_model"] = self.model_var.get()
         self.cfg["ollama_model"] = self.ollama_entry.get().strip() or DEFAULT_OLLAMA_MODEL
+        self.cfg["protect_placeholders"] = bool(self.protect_var.get())
         save_config(self.cfg)
         self.on_save()
         self.destroy()
@@ -628,18 +712,29 @@ class Scriptorium(ctk.CTk):
             self._refresh_status("nothing to process")
             return
 
+        # Protect placeholders by masking them before the model sees the text;
+        # they are restored (and checked) in _on_success.
+        if self.cfg.get("protect_placeholders", True):
+            masked, ph_map = mask_placeholders(original)
+        else:
+            masked, ph_map = original, []
+
         self.busy = True
         self.process_btn.configure(text="Working…", state="disabled")
-        self._refresh_status("contacting the model…")
+        busy_note = "contacting the model…"
+        if ph_map:
+            busy_note = f"protecting {len(ph_map)} placeholder(s), contacting the model…"
+        self._refresh_status(busy_note)
 
         system_prompt = build_system_prompt(
             self.mode_var.get(), self.strength_var.get(),
-            self.tone_var.get(), self.role_var.get())
+            self.tone_var.get(), self.role_var.get(),
+            protect_tokens=bool(ph_map))
 
         def worker():
             try:
-                result = run_backend(system_prompt, original, self.cfg)
-                self.after(0, self._on_success, original, result)
+                result = run_backend(system_prompt, masked, self.cfg)
+                self.after(0, self._on_success, original, ph_map, result)
             except BackendError as exc:
                 self.after(0, self._on_error, str(exc))
             except Exception as exc:  # noqa: BLE001 — surface anything unexpected
@@ -647,13 +742,24 @@ class Scriptorium(ctk.CTk):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_success(self, original, result):
+    def _on_success(self, original, ph_map, result):
         self.busy = False
         self.process_btn.configure(text="Process  (Ctrl+Enter)", state="normal")
+
+        # Restore protected placeholders before anything is shown, stored or
+        # exported, so the diff and the accepted text carry the real values.
+        warnings = []
+        if ph_map:
+            result["revised"], warnings = restore_placeholders(
+                result["revised"], ph_map)
+
         self.last_result = result
         render_diff(self.revised_box, original, result["revised"])
-        self._show_ambiguities(result.get("ambiguities", []))
+        self._show_ambiguities(list(result.get("ambiguities", [])) + warnings)
+
         note = result.get("note", "")
+        if ph_map and not warnings:
+            note = (note + "  " if note else "") + f"{len(ph_map)} placeholder(s) preserved"
         self._refresh_status(note or "done")
 
     def _on_error(self, message):

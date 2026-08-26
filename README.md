@@ -23,6 +23,10 @@ Built in Python with a native-style CustomTkinter interface.
   Executive, Client Relations, Academic, Legal & Compliance) that steers
   vocabulary and register without ever adding facts or bending the rules.
   Role, mode, strength and tone are independent controls that stack.
+- **Placeholder protection** — placeholders like `[Name]`, `{{Date}}`,
+  `{amount}` and `<Date>` are masked before the text is sent and restored
+  afterwards, so they are never reworded; if the model drops one, you are
+  warned. Toggle it in Settings.
 - **Side-by-side diff** — the revision sits beside the original with changed
   words highlighted.
 - **Review controls** — Accept, Reject, Copy, Undo, plus Import and Export.
@@ -92,7 +96,6 @@ fallback.
 ## Roadmap
 
 - `.docx` import/export via `python-docx`.
-- Placeholder protection for letter templates (`[Name]`, `{{Date}}`).
 - British letter conventions (salutation and sign-off normalisation).
 - Inline deletion display in the diff view.
 - PyInstaller packaging into a standalone `.exe`.
