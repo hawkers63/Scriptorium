@@ -33,7 +33,7 @@ Dependencies
     The API call uses only the Python standard library (urllib), so no extra
     HTTP package is required. The Anthropic SDK is not needed.
 
-Author: built with Mark, August 2026. Version 1.2.
+Author: built with Mark, August 2026. Version 1.3.
 """
 
 import os
@@ -55,7 +55,7 @@ import customtkinter as ctk
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "1.2"
+APP_VERSION = "1.3"
 
 # Config lives next to the script by default. Change CONFIG_PATH if you would
 # rather keep it on, say, E:\ with your other project data.
@@ -266,12 +266,35 @@ def _extract_json(text):
             "The model did not return valid JSON. Try again, or lower the "
             f"editing strength.\n\n(Parser detail: {exc})"
         )
-    if "revised" not in data:
+    if not isinstance(data, dict):
+        raise BackendError("The model response was not a JSON object.")
+
+    # Coerce every field to the type the rest of the app relies on, so a model
+    # that returns a list for "revised" or null for "ambiguities" fails loudly
+    # here instead of crashing silently in the UI callback later.
+    revised = data.get("revised")
+    if isinstance(revised, list):
+        revised = "\n\n".join(str(part) for part in revised)
+    elif revised is None:
         raise BackendError("The model response was missing the 'revised' field.")
-    data.setdefault("ambiguities", [])
-    data.setdefault("note", "")
-    if not isinstance(data["ambiguities"], list):
-        data["ambiguities"] = [str(data["ambiguities"])]
+    elif not isinstance(revised, str):
+        revised = str(revised)
+    data["revised"] = revised
+
+    ambiguities = data.get("ambiguities")
+    if isinstance(ambiguities, list):
+        ambiguities = [str(a).strip() for a in ambiguities
+                       if a is not None and str(a).strip() not in ("", "None")]
+    elif ambiguities is None or str(ambiguities).strip() in ("", "None"):
+        ambiguities = []
+    else:
+        ambiguities = [str(ambiguities).strip()]
+    data["ambiguities"] = ambiguities
+
+    note = data.get("note")
+    data["note"] = (str(note).strip()
+                    if note is not None and str(note).strip() not in ("", "None")
+                    else "")
     return data
 
 
@@ -337,6 +360,11 @@ def call_ollama(system_prompt, user_text, cfg):
     try:
         with urllib.request.urlopen(req, timeout=300) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        # HTTPError is a subclass of URLError, so it must be caught first — e.g.
+        # a 404 when the named model has not been pulled.
+        detail = exc.read().decode("utf-8", "replace")[:400]
+        raise BackendError(f"Ollama returned an error ({exc.code}).\n\n{detail}")
     except urllib.error.URLError as exc:
         raise BackendError(
             "Could not reach Ollama at localhost:11434. Is it running? "
@@ -440,11 +468,11 @@ def restore_placeholders(text, mapping):
                 "model appears to have dropped it. Re-run, or paste it back in "
                 "by hand.")
             continue
-        text = text.replace(sentinel, original, 1)
+        text = text.replace(sentinel, original)
         if count > 1:
             warnings.append(
-                f"The placeholder {original} appeared more than once in the "
-                "revision; only the first occurrence was restored.")
+                f"The placeholder {original} appeared {count} times in the "
+                "revision; all occurrences were restored.")
     return text, warnings
 
 
@@ -538,6 +566,7 @@ class Scriptorium(ctk.CTk):
         self.undo_stack = []
         self.last_result = None
         self.busy = False
+        self._processing_source = ""  # exact text last sent for processing
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
@@ -705,12 +734,17 @@ class Scriptorium(ctk.CTk):
     # -- actions ------------------------------------------------------------ #
 
     def process(self):
+        """Send the current text to the backend, guarding against concurrent edits."""
         if self.busy:
             return
-        original = self.original_box.get("1.0", "end-1c").strip()
-        if not original:
+        original = self.original_box.get("1.0", "end-1c")
+        if not original.strip():
             self._refresh_status("nothing to process")
             return
+
+        # Snapshot the exact text sent, so a later result, Accept or Export can
+        # detect whether the box changed while the request was in flight.
+        self._processing_source = original
 
         # Protect placeholders by masking them before the model sees the text;
         # they are restored (and checked) in _on_success.
@@ -753,6 +787,14 @@ class Scriptorium(ctk.CTk):
             result["revised"], warnings = restore_placeholders(
                 result["revised"], ph_map)
 
+        # If the source changed while we were working, this revision is for the
+        # OLDER text — say so rather than pretend it matches what is on screen.
+        if self.original_box.get("1.0", "end-1c") != original:
+            warnings.append(
+                "The original text changed while this was processing, so this "
+                "revision reflects the earlier text. Review it carefully before "
+                "accepting.")
+
         self.last_result = result
         render_diff(self.revised_box, original, result["revised"])
         self._show_ambiguities(list(result.get("ambiguities", [])) + warnings)
@@ -768,9 +810,18 @@ class Scriptorium(ctk.CTk):
         self._refresh_status("error")
         messagebox.showerror("Could not process", message)
 
+    def _revision_is_stale(self):
+        """True if the original box changed since the pending revision was made."""
+        return self.original_box.get("1.0", "end-1c") != self._processing_source
+
     def accept(self):
         """Replace the original with the accepted revision (chains edits)."""
         if not self.last_result:
+            return
+        if self._revision_is_stale() and not messagebox.askyesno(
+                "Revision may be out of date",
+                "The original text changed after this revision was generated. "
+                "Accept it anyway and overwrite the current text?"):
             return
         self.undo_stack.append(self.original_box.get("1.0", "end-1c"))
         self.original_box.delete("1.0", "end")
@@ -797,6 +848,7 @@ class Scriptorium(ctk.CTk):
         if not self.undo_stack:
             self._refresh_status("nothing to undo")
             return
+        self.reject()
         self.original_box.delete("1.0", "end")
         self.original_box.insert("1.0", self.undo_stack.pop())
         self._refresh_status("undo")
@@ -820,11 +872,17 @@ class Scriptorium(ctk.CTk):
             messagebox.showerror("Import failed", str(exc))
             return
         self.undo_stack.append(self.original_box.get("1.0", "end-1c"))
+        self.reject()
         self.original_box.delete("1.0", "end")
         self.original_box.insert("1.0", content)
         self._refresh_status(f"imported {os.path.basename(path)}")
 
     def export_file(self):
+        if self.last_result and self._revision_is_stale() and not messagebox.askyesno(
+                "Revision may be out of date",
+                "The original text changed after this revision was generated. "
+                "Export it anyway?"):
+            return
         text = (self.last_result["revised"] if self.last_result
                 else self.original_box.get("1.0", "end-1c"))
         if not text.strip():
