@@ -33,7 +33,7 @@ Dependencies
     The API call uses only the Python standard library (urllib), so no extra
     HTTP package is required. The Anthropic SDK is not needed.
 
-Author: built with Mark, August 2026. Version 1.3.
+Author: built with Mark, August 2026. Version 1.4.
 """
 
 import os
@@ -55,7 +55,7 @@ import customtkinter as ctk
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "1.3"
+APP_VERSION = "1.4"
 
 # Config lives next to the script by default. Change CONFIG_PATH if you would
 # rather keep it on, say, E:\ with your other project data.
@@ -133,6 +133,7 @@ DEFAULT_CONFIG = {
     "ollama_model": DEFAULT_OLLAMA_MODEL,
     "privacy_ack": False,            # whether the cloud-privacy notice was shown
     "protect_placeholders": True,    # mask [Name], {{Date}} etc. during editing
+    "check_letter_conventions": True,  # advisory salutation/sign-off check
 }
 
 
@@ -391,22 +392,33 @@ def _tokenise(text):
     return re.findall(r"\w+|[^\w\s]|\s+", text, flags=re.UNICODE)
 
 
-def render_diff(text_widget, original, revised):
-    """Insert `revised` into a tk.Text, tagging words that are new or changed."""
+def render_diff(text_widget, original, revised, inline=False):
+    """Insert `revised` into a tk.Text, highlighting the changes.
+
+    Clean view (inline=False): show only the revised text, with inserted or
+    replaced words tagged 'changed' (green). Inline view (inline=True): also
+    show the deleted or replaced original words, struck through in red, so it
+    is clear what was removed. Either way the accepted/exported text is always
+    the clean revision — the strikethrough is a display aid only.
+    """
     text_widget.configure(state="normal")
     text_widget.delete("1.0", "end")
 
     a, b = _tokenise(original), _tokenise(revised)
     matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
 
-    for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
-        chunk = "".join(b[j1:j2])
-        if not chunk:
-            continue
-        if tag in ("insert", "replace"):
-            text_widget.insert("end", chunk, "changed")
-        else:  # "equal" (deletions produce no text in the revised pane)
-            text_widget.insert("end", chunk)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            text_widget.insert("end", "".join(b[j1:j2]))
+        elif tag == "insert":
+            text_widget.insert("end", "".join(b[j1:j2]), "changed")
+        elif tag == "delete":
+            if inline:
+                text_widget.insert("end", "".join(a[i1:i2]), "deleted")
+        elif tag == "replace":
+            if inline:
+                text_widget.insert("end", "".join(a[i1:i2]), "deleted")
+            text_widget.insert("end", "".join(b[j1:j2]), "changed")
 
     text_widget.configure(state="disabled")
 
@@ -477,6 +489,63 @@ def restore_placeholders(text, mapping):
 
 
 # --------------------------------------------------------------------------- #
+#  British letter conventions (advisory only)
+# --------------------------------------------------------------------------- #
+# A light, non-destructive check. If a letter opens with an impersonal or a
+# named salutation, the sign-off should match British convention (faithfully
+# vs sincerely). We flag only a clear, present mismatch — never rewrite — and
+# stay silent on anything that is not obviously a formal letter (match reports,
+# notes, informal messages), so it never nags in the wrong context.
+
+_SALUTATION_RE = re.compile(r"^\s*Dear\b", re.IGNORECASE)
+_IMPERSONAL_RE = re.compile(
+    r"^\s*Dear\s+(Sir\s+or\s+Madam|Sir\s*/\s*Madam|Sirs|Sir|Madam)\s*,?\s*$",
+    re.IGNORECASE)
+_INFORMAL_RE = re.compile(
+    r"^\s*Dear\s+(all|everyone|team|friends|colleagues|both)\b", re.IGNORECASE)
+_FAITHFULLY_RE = re.compile(r"\bYours\s+faithfully\b", re.IGNORECASE)
+_SINCERELY_RE = re.compile(r"\bYours\s+sincerely\b", re.IGNORECASE)
+
+
+def audit_letter_conventions(text):
+    """Advisory check on British salutation/sign-off pairing.
+
+    Returns a single short advisory string if the opening and closing clearly
+    clash with convention, otherwise None. Never modifies the text. Silent
+    unless the text both opens with 'Dear ...' and contains a 'Yours ...'
+    sign-off, so non-letters are left entirely alone.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return None
+    first_line = stripped.splitlines()[0]
+    if not _SALUTATION_RE.match(first_line):
+        return None
+
+    has_faithfully = bool(_FAITHFULLY_RE.search(text))
+    has_sincerely = bool(_SINCERELY_RE.search(text))
+    if not (has_faithfully or has_sincerely):
+        return None
+
+    if _IMPERSONAL_RE.match(first_line):
+        if has_sincerely and not has_faithfully:
+            return ("British letter convention: an impersonal opening such as "
+                    "'Dear Sir or Madam' conventionally closes with 'Yours "
+                    "faithfully', not 'Yours sincerely'.")
+        return None
+
+    if _INFORMAL_RE.match(first_line):
+        return None
+
+    # Otherwise a named recipient ('Dear Mr Smith', 'Dear Jane').
+    if has_faithfully and not has_sincerely:
+        return ("British letter convention: a named recipient such as 'Dear Mr "
+                "Smith' conventionally closes with 'Yours sincerely', not 'Yours "
+                "faithfully'.")
+    return None
+
+
+# --------------------------------------------------------------------------- #
 #  Settings dialog
 # --------------------------------------------------------------------------- #
 
@@ -487,7 +556,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self.on_save = on_save
 
         self.title("Settings")
-        self.geometry("520x500")
+        self.geometry("520x560")
         self.resizable(False, False)
         self.grab_set()  # modal
 
@@ -530,6 +599,13 @@ class SettingsDialog(ctk.CTkToplevel):
             text="Protect placeholders — mask [Name], {{Date}}, {amount}, "
                  "<Date> while editing").pack(anchor="w", padx=16, pady=(16, 0))
 
+        self.letters_var = tk.BooleanVar(
+            value=cfg.get("check_letter_conventions", True))
+        ctk.CTkCheckBox(
+            self, variable=self.letters_var,
+            text="Check British letter conventions — flag salutation / "
+                 "sign-off mismatches (advisory)").pack(anchor="w", padx=16, pady=(10, 0))
+
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
         btn_row.pack(fill="x", padx=16, pady=18, side="bottom")
         ctk.CTkButton(btn_row, text="Cancel", width=100, fg_color="gray30",
@@ -550,6 +626,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self.cfg["anthropic_model"] = self.model_var.get()
         self.cfg["ollama_model"] = self.ollama_entry.get().strip() or DEFAULT_OLLAMA_MODEL
         self.cfg["protect_placeholders"] = bool(self.protect_var.get())
+        self.cfg["check_letter_conventions"] = bool(self.letters_var.get())
         save_config(self.cfg)
         self.on_save()
         self.destroy()
@@ -627,9 +704,14 @@ class Scriptorium(ctk.CTk):
         ctk.CTkLabel(panes, text="Original", anchor="w",
                      font=ctk.CTkFont(weight="bold")
                      ).grid(row=0, column=0, sticky="w", padx=4)
-        ctk.CTkLabel(panes, text="Suggested revision  (changes highlighted)",
-                     anchor="w", font=ctk.CTkFont(weight="bold")
-                     ).grid(row=0, column=1, sticky="w", padx=4)
+        rev_header = ctk.CTkFrame(panes, fg_color="transparent")
+        rev_header.grid(row=0, column=1, sticky="ew", padx=4)
+        ctk.CTkLabel(rev_header, text="Suggested revision", anchor="w",
+                     font=ctk.CTkFont(weight="bold")).pack(side="left")
+        self.diff_view_var = ctk.StringVar(value="Clean")
+        ctk.CTkSegmentedButton(
+            rev_header, values=["Clean", "Inline"], variable=self.diff_view_var,
+            command=self._on_diff_view_change, width=160).pack(side="right")
 
         # Original: editable CTk textbox.
         self.original_box = ctk.CTkTextbox(panes, wrap="word",
@@ -652,6 +734,7 @@ class Scriptorium(ctk.CTk):
         scroll.grid(row=0, column=1, sticky="ns")
         self.revised_box.configure(yscrollcommand=scroll.set)
         self.revised_box.tag_config("changed", foreground="#4ec9b0")
+        self.revised_box.tag_config("deleted", foreground="#e06c75", overstrike=1)
 
         # Ambiguity strip (hidden until there is something to show).
         self.ambiguity_box = ctk.CTkTextbox(self, height=64, wrap="word",
@@ -795,8 +878,15 @@ class Scriptorium(ctk.CTk):
                 "revision reflects the earlier text. Review it carefully before "
                 "accepting.")
 
+        # Advisory-only British letter check (never rewrites the text).
+        if self.cfg.get("check_letter_conventions", True):
+            advisory = audit_letter_conventions(result["revised"])
+            if advisory:
+                warnings.append(advisory)
+
         self.last_result = result
-        render_diff(self.revised_box, original, result["revised"])
+        render_diff(self.revised_box, original, result["revised"],
+                    inline=(self.diff_view_var.get() == "Inline"))
         self._show_ambiguities(list(result.get("ambiguities", [])) + warnings)
 
         note = result.get("note", "")
@@ -813,6 +903,13 @@ class Scriptorium(ctk.CTk):
     def _revision_is_stale(self):
         """True if the original box changed since the pending revision was made."""
         return self.original_box.get("1.0", "end-1c") != self._processing_source
+
+    def _on_diff_view_change(self, _value=None):
+        """Re-render the current revision when the Clean/Inline toggle changes."""
+        if self.last_result:
+            render_diff(self.revised_box, self._processing_source,
+                        self.last_result["revised"],
+                        inline=(self.diff_view_var.get() == "Inline"))
 
     def accept(self):
         """Replace the original with the accepted revision (chains edits)."""

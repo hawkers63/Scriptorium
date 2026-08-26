@@ -28,10 +28,14 @@ Built in Python with a native-style CustomTkinter interface.
   afterwards, so they are never reworded; if the model drops one, you are
   warned. Toggle it in Settings.
 - **Side-by-side diff** — the revision sits beside the original with changed
-  words highlighted.
+  words highlighted, with a Clean / Inline toggle; the inline view also shows
+  deleted words struck through in red.
 - **Review controls** — Accept, Reject, Copy, Undo, plus Import and Export.
 - **British English throughout** — `organise`, `colour`, `licence`/`license`,
   `-ise` endings, and so on.
+- **British letter conventions (advisory)** — flags when a salutation and
+  sign-off do not match UK convention (impersonal → ‘Yours faithfully’, named
+  → ‘Yours sincerely’), without ever rewriting your text. Toggle in Settings.
 - **Meaning-preservation safeguards** — names, numbers, quotations, URLs and
   technical terms are left untouched, and genuine ambiguities are flagged
   rather than silently resolved.
@@ -96,8 +100,6 @@ fallback.
 ## Roadmap
 
 - `.docx` import/export via `python-docx`.
-- British letter conventions (salutation and sign-off normalisation).
-- Inline deletion display in the diff view.
 - PyInstaller packaging into a standalone `.exe`.
 
 ---

@@ -4,5 +4,6 @@
   "anthropic_model": "claude-sonnet-4-6",
   "ollama_model": "llama3.1:8b",
   "privacy_ack": false,
-  "protect_placeholders": true
+  "protect_placeholders": true,
+  "check_letter_conventions": true
 }
