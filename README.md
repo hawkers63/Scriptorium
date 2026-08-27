@@ -92,8 +92,13 @@ fallback.
 
 1. Install [Ollama](https://ollama.com) and pull a model, for example
    `ollama pull llama3.1:8b`.
-2. In Settings, switch the backend to **ollama** and name your model.
+2. In Settings, switch the backend to **ollama**, then either type the model
+   tag or press **Detect** to list the models Ollama currently has installed.
 3. With Ollama running, all processing stays on your machine.
+
+To keep the (large) model files on another drive, set the `OLLAMA_MODELS`
+environment variable to that folder (for example `D:\Ollama_Models`) before
+starting Ollama.
 
 ---
 

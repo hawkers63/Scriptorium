@@ -33,7 +33,7 @@ Dependencies
     The API call uses only the Python standard library (urllib), so no extra
     HTTP package is required. The Anthropic SDK is not needed.
 
-Author: built with Mark, August 2026. Version 1.4.
+Author: built with Mark, August 2026. Version 1.7.
 """
 
 import os
@@ -55,7 +55,7 @@ import customtkinter as ctk
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "1.4"
+APP_VERSION = "1.7"
 
 # Config lives next to the script by default. Change CONFIG_PATH if you would
 # rather keep it on, say, E:\ with your other project data.
@@ -77,6 +77,7 @@ ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
+OLLAMA_TAGS_URL = "http://localhost:11434/api/tags"
 DEFAULT_OLLAMA_MODEL = "llama3.1:8b"
 
 MODES = ["Paraphrase", "Correct", "Clarify"]
@@ -138,19 +139,46 @@ DEFAULT_CONFIG = {
 
 
 def load_config():
+    """Load scriptorium_config.json, falling back to DEFAULT_CONFIG.
+
+    A missing file is normal (first run). A file that exists but cannot be
+    parsed, or that is valid JSON but not an object, sets load_config.unreadable
+    True so callers can refuse to overwrite it — that is how a hand-edited API
+    key in a malformed file would otherwise be silently lost.
+    """
+    load_config.unreadable = False
     cfg = dict(DEFAULT_CONFIG)
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
-            cfg.update(json.load(fh))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        pass
+            loaded = json.load(fh)
+    except FileNotFoundError:
+        return cfg
+    except (json.JSONDecodeError, OSError) as exc:
+        load_config.unreadable = True
+        print(f"[warning] could not read config: {exc}")
+        return cfg
+    if not isinstance(loaded, dict):
+        load_config.unreadable = True
+        print("[warning] config file is not a JSON object; using defaults.")
+        return cfg
+    cfg.update(loaded)
     return cfg
 
 
-def save_config(cfg):
+def save_config(cfg, *, force=False):
+    """Write cfg to disk, refusing to clobber an unreadable file unless force.
+
+    The Settings dialog passes force=True so the user can deliberately recover
+    from a damaged file; automatic saves (such as the privacy-notice flag) do
+    not, so a broken file — and any API key in it — is never silently replaced.
+    """
+    if getattr(load_config, "unreadable", False) and not force:
+        print("[warning] refusing to overwrite an unreadable config file")
+        return
     try:
         with open(CONFIG_PATH, "w", encoding="utf-8") as fh:
             json.dump(cfg, fh, indent=2)
+        load_config.unreadable = False
     except OSError as exc:
         print(f"[warning] could not save config: {exc}")
 
@@ -255,18 +283,23 @@ def _extract_json(text):
     if text.startswith("```"):
         text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
         text = re.sub(r"\n?```$", "", text).strip()
-    # Fall back to the outermost braces if there is leading/trailing chatter.
-    if not text.startswith("{"):
+    # Parse the reply, tolerating chatter before OR after the JSON object by
+    # falling back to the outermost braces, then reject a body we cannot use.
+    def _loads(candidate):
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            return None
+
+    data = _loads(text)
+    if data is None:
         start, end = text.find("{"), text.rfind("}")
         if start != -1 and end != -1:
-            text = text[start:end + 1]
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError as exc:
+            data = _loads(text[start:end + 1])
+    if data is None:
         raise BackendError(
             "The model did not return valid JSON. Try again, or lower the "
-            f"editing strength.\n\n(Parser detail: {exc})"
-        )
+            "editing strength.")
     if not isinstance(data, dict):
         raise BackendError("The model response was not a JSON object.")
 
@@ -280,6 +313,8 @@ def _extract_json(text):
         raise BackendError("The model response was missing the 'revised' field.")
     elif not isinstance(revised, str):
         revised = str(revised)
+    if not revised.strip():
+        raise BackendError("The model returned an empty revision.")
     data["revised"] = revised
 
     ambiguities = data.get("ambiguities")
@@ -331,6 +366,15 @@ def call_anthropic(system_prompt, user_text, cfg):
         raise BackendError(f"Claude API error {exc.code}.\n\n{detail}")
     except urllib.error.URLError as exc:
         raise BackendError(f"Network error reaching the Claude API: {exc.reason}")
+    except json.JSONDecodeError as exc:
+        raise BackendError(
+            "The Claude API returned a non-JSON body.\n\n"
+            f"(Parser detail: {exc})")
+
+    if payload.get("stop_reason") == "max_tokens":
+        raise BackendError(
+            "Claude stopped because the reply hit the token limit. Try a "
+            "shorter passage, or process the text in sections.")
 
     # Concatenate all text blocks in the response.
     text = "".join(
@@ -381,6 +425,37 @@ def run_backend(system_prompt, user_text, cfg):
     if cfg.get("backend") == "ollama":
         return call_ollama(system_prompt, user_text, cfg)
     return call_anthropic(system_prompt, user_text, cfg)
+
+
+def list_ollama_models(timeout=3):
+    """Return the model tags Ollama has locally, or [] if it cannot be reached.
+
+    Queries Ollama's /api/tags endpoint so Settings can offer exactly what is
+    installed (in whatever directory OLLAMA_MODELS points at) rather than
+    relying on the tag being typed exactly right.
+    """
+    try:
+        req = urllib.request.Request(OLLAMA_TAGS_URL, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, json.JSONDecodeError, OSError, ValueError):
+        return []
+    if not isinstance(payload, dict):
+        return []
+    raw = payload.get("models") or []
+    if not isinstance(raw, list):
+        return []
+    names = []
+    for item in raw:
+        if isinstance(item, dict):
+            name = item.get("name") or item.get("model") or ""
+        elif isinstance(item, str):
+            name = item
+        else:
+            name = ""
+        if name:
+            names.append(name)
+    return sorted(names)
 
 
 # --------------------------------------------------------------------------- #
@@ -439,10 +514,10 @@ _PH_OPEN, _PH_CLOSE = "⟦", "⟧"  # the sentinel brackets
 # deliberately conservative (a single bare word) to avoid grabbing HTML or code
 # such as <div> attributes or <a href="...">.
 _PLACEHOLDER_PATTERNS = [
-    r"\{\{[^{}\n]+\}\}",           # {{Date}}, {{ recipient }}
-    r"\[[^\[\]\n]+\]",            # [Name], [Recipient Name], [Company]
-    r"\{[^{}\n]+\}",               # {amount}
-    r"<[A-Za-z][A-Za-z0-9 _\-]*>",  # <Date>
+    r"\{\{[^{}\n]+\}\}",                   # {{Date}}, {{ recipient }}
+    r"\[[A-Za-z][^\[\]\n]{0,80}\](?!\()",  # [Name], not [1] or [text](url)
+    r"\{[^{}\n]+\}",                       # {amount}
+    r"<[A-Za-z][A-Za-z0-9 _\-]*>",         # <Date>
 ]
 _PLACEHOLDER_RE = re.compile("|".join(_PLACEHOLDER_PATTERNS))
 
@@ -556,7 +631,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self.on_save = on_save
 
         self.title("Settings")
-        self.geometry("520x560")
+        self.geometry("520x620")
         self.resizable(False, False)
         self.grab_set()  # modal
 
@@ -586,11 +661,21 @@ class SettingsDialog(ctk.CTkToplevel):
         ctk.CTkOptionMenu(self, values=ANTHROPIC_MODELS,
                           variable=self.model_var).pack(fill="x", padx=16, pady=(2, 0))
 
-        ctk.CTkLabel(self, text="Local Ollama model (e.g. llama3.1:8b, qwen2.5)"
-                     ).pack(anchor="w", **pad)
-        self.ollama_entry = ctk.CTkEntry(self, width=480)
-        self.ollama_entry.insert(0, cfg.get("ollama_model", DEFAULT_OLLAMA_MODEL))
-        self.ollama_entry.pack(padx=16, pady=(2, 0))
+        ctk.CTkLabel(self, text="Local Ollama model — type a tag, or Detect "
+                     "what Ollama has installed").pack(anchor="w", **pad)
+        ollama_row = ctk.CTkFrame(self, fg_color="transparent")
+        ollama_row.pack(fill="x", padx=16, pady=(2, 0))
+        current_model = cfg.get("ollama_model", DEFAULT_OLLAMA_MODEL)
+        self.ollama_combo = ctk.CTkComboBox(ollama_row, width=360,
+                                            values=[current_model])
+        self.ollama_combo.set(current_model)
+        self.ollama_combo.pack(side="left")
+        self.detect_btn = ctk.CTkButton(ollama_row, text="Detect", width=110,
+                                        command=self._detect_models)
+        self.detect_btn.pack(side="left", padx=(8, 0))
+        self.ollama_status = ctk.CTkLabel(self, text="", text_color="gray60",
+                                          font=ctk.CTkFont(size=11))
+        self.ollama_status.pack(anchor="w", padx=16)
 
         self.protect_var = tk.BooleanVar(
             value=cfg.get("protect_placeholders", True))
@@ -615,19 +700,35 @@ class SettingsDialog(ctk.CTkToplevel):
 
         self._refresh_state()
 
+    def _detect_models(self):
+        """Ask Ollama which models are installed and offer them in the dropdown."""
+        self.ollama_status.configure(text="Detecting…")
+        self.update_idletasks()
+        models = list_ollama_models()
+        if not models:
+            self.ollama_status.configure(
+                text="No response from Ollama at localhost:11434 — is "
+                     "'ollama serve' running?")
+            return
+        current = self.ollama_combo.get().strip()
+        values = models if (current in models or not current) else [current] + models
+        self.ollama_combo.configure(values=values)
+        self.ollama_status.configure(text=f"Found {len(models)} model(s).")
+
     def _refresh_state(self):
         cloud = self.backend_var.get() == "anthropic"
         self.key_entry.configure(state="normal" if cloud else "disabled")
-        self.ollama_entry.configure(state="disabled" if cloud else "normal")
+        self.ollama_combo.configure(state="disabled" if cloud else "normal")
+        self.detect_btn.configure(state="disabled" if cloud else "normal")
 
     def _save(self):
         self.cfg["backend"] = self.backend_var.get()
         self.cfg["anthropic_api_key"] = self.key_entry.get().strip()
         self.cfg["anthropic_model"] = self.model_var.get()
-        self.cfg["ollama_model"] = self.ollama_entry.get().strip() or DEFAULT_OLLAMA_MODEL
+        self.cfg["ollama_model"] = self.ollama_combo.get().strip() or DEFAULT_OLLAMA_MODEL
         self.cfg["protect_placeholders"] = bool(self.protect_var.get())
         self.cfg["check_letter_conventions"] = bool(self.letters_var.get())
-        save_config(self.cfg)
+        save_config(self.cfg, force=True)
         self.on_save()
         self.destroy()
 
@@ -643,7 +744,8 @@ class Scriptorium(ctk.CTk):
         self.undo_stack = []
         self.last_result = None
         self.busy = False
-        self._processing_source = ""  # exact text last sent for processing
+        self._request_id = 0          # bumped on every Process and every cancel
+        self._result_source = ""      # the text last_result was generated from
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
@@ -660,6 +762,7 @@ class Scriptorium(ctk.CTk):
         self.bind("<Control-Return>", lambda _e: self.process())
         self.bind("<Control-i>", lambda _e: self.import_file())
         self.bind("<Control-s>", lambda _e: self.export_file())
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._maybe_show_privacy_notice()
         self._refresh_status()
@@ -816,18 +919,38 @@ class Scriptorium(ctk.CTk):
 
     # -- actions ------------------------------------------------------------ #
 
+    def _claim_request(self, request_id):
+        """Return True if this callback still owns the UI.
+
+        Late results from a cancelled or superseded request are dropped. Busy is
+        only cleared when this request is still the current one; cancellers
+        (Reject, window close) clear busy themselves so Process cannot stick on
+        'Working…'.
+        """
+        if not self.winfo_exists():
+            return False
+        if request_id != self._request_id:
+            return False
+        self.busy = False
+        self.process_btn.configure(text="Process  (Ctrl+Enter)", state="normal")
+        return True
+
+    def _invalidate_inflight(self):
+        """Drop any in-flight Process callback and re-enable the button."""
+        self._request_id += 1
+        if self.busy:
+            self.busy = False
+            self.process_btn.configure(text="Process  (Ctrl+Enter)",
+                                       state="normal")
+
     def process(self):
-        """Send the current text to the backend, guarding against concurrent edits."""
+        """Send the current text to the backend on a worker thread."""
         if self.busy:
             return
         original = self.original_box.get("1.0", "end-1c")
         if not original.strip():
             self._refresh_status("nothing to process")
             return
-
-        # Snapshot the exact text sent, so a later result, Accept or Export can
-        # detect whether the box changed while the request was in flight.
-        self._processing_source = original
 
         # Protect placeholders by masking them before the model sees the text;
         # they are restored (and checked) in _on_success.
@@ -836,6 +959,9 @@ class Scriptorium(ctk.CTk):
         else:
             masked, ph_map = original, []
 
+        # Stamp this request so a superseded or cancelled result can be ignored.
+        self._request_id += 1
+        request_id = self._request_id
         self.busy = True
         self.process_btn.configure(text="Working…", state="disabled")
         busy_note = "contacting the model…"
@@ -847,21 +973,24 @@ class Scriptorium(ctk.CTk):
             self.mode_var.get(), self.strength_var.get(),
             self.tone_var.get(), self.role_var.get(),
             protect_tokens=bool(ph_map))
+        cfg_snapshot = dict(self.cfg)  # Settings changes mid-request affect the next one only
 
         def worker():
             try:
-                result = run_backend(system_prompt, masked, self.cfg)
-                self.after(0, self._on_success, original, ph_map, result)
+                result = run_backend(system_prompt, masked, cfg_snapshot)
+                self.after(0, self._on_success,
+                           request_id, original, ph_map, result)
             except BackendError as exc:
-                self.after(0, self._on_error, str(exc))
+                self.after(0, self._on_error, request_id, str(exc))
             except Exception as exc:  # noqa: BLE001 — surface anything unexpected
-                self.after(0, self._on_error, f"Unexpected error: {exc}")
+                self.after(0, self._on_error,
+                           request_id, f"Unexpected error: {exc}")
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_success(self, original, ph_map, result):
-        self.busy = False
-        self.process_btn.configure(text="Process  (Ctrl+Enter)", state="normal")
+    def _on_success(self, request_id, original, ph_map, result):
+        if not self._claim_request(request_id):
+            return
 
         # Restore protected placeholders before anything is shown, stored or
         # exported, so the diff and the accepted text carry the real values.
@@ -885,6 +1014,7 @@ class Scriptorium(ctk.CTk):
                 warnings.append(advisory)
 
         self.last_result = result
+        self._result_source = original
         render_diff(self.revised_box, original, result["revised"],
                     inline=(self.diff_view_var.get() == "Inline"))
         self._show_ambiguities(list(result.get("ambiguities", [])) + warnings)
@@ -894,20 +1024,20 @@ class Scriptorium(ctk.CTk):
             note = (note + "  " if note else "") + f"{len(ph_map)} placeholder(s) preserved"
         self._refresh_status(note or "done")
 
-    def _on_error(self, message):
-        self.busy = False
-        self.process_btn.configure(text="Process  (Ctrl+Enter)", state="normal")
+    def _on_error(self, request_id, message):
+        if not self._claim_request(request_id):
+            return
         self._refresh_status("error")
         messagebox.showerror("Could not process", message)
 
     def _revision_is_stale(self):
-        """True if the original box changed since the pending revision was made."""
-        return self.original_box.get("1.0", "end-1c") != self._processing_source
+        """True if the original box no longer matches the live revision."""
+        return self.original_box.get("1.0", "end-1c") != self._result_source
 
     def _on_diff_view_change(self, _value=None):
         """Re-render the current revision when the Clean/Inline toggle changes."""
         if self.last_result:
-            render_diff(self.revised_box, self._processing_source,
+            render_diff(self.revised_box, self._result_source,
                         self.last_result["revised"],
                         inline=(self.diff_view_var.get() == "Inline"))
 
@@ -927,15 +1057,23 @@ class Scriptorium(ctk.CTk):
         self._refresh_status("revision accepted")
 
     def reject(self):
+        """Clear the revision pane and drop any in-flight request."""
+        self._invalidate_inflight()
         self.revised_box.configure(state="normal")
         self.revised_box.delete("1.0", "end")
         self.revised_box.configure(state="disabled")
         self.last_result = None
+        self._result_source = ""
         self._show_ambiguities([])
         self._refresh_status("revision cleared")
 
     def copy_revision(self):
         if not self.last_result:
+            return
+        if self._revision_is_stale() and not messagebox.askyesno(
+                "Revision may be out of date",
+                "The original text changed after this revision was generated. "
+                "Copy it anyway?"):
             return
         self.clipboard_clear()
         self.clipboard_append(self.last_result["revised"])
@@ -965,6 +1103,16 @@ class Scriptorium(ctk.CTk):
         try:
             with open(path, "r", encoding="utf-8") as fh:
                 content = fh.read()
+        except UnicodeDecodeError:
+            try:
+                with open(path, "r", encoding="utf-8-sig") as fh:
+                    content = fh.read()
+            except (OSError, UnicodeDecodeError) as exc:
+                messagebox.showerror(
+                    "Import failed",
+                    "The file is not valid UTF-8. Save it as UTF-8 and try "
+                    f"again.\n\n({exc})")
+                return
         except OSError as exc:
             messagebox.showerror("Import failed", str(exc))
             return
@@ -1003,6 +1151,11 @@ class Scriptorium(ctk.CTk):
     def _after_settings(self):
         self._maybe_show_privacy_notice()
         self._refresh_status("settings saved")
+
+    def _on_close(self):
+        """Invalidate in-flight callbacks before destroying the window."""
+        self._invalidate_inflight()
+        self.destroy()
 
 
 def main():
