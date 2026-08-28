@@ -33,7 +33,7 @@ Dependencies
     The API call uses only the Python standard library (urllib), so no extra
     HTTP package is required. The Anthropic SDK is not needed.
 
-Author: built with Mark, August 2026. Version 1.7.
+Author: built with Mark, August 2026. Version 1.8.
 """
 
 import os
@@ -55,7 +55,7 @@ import customtkinter as ctk
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "1.7"
+APP_VERSION = "1.8"
 
 # Config lives next to the script by default. Change CONFIG_PATH if you would
 # rather keep it on, say, E:\ with your other project data.
@@ -135,6 +135,11 @@ DEFAULT_CONFIG = {
     "privacy_ack": False,            # whether the cloud-privacy notice was shown
     "protect_placeholders": True,    # mask [Name], {{Date}} etc. during editing
     "check_letter_conventions": True,  # advisory salutation/sign-off check
+    "default_mode": "Paraphrase",      # toolbar knobs applied at startup
+    "default_strength": "Substantial",
+    "default_role": "Academic",
+    "default_tone": "Concise",
+    "default_diff_view": "Inline",
 }
 
 
@@ -774,22 +779,26 @@ class Scriptorium(ctk.CTk):
         bar.pack(fill="x", side="top")
 
         ctk.CTkLabel(bar, text="Mode").grid(row=0, column=0, padx=(14, 4), pady=10)
-        self.mode_var = ctk.StringVar(value="Correct")
+        self.mode_var = ctk.StringVar(
+            value=self.cfg.get("default_mode", "Paraphrase"))
         ctk.CTkSegmentedButton(bar, values=MODES, variable=self.mode_var
                                ).grid(row=0, column=1, padx=4, pady=10)
 
         ctk.CTkLabel(bar, text="Strength").grid(row=0, column=2, padx=(20, 4))
-        self.strength_var = ctk.StringVar(value="Standard")
+        self.strength_var = ctk.StringVar(
+            value=self.cfg.get("default_strength", "Substantial"))
         ctk.CTkSegmentedButton(bar, values=STRENGTHS, variable=self.strength_var
                                ).grid(row=0, column=3, padx=4)
 
         ctk.CTkLabel(bar, text="Role").grid(row=0, column=4, padx=(20, 4))
-        self.role_var = ctk.StringVar(value="(none)")
+        self.role_var = ctk.StringVar(
+            value=self.cfg.get("default_role", "Academic"))
         ctk.CTkOptionMenu(bar, values=ROLES, variable=self.role_var, width=170
                           ).grid(row=0, column=5, padx=4)
 
         ctk.CTkLabel(bar, text="Tone").grid(row=0, column=6, padx=(20, 4))
-        self.tone_var = ctk.StringVar(value="(keep original)")
+        self.tone_var = ctk.StringVar(
+            value=self.cfg.get("default_tone", "Concise"))
         ctk.CTkOptionMenu(bar, values=TONES, variable=self.tone_var, width=150
                           ).grid(row=0, column=7, padx=4)
 
@@ -811,7 +820,8 @@ class Scriptorium(ctk.CTk):
         rev_header.grid(row=0, column=1, sticky="ew", padx=4)
         ctk.CTkLabel(rev_header, text="Suggested revision", anchor="w",
                      font=ctk.CTkFont(weight="bold")).pack(side="left")
-        self.diff_view_var = ctk.StringVar(value="Clean")
+        self.diff_view_var = ctk.StringVar(
+            value=self.cfg.get("default_diff_view", "Inline"))
         ctk.CTkSegmentedButton(
             rev_header, values=["Clean", "Inline"], variable=self.diff_view_var,
             command=self._on_diff_view_change, width=160).pack(side="right")
@@ -869,6 +879,10 @@ class Scriptorium(ctk.CTk):
                       command=self.import_file).pack(side="right", padx=4)
         ctk.CTkButton(bar, text="Clear", width=80, fg_color="gray30",
                       command=self.clear_all).pack(side="right", padx=4)
+        ctk.CTkButton(bar, text="Copy", width=80, fg_color="gray30",
+                      command=self.copy_original).pack(side="right", padx=4)
+        ctk.CTkButton(bar, text="Paste", width=80, fg_color="gray30",
+                      command=self.paste_original).pack(side="right", padx=4)
 
     def _build_statusbar(self):
         self.status = ctk.CTkLabel(self, text="", anchor="w",
@@ -1078,6 +1092,39 @@ class Scriptorium(ctk.CTk):
         self.clipboard_clear()
         self.clipboard_append(self.last_result["revised"])
         self._refresh_status("revision copied to clipboard")
+
+    def copy_original(self):
+        """Copy the whole Original pane to the clipboard (no revision involved)."""
+        text = self.original_box.get("1.0", "end-1c")
+        if not text:
+            self._refresh_status("nothing to copy")
+            return
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self._refresh_status("original copied to clipboard")
+
+    def paste_original(self):
+        """Insert clipboard text into the Original pane.
+
+        An empty or non-text clipboard is reported rather than raising. The
+        existing content is pushed onto the undo stack first, so Undo restores
+        it; a selection is replaced, otherwise the text lands at the caret.
+        """
+        try:
+            incoming = self.clipboard_get()
+        except tk.TclError:
+            self._refresh_status("clipboard is empty")
+            return
+        if not incoming:
+            self._refresh_status("clipboard is empty")
+            return
+        self.undo_stack.append(self.original_box.get("1.0", "end-1c"))
+        try:
+            self.original_box.delete("sel.first", "sel.last")
+        except tk.TclError:
+            pass  # no selection — insert at the caret
+        self.original_box.insert("insert", incoming)
+        self._refresh_status("pasted from clipboard")
 
     def undo(self):
         if not self.undo_stack:

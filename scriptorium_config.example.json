@@ -5,5 +5,10 @@
   "ollama_model": "llama3.1:8b",
   "privacy_ack": false,
   "protect_placeholders": true,
-  "check_letter_conventions": true
+  "check_letter_conventions": true,
+  "default_mode": "Paraphrase",
+  "default_strength": "Substantial",
+  "default_role": "Academic",
+  "default_tone": "Concise",
+  "default_diff_view": "Inline"
 }
