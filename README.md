@@ -31,6 +31,8 @@ Built in Python with a native-style CustomTkinter interface.
   words highlighted, with a Clean / Inline toggle; the inline view also shows
   deleted words struck through in red.
 - **Review controls** — Accept, Reject, Copy, Undo, plus Import and Export.
+- **Import and export** — plain text and Markdown always; Word `.docx` files
+  too when the optional `python-docx` package is installed.
 - **British English throughout** — `organise`, `colour`, `licence`/`license`,
   `-ise` endings, and so on.
 - **British letter conventions (advisory)** — flags when a salutation and
@@ -48,11 +50,14 @@ Built in Python with a native-style CustomTkinter interface.
 ## Requirements
 
 - Windows 11 with Python 3.10 or newer.
-- One dependency:
+- One dependency (plus one optional):
 
   ```
   pip install -r requirements.txt
   ```
+
+  `customtkinter` is required; `python-docx` is optional and only needed for
+  importing from or exporting to Word `.docx` files.
 
 ---
 
@@ -104,7 +109,6 @@ starting Ollama.
 
 ## Roadmap
 
-- `.docx` import/export via `python-docx`.
 - PyInstaller packaging into a standalone `.exe`.
 
 ---

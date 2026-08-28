@@ -33,7 +33,10 @@ Dependencies
     The API call uses only the Python standard library (urllib), so no extra
     HTTP package is required. The Anthropic SDK is not needed.
 
-Author: built with Mark, August 2026. Version 1.8.
+    Optional: install python-docx to import from and export to Word (.docx)
+    files (`pip install python-docx`). Plain text and Markdown work without it.
+
+Author: built with Mark, August 2026. Version 1.9.
 """
 
 import os
@@ -55,7 +58,7 @@ import customtkinter as ctk
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "1.8"
+APP_VERSION = "1.9"
 
 # Config lives next to the script by default. Change CONFIG_PATH if you would
 # rather keep it on, say, E:\ with your other project data.
@@ -461,6 +464,34 @@ def list_ollama_models(timeout=3):
         if name:
             names.append(name)
     return sorted(names)
+
+
+# --------------------------------------------------------------------------- #
+#  Word (.docx) document I/O — optional, needs python-docx
+# --------------------------------------------------------------------------- #
+# Import/export fall back to plain text when python-docx is absent; these two
+# helpers are only reached for .docx paths, and the import is done lazily so the
+# app still runs without the package. Formatting is not preserved — Scriptorium
+# works in plain text — so a document round-trips as its paragraph text.
+
+def read_docx(path):
+    """Return the paragraph text of a .docx file joined by newlines.
+
+    Raises ImportError if python-docx is not installed (the caller turns that
+    into a friendly 'pip install python-docx' message).
+    """
+    from docx import Document  # optional dependency, imported on demand
+    document = Document(path)
+    return "\n".join(p.text for p in document.paragraphs)
+
+
+def write_docx(path, text):
+    """Write text to a .docx file, one paragraph per line (blank lines kept)."""
+    from docx import Document  # optional dependency, imported on demand
+    document = Document()
+    for line in text.split("\n"):
+        document.add_paragraph(line)
+    document.save(path)
 
 
 # --------------------------------------------------------------------------- #
@@ -1144,25 +1175,40 @@ class Scriptorium(ctk.CTk):
     def import_file(self):
         path = filedialog.askopenfilename(
             title="Import text",
-            filetypes=[("Text and Markdown", "*.txt *.md"), ("All files", "*.*")])
+            filetypes=[("Text, Markdown and Word", "*.txt *.md *.docx"),
+                       ("All files", "*.*")])
         if not path:
             return
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                content = fh.read()
-        except UnicodeDecodeError:
+        if path.lower().endswith(".docx"):
             try:
-                with open(path, "r", encoding="utf-8-sig") as fh:
-                    content = fh.read()
-            except (OSError, UnicodeDecodeError) as exc:
+                content = read_docx(path)
+            except ImportError:
                 messagebox.showerror(
                     "Import failed",
-                    "The file is not valid UTF-8. Save it as UTF-8 and try "
-                    f"again.\n\n({exc})")
+                    "Reading Word files needs the python-docx package.\n\n"
+                    "Install it with:  pip install python-docx")
                 return
-        except OSError as exc:
-            messagebox.showerror("Import failed", str(exc))
-            return
+            except Exception as exc:  # noqa: BLE001 — bad/locked/corrupt .docx
+                messagebox.showerror("Import failed",
+                                     f"Could not read the Word file.\n\n{exc}")
+                return
+        else:
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    content = fh.read()
+            except UnicodeDecodeError:
+                try:
+                    with open(path, "r", encoding="utf-8-sig") as fh:
+                        content = fh.read()
+                except (OSError, UnicodeDecodeError) as exc:
+                    messagebox.showerror(
+                        "Import failed",
+                        "The file is not valid UTF-8. Save it as UTF-8 and try "
+                        f"again.\n\n({exc})")
+                    return
+            except OSError as exc:
+                messagebox.showerror("Import failed", str(exc))
+                return
         self.undo_stack.append(self.original_box.get("1.0", "end-1c"))
         self.reject()
         self.original_box.delete("1.0", "end")
@@ -1181,12 +1227,22 @@ class Scriptorium(ctk.CTk):
             return
         path = filedialog.asksaveasfilename(
             title="Export text", defaultextension=".txt",
-            filetypes=[("Text", "*.txt"), ("Markdown", "*.md")])
+            filetypes=[("Text", "*.txt"), ("Markdown", "*.md"),
+                       ("Word document", "*.docx")])
         if not path:
             return
         try:
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write(text)
+            if path.lower().endswith(".docx"):
+                write_docx(path, text)
+            else:
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+        except ImportError:
+            messagebox.showerror(
+                "Export failed",
+                "Saving Word files needs the python-docx package.\n\n"
+                "Install it with:  pip install python-docx")
+            return
         except OSError as exc:
             messagebox.showerror("Export failed", str(exc))
             return
