@@ -36,10 +36,11 @@ Dependencies
     Optional: install python-docx to import from and export to Word (.docx)
     files (`pip install python-docx`). Plain text and Markdown work without it.
 
-Author: built with Mark, August 2026. Version 1.9.
+Author: built with Mark, August 2026. Version 2.0.
 """
 
 import os
+import sys
 import re
 import json
 import threading
@@ -58,12 +59,28 @@ import customtkinter as ctk
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "1.9"
+APP_VERSION = "2.0"
 
-# Config lives next to the script by default. Change CONFIG_PATH if you would
-# rather keep it on, say, E:\ with your other project data.
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           "scriptorium_config.json")
+def _config_dir():
+    """Return the folder that holds scriptorium_config.json.
+
+    Running from source: next to this script, unchanged, so an existing config
+    keeps working. Running as a packaged .exe (PyInstaller sets sys.frozen): a
+    per-user Scriptorium folder under %LOCALAPPDATA%, because a frozen app's own
+    directory can be temporary (a one-file build) or read-only.
+    """
+    if getattr(sys, "frozen", False):
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        target = os.path.join(base, "Scriptorium")
+        try:
+            os.makedirs(target, exist_ok=True)
+            return target
+        except OSError:
+            return os.path.expanduser("~")
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+CONFIG_PATH = os.path.join(_config_dir(), "scriptorium_config.json")
 
 # Current Claude model IDs (verified against the Claude Platform docs).
 # Sonnet 4.6 is a strong, economical default for editing work; Haiku is the
@@ -174,21 +191,32 @@ def load_config():
 
 
 def save_config(cfg, *, force=False):
-    """Write cfg to disk, refusing to clobber an unreadable file unless force.
+    """Persist configuration atomically, without clobbering a bad file.
 
+    The JSON is written to a sibling temporary file and flushed to disk, then
+    os.replace() swaps it into place in a single atomic step, so an interrupted
+    write can never leave a half-written config (and lose the API key inside).
     The Settings dialog passes force=True so the user can deliberately recover
     from a damaged file; automatic saves (such as the privacy-notice flag) do
-    not, so a broken file — and any API key in it — is never silently replaced.
+    not, so a broken file is never silently replaced.
     """
     if getattr(load_config, "unreadable", False) and not force:
         print("[warning] refusing to overwrite an unreadable config file")
         return
+    tmp_path = f"{CONFIG_PATH}.tmp"
     try:
-        with open(CONFIG_PATH, "w", encoding="utf-8") as fh:
+        with open(tmp_path, "w", encoding="utf-8") as fh:
             json.dump(cfg, fh, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, CONFIG_PATH)
         load_config.unreadable = False
-    except OSError as exc:
+    except (OSError, TypeError, ValueError) as exc:
         print(f"[warning] could not save config: {exc}")
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
 
 
 # --------------------------------------------------------------------------- #
@@ -890,8 +918,8 @@ class Scriptorium(ctk.CTk):
         bar = ctk.CTkFrame(self, fg_color="transparent")
         bar.pack(fill="x", padx=12, pady=8)
 
-        self.process_btn = ctk.CTkButton(bar, text="Process  (Ctrl+Enter)",
-                                         width=170, command=self.process)
+        self.process_btn = ctk.CTkButton(bar, text="Process", width=100,
+                                         command=self.process)
         self.process_btn.pack(side="left")
 
         ctk.CTkButton(bar, text="Accept →", width=110, fg_color="#2f7d4f",
@@ -977,7 +1005,7 @@ class Scriptorium(ctk.CTk):
         if request_id != self._request_id:
             return False
         self.busy = False
-        self.process_btn.configure(text="Process  (Ctrl+Enter)", state="normal")
+        self.process_btn.configure(text="Process", state="normal")
         return True
 
     def _invalidate_inflight(self):
@@ -985,8 +1013,7 @@ class Scriptorium(ctk.CTk):
         self._request_id += 1
         if self.busy:
             self.busy = False
-            self.process_btn.configure(text="Process  (Ctrl+Enter)",
-                                       state="normal")
+            self.process_btn.configure(text="Process", state="normal")
 
     def process(self):
         """Send the current text to the backend on a worker thread."""

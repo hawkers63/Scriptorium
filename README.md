@@ -50,14 +50,18 @@ Built in Python with a native-style CustomTkinter interface.
 ## Requirements
 
 - Windows 11 with Python 3.10 or newer.
-- One dependency (plus one optional):
+- One dependency:
 
   ```
   pip install -r requirements.txt
   ```
 
-  `customtkinter` is required; `python-docx` is optional and only needed for
-  importing from or exporting to Word `.docx` files.
+  That installs `customtkinter`, the only required package. For Word `.docx`
+  import/export, also install the optional extra:
+
+  ```
+  pip install python-docx
+  ```
 
 ---
 
@@ -107,9 +111,33 @@ starting Ollama.
 
 ---
 
+## Building a standalone `.exe`
+
+Package Scriptorium into a single Windows executable that needs no separate
+Python install:
+
+```
+pip install pyinstaller
+pyinstaller scriptorium.spec
+```
+
+The build produces `dist\Scriptorium.exe`. The equivalent one-off command,
+without the spec file, is:
+
+```
+pyinstaller --onefile --windowed --collect-all customtkinter --name Scriptorium scriptorium.py
+```
+
+When run as the packaged `.exe`, settings (including your API key) are stored
+under `%LOCALAPPDATA%\Scriptorium` rather than next to the script.
+
+---
+
 ## Roadmap
 
-- PyInstaller packaging into a standalone `.exe`.
+- Further robustness and polish (from ongoing review).
+- Optional minimise-to-tray and start-with-Windows, deferred until it can be
+  tested on a real Windows session.
 
 ---
 
