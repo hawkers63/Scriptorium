@@ -36,7 +36,7 @@ Dependencies
     Optional: install python-docx to import from and export to Word (.docx)
     files (`pip install python-docx`). Plain text and Markdown work without it.
 
-Author: built with Mark, August 2026. Version 2.0.
+Author: built with Mark, August 2026. Version 2.1.
 """
 
 import os
@@ -59,7 +59,7 @@ import customtkinter as ctk
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.0"
+APP_VERSION = "2.1"
 
 def _config_dir():
     """Return the folder that holds scriptorium_config.json.
@@ -163,13 +163,51 @@ DEFAULT_CONFIG = {
 }
 
 
+def normalise_config(cfg):
+    """Return a copy of cfg with constrained settings restored to safe values.
+
+    A hand-edited or stale config file can contain an out-of-range enum (an
+    old default_mode, an unrecognised backend) or a stringy boolean
+    ("false" is truthy under bool()). Left unchecked, that either crashes the
+    worker thread with a KeyError or — for "backend" specifically — makes the
+    status bar and the actual HTTP dispatch disagree about whether text
+    leaves the machine. Free-form fields (the API key, model tags) are left
+    untouched.
+    """
+    clean = dict(cfg)
+    choices = {
+        "backend": ("anthropic", "ollama"),
+        "default_mode": tuple(MODES),
+        "default_strength": tuple(STRENGTHS),
+        "default_role": tuple(ROLES),
+        "default_tone": tuple(TONES),
+        "default_diff_view": ("Clean", "Inline"),
+    }
+    for key, allowed in choices.items():
+        if clean.get(key) not in allowed:
+            clean[key] = DEFAULT_CONFIG[key]
+
+    for key in ("privacy_ack", "protect_placeholders",
+                "check_letter_conventions"):
+        value = clean.get(key, DEFAULT_CONFIG[key])
+        if isinstance(value, str):
+            clean[key] = value.strip().lower() in ("1", "true", "yes", "on")
+        elif not isinstance(value, bool):
+            clean[key] = DEFAULT_CONFIG[key]
+        else:
+            clean[key] = value
+    return clean
+
+
 def load_config():
     """Load scriptorium_config.json, falling back to DEFAULT_CONFIG.
 
     A missing file is normal (first run). A file that exists but cannot be
     parsed, or that is valid JSON but not an object, sets load_config.unreadable
     True so callers can refuse to overwrite it — that is how a hand-edited API
-    key in a malformed file would otherwise be silently lost.
+    key in a malformed file would otherwise be silently lost. Whatever is
+    returned has already been through normalise_config(), so every caller can
+    trust default_mode/backend/etc. are one of the supported values.
     """
     load_config.unreadable = False
     cfg = dict(DEFAULT_CONFIG)
@@ -177,17 +215,17 @@ def load_config():
         with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
             loaded = json.load(fh)
     except FileNotFoundError:
-        return cfg
+        return normalise_config(cfg)
     except (json.JSONDecodeError, OSError) as exc:
         load_config.unreadable = True
         print(f"[warning] could not read config: {exc}")
-        return cfg
+        return normalise_config(cfg)
     if not isinstance(loaded, dict):
         load_config.unreadable = True
         print("[warning] config file is not a JSON object; using defaults.")
-        return cfg
+        return normalise_config(cfg)
     cfg.update(loaded)
-    return cfg
+    return normalise_config(cfg)
 
 
 def save_config(cfg, *, force=False):
@@ -199,10 +237,14 @@ def save_config(cfg, *, force=False):
     The Settings dialog passes force=True so the user can deliberately recover
     from a damaged file; automatic saves (such as the privacy-notice flag) do
     not, so a broken file is never silently replaced.
+
+    Returns True on a confirmed write, False otherwise, so a caller (notably
+    SettingsDialog) can tell the user their changes were not actually saved
+    instead of reporting success regardless.
     """
     if getattr(load_config, "unreadable", False) and not force:
         print("[warning] refusing to overwrite an unreadable config file")
-        return
+        return False
     tmp_path = f"{CONFIG_PATH}.tmp"
     try:
         with open(tmp_path, "w", encoding="utf-8") as fh:
@@ -211,12 +253,14 @@ def save_config(cfg, *, force=False):
             os.fsync(fh.fileno())
         os.replace(tmp_path, CONFIG_PATH)
         load_config.unreadable = False
+        return True
     except (OSError, TypeError, ValueError) as exc:
         print(f"[warning] could not save config: {exc}")
         try:
             os.remove(tmp_path)
         except OSError:
             pass
+        return False
 
 
 # --------------------------------------------------------------------------- #
@@ -458,9 +502,21 @@ def call_ollama(system_prompt, user_text, cfg):
 
 
 def run_backend(system_prompt, user_text, cfg):
-    if cfg.get("backend") == "ollama":
+    """Dispatch to the configured backend. An unrecognised value is an error,
+    not a silent fall-through to Claude — load_config() already normalises
+    "backend" to "anthropic"/"ollama", so reaching the else branch here means
+    cfg was built or edited some other way, and defaulting to the cloud
+    backend would let the status bar's privacy claim disagree with what
+    actually happens to the text.
+    """
+    backend = cfg.get("backend")
+    if backend == "ollama":
         return call_ollama(system_prompt, user_text, cfg)
-    return call_anthropic(system_prompt, user_text, cfg)
+    if backend == "anthropic":
+        return call_anthropic(system_prompt, user_text, cfg)
+    raise BackendError(
+        f"Unrecognised backend {backend!r}. Open Settings and choose "
+        "Claude or Ollama.")
 
 
 def list_ollama_models(timeout=3):
@@ -786,13 +842,34 @@ class SettingsDialog(ctk.CTkToplevel):
         self.detect_btn.configure(state="disabled" if cloud else "normal")
 
     def _save(self):
-        self.cfg["backend"] = self.backend_var.get()
-        self.cfg["anthropic_api_key"] = self.key_entry.get().strip()
-        self.cfg["anthropic_model"] = self.model_var.get()
-        self.cfg["ollama_model"] = self.ollama_combo.get().strip() or DEFAULT_OLLAMA_MODEL
-        self.cfg["protect_placeholders"] = bool(self.protect_var.get())
-        self.cfg["check_letter_conventions"] = bool(self.letters_var.get())
-        save_config(self.cfg, force=True)
+        """Validate and persist settings, keeping the dialog open on failure.
+
+        Builds a candidate dict rather than mutating self.cfg directly, so a
+        failed write leaves the caller's in-memory config exactly as it was
+        instead of the app believing changes are live when nothing was
+        actually saved to disk.
+        """
+        candidate = dict(self.cfg)
+        candidate.update({
+            "backend": self.backend_var.get(),
+            "anthropic_api_key": self.key_entry.get().strip(),
+            "anthropic_model": self.model_var.get(),
+            "ollama_model": (
+                self.ollama_combo.get().strip() or DEFAULT_OLLAMA_MODEL),
+            "protect_placeholders": bool(self.protect_var.get()),
+            "check_letter_conventions": bool(self.letters_var.get()),
+        })
+        candidate = normalise_config(candidate)
+        if not save_config(candidate, force=True):
+            messagebox.showerror(
+                "Settings not saved",
+                "Scriptorium could not write its configuration file. Your "
+                "changes have not been applied — check that the file is not "
+                "read-only or open elsewhere, then try again.",
+                parent=self)
+            return
+        self.cfg.clear()
+        self.cfg.update(candidate)
         self.on_save()
         self.destroy()
 
@@ -828,6 +905,7 @@ class Scriptorium(ctk.CTk):
         self.bind("<Control-s>", lambda _e: self.export_file())
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        self._maybe_warn_unreadable_config()
         self._maybe_show_privacy_notice()
         self._refresh_status()
 
@@ -964,6 +1042,25 @@ class Scriptorium(ctk.CTk):
         if extra:
             msg += f"   |   {extra}"
         self.status.configure(text=msg)
+
+    def _maybe_warn_unreadable_config(self):
+        """Tell the user their config file could not be read.
+
+        load_config() already refuses to overwrite an unreadable file (so
+        nothing is lost), but that refusal is otherwise reported with
+        print() only — invisible in the packaged .exe, which has no console
+        (scriptorium.spec sets console=False). Without this, an API key
+        sitting in a slightly damaged file just looks like it vanished.
+        """
+        if getattr(load_config, "unreadable", False):
+            messagebox.showwarning(
+                "Configuration could not be read",
+                "scriptorium_config.json exists but could not be parsed, so "
+                "Scriptorium started with default settings instead.\n\n"
+                "The existing file has been left untouched — nothing has "
+                "been overwritten. Open Settings and click Save to write a "
+                "fresh copy, or repair the JSON by hand.",
+                parent=self)
 
     def _maybe_show_privacy_notice(self):
         if self.cfg.get("backend") == "anthropic" and not self.cfg.get("privacy_ack"):
