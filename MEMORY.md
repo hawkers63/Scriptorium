@@ -101,6 +101,45 @@ autostart) once Mark is satisfied v2.4 holds up in practice.
 
 ---
 
+## 2026-09-01 (continued) — Picker interaction verified; live Claude test blocked on account config
+
+**Picker interaction, driven programmatically against the real classes**
+(not literal mouse clicks — Windows UI Automation still exposes no usable
+elements for this app, confirmed again): instantiated the real
+`Scriptorium`/`TonePickerDialog` and called `_toggle_tone`/`_apply`/
+`_clear` exactly as a click would, with `messagebox` patched to
+non-blocking loggers so a real modal couldn't hang the script. All 27
+checks passed — two-tone selection, the `TONE_PICKER_LIMIT` soft cap and
+revert, the Concise+Detailed conflict refusal (dialog stays open, app
+state untouched), successful apply, Clear, long-label truncation on the
+toolbar button, and preset application all behave as designed.
+
+**Live two-tone Claude test — blocked, not attempted further:** the first
+real request (`call_anthropic()`, Technical Writer + Direct/Detailed)
+failed before generating any content:
+```
+HTTP 400: "anthropic-workspace-id is required when authenticating with an
+identity-linked API key; send the id of the workspace this request acts
+in."
+```
+This is **pre-existing and unrelated to v2.4** — `call_anthropic()` has
+never sent an `anthropic-workspace-id` header, and any v2.3 single-tone
+request would fail identically with this key. Mark checked the key's
+details in the Anthropic console (`Alpha` key, Workspace "Default") and
+the Workspace ID field showed no value (`—`), so there was nothing to
+plug in; per Mark, skipped rather than guessed at a header value. No code
+change was made for this.
+
+**Still open:** live-model verification that a real two-tone combination
+(especially anything involving Detailed or Persuasive) doesn't inject or
+embellish content is unverified. Options for a future session: (a) get a
+usable workspace ID once Anthropic's console surfaces one for this key/
+workspace, (b) switch to a non identity-linked API key, which doesn't
+need the header, or (c) test via the local Ollama backend instead, which
+this session didn't try (Mark asked specifically for Claude).
+
+---
+
 ## 2026-08-31 — Session paused after v2.3, by Mark's choice
 
 v2.1, v2.2 and v2.3 are all implemented, committed, and pushed to

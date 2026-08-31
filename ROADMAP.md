@@ -376,6 +376,14 @@ Run this as a structured pass, in order:
 - Recent-revisions history panel (notes_003/005/006) — sound idea, but
   every subsequent review has consistently prioritised the items above it;
   revisit after v2.6 if it's still wanted.
+- `anthropic-workspace-id` header support — discovered 2026-09-01 while
+  hand-testing v2.4: `call_anthropic()` has never sent this header, and an
+  identity-linked API key now needs one (`HTTP 400`). Not fixed because
+  Anthropic's console showed no Workspace ID value to use for Mark's key
+  (Workspace "Default") — revisit once a usable ID is available, or if
+  Mark switches to a non identity-linked key instead (no header needed
+  either way). Pre-existing, unrelated to v2.4 — would affect a v2.3
+  single-tone request identically.
 
 ---
 
