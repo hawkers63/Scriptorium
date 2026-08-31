@@ -6,6 +6,72 @@ Mark saying "lets get started").
 
 ---
 
+## 2026-08-31 (continued) — v2.2 pushed; v2.3 (state fix + usability) implemented
+
+Pushed v2.2 to `origin/main` (`60d787c..9c5e584`) after Mark's go-ahead, and
+confirmed continuing straight into v2.3 in the same session.
+
+All six v2.3 tasks from `ROADMAP.md` implemented in `scriptorium.py`
+(APP_VERSION bumped to "2.3"), not yet committed:
+
+- **Accept-during-processing fix:** named the Accept button `self.accept_btn`
+  and added `_set_busy()`, which now disables both Process *and* Accept for
+  the life of a request (previously only Process was disabled — clicking
+  Accept while a newer request was running committed the old revision and
+  silently cancelled the new one via `accept()`'s call to `reject()`).
+  `_claim_request()`/`_invalidate_inflight()`/`process()` all route through
+  it now; `accept()` also gained a defence-in-depth `self.busy` guard.
+- **Word-export `ValueError`:** `export_file()` now catches the `ValueError`
+  `python-docx` raises for illegal XML control characters (common from
+  PDF-sourced paste) with a friendly dialog pointing at `.txt` instead.
+- **Bounded/deduped undo stack:** added `_remember_for_undo()` (skips a
+  snapshot identical to the last one; caps at 50) and routed all four
+  `undo_stack.append()` call sites (`accept`, `paste_original`, `clear_all`,
+  `import_file`) through it.
+- **Live word/character counts:** bound `<<Modified>>` on `original_box`
+  (with `edit_modified(False)` reset in the handler, since Tk's modified
+  flag latches and won't refire otherwise); `_refresh_status()` now shows
+  live words+characters and, once a revision exists, its word-count delta.
+- **Named writing presets:** added `WRITING_PRESETS` (Formal letter / Client
+  reply / Technical note) between `ROLE_INSTRUCTIONS` and `DEFAULT_CONFIG`,
+  plus `_apply_writing_preset()` and a Preset `CTkOptionMenu` in the
+  toolbar (columns 8–9; Settings moved to column 11). Not persisted to
+  config — toolbar-local, as scoped.
+- **Keyboard shortcuts:** added `_bind_shortcuts()`, replacing the three
+  direct `self.bind()` calls in `__init__`. Accept = Ctrl+Shift+A, Reject =
+  Esc, Copy revision = Ctrl+Shift+C, Undo = Ctrl+Z, alongside the existing
+  Process/Import/Export bindings. Deliberately does not touch Ctrl+C/Ctrl+V.
+
+**Verification performed:**
+- `ast.parse()` syntax check — clean.
+- Isolated logic tests: every `WRITING_PRESETS` entry uses only values that
+  are actually in `MODES`/`STRENGTHS`/`ROLES`/`TONES` (would otherwise be
+  silently clamped back to defaults by `normalise_config` if ever round-
+  tripped through config — confirms the preset data itself is valid);
+  `normalise_config` is idempotent (regression check after two more edits
+  to `DEFAULT_CONFIG`-adjacent code).
+- Attempted UI Automation-driven testing (`System.Windows.Automation` from
+  PowerShell, no extra install) to click through the live count/preset/
+  Accept-disable behaviour directly — Tk exposes essentially no named
+  automation elements (113 descendants, none with a usable `Name`), so this
+  wasn't viable; abandoned rather than force it. This matches what every
+  prior review note in this project has also concluded about this app.
+- Launched the live GUI three times across these changes (once mid-way,
+  once at the end) via PowerShell — clean window, correct title, empty
+  stderr each time. Since all of v2.3's toolbar/actionbar/binding changes
+  execute during `Scriptorium.__init__`, a clean launch does verify that
+  construction path end-to-end, but **not** the interactive behaviour
+  itself.
+- **Not yet verified live (needs a person at the keyboard):** live count
+  updates while typing/pasting/undoing; each preset sets exactly its four
+  documented controls and stays hand-editable after; Accept is genuinely
+  greyed out during a real Process call and re-enables after; the four
+  new keyboard shortcuts fire the right action and ordinary Ctrl+C/Ctrl+V
+  still work for text selection; Word-export of a control character
+  produces the friendly dialog rather than a traceback.
+
+---
+
 ## 2026-08-31 (continued) — v2.1 pushed; v2.2 (backend robustness) implemented
 
 Pushed the two v2.1 commits to `origin/main` after Mark's go-ahead

@@ -36,7 +36,7 @@ Dependencies
     Optional: install python-docx to import from and export to Word (.docx)
     files (`pip install python-docx`). Plain text and Markdown work without it.
 
-Author: built with Mark, August 2026. Version 2.2.
+Author: built with Mark, August 2026. Version 2.3.
 """
 
 import os
@@ -60,7 +60,7 @@ import customtkinter as ctk
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.2"
+APP_VERSION = "2.3"
 
 def _config_dir():
     """Return the folder that holds scriptorium_config.json.
@@ -145,6 +145,28 @@ ROLE_INSTRUCTIONS = {
         "favour cautious, precise and tightly bounded phrasing that avoids "
         "accidental commitments, absolutes and ambiguous obligations."
     ),
+}
+
+
+# Named presets are a convenience layer over the four existing toolbar knobs
+# (Mode, Strength, Role, Tone) — nothing new to persist, no change to the
+# prompt or response schema. Applying one is a one-off copy: every knob
+# stays independently editable afterwards, and "(none)" is a deliberate
+# no-op so the menu can sit at a neutral value without resetting anything.
+WRITING_PRESETS = {
+    "(none)": None,
+    "Formal letter": {
+        "mode": "Correct", "strength": "Standard",
+        "role": "Executive", "tone": "Formal",
+    },
+    "Client reply": {
+        "mode": "Clarify", "strength": "Standard",
+        "role": "Client Relations", "tone": "Diplomatic",
+    },
+    "Technical note": {
+        "mode": "Clarify", "strength": "Light",
+        "role": "Software Developer", "tone": "Concise",
+    },
 }
 
 
@@ -966,9 +988,7 @@ class Scriptorium(ctk.CTk):
         self._build_actionbar()
         self._build_statusbar()
 
-        self.bind("<Control-Return>", lambda _e: self.process())
-        self.bind("<Control-i>", lambda _e: self.import_file())
-        self.bind("<Control-s>", lambda _e: self.export_file())
+        self._bind_shortcuts()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._maybe_warn_unreadable_config()
@@ -976,6 +996,26 @@ class Scriptorium(ctk.CTk):
         self._refresh_status()
 
     # -- layout ------------------------------------------------------------- #
+
+    def _bind_shortcuts(self):
+        """Register keyboard access to common editing and review actions.
+
+        Process/Import/Export already had direct bindings; Accept, Reject,
+        Copy revision and Undo did not. Deliberately does not touch
+        Ctrl+C/Ctrl+V — those must keep working for ordinary text selection
+        inside the Original textbox.
+        """
+        bindings = {
+            "<Control-Return>": self.process,
+            "<Control-i>": self.import_file,
+            "<Control-s>": self.export_file,
+            "<Control-Shift-A>": self.accept,
+            "<Escape>": self.reject,
+            "<Control-Shift-C>": self.copy_revision,
+            "<Control-z>": self.undo,
+        }
+        for sequence, action in bindings.items():
+            self.bind(sequence, lambda _event, command=action: command())
 
     def _build_toolbar(self):
         bar = ctk.CTkFrame(self, corner_radius=0)
@@ -1005,9 +1045,31 @@ class Scriptorium(ctk.CTk):
         ctk.CTkOptionMenu(bar, values=TONES, variable=self.tone_var, width=150
                           ).grid(row=0, column=7, padx=4)
 
+        ctk.CTkLabel(bar, text="Preset").grid(row=0, column=8, padx=(20, 4))
+        self.preset_var = ctk.StringVar(value="(none)")
+        ctk.CTkOptionMenu(
+            bar, values=list(WRITING_PRESETS), variable=self.preset_var,
+            width=145, command=self._apply_writing_preset,
+        ).grid(row=0, column=9, padx=4)
+
         ctk.CTkButton(bar, text="⚙ Settings", width=100, fg_color="gray30",
-                      command=self.open_settings).grid(row=0, column=9, padx=(20, 14))
-        bar.grid_columnconfigure(8, weight=1)
+                      command=self.open_settings).grid(row=0, column=11, padx=(20, 14))
+        bar.grid_columnconfigure(10, weight=1)
+
+    def _apply_writing_preset(self, name):
+        """Populate the existing Mode/Strength/Role/Tone knobs from a preset.
+
+        Every knob stays independently editable afterwards — this only ever
+        performs a one-off copy onto controls that already exist.
+        """
+        preset = WRITING_PRESETS.get(name)
+        if not preset:
+            return
+        self.mode_var.set(preset["mode"])
+        self.strength_var.set(preset["strength"])
+        self.role_var.set(preset["role"])
+        self.tone_var.set(preset["tone"])
+        self._refresh_status(f"preset applied: {name}")
 
     def _build_panes(self):
         panes = ctk.CTkFrame(self, fg_color="transparent")
@@ -1033,6 +1095,11 @@ class Scriptorium(ctk.CTk):
         self.original_box = ctk.CTkTextbox(panes, wrap="word",
                                            font=ctk.CTkFont(size=14))
         self.original_box.grid(row=1, column=0, sticky="nsew", padx=(0, 6), pady=4)
+        # <<Modified>> covers every kind of change (typing, cut, paste,
+        # undo) so the live word/character count in _refresh_status()
+        # never falls out of sync with what is actually on screen.
+        self.original_box.bind("<<Modified>>", self._on_original_modified)
+        self.original_box.edit_modified(False)
 
         # Revised: a themed tk.Text so we can apply diff tags reliably.
         revised_frame = ctk.CTkFrame(panes)
@@ -1066,9 +1133,10 @@ class Scriptorium(ctk.CTk):
                                          command=self.process)
         self.process_btn.pack(side="left")
 
-        ctk.CTkButton(bar, text="Accept →", width=110, fg_color="#2f7d4f",
-                      hover_color="#276a43", command=self.accept
-                      ).pack(side="left", padx=(12, 4))
+        self.accept_btn = ctk.CTkButton(
+            bar, text="Accept →", width=110, fg_color="#2f7d4f",
+            hover_color="#276a43", command=self.accept)
+        self.accept_btn.pack(side="left", padx=(12, 4))
         ctk.CTkButton(bar, text="Reject", width=90, fg_color="gray30",
                       command=self.reject).pack(side="left", padx=4)
         ctk.CTkButton(bar, text="Copy revision", width=120, fg_color="gray30",
@@ -1095,6 +1163,17 @@ class Scriptorium(ctk.CTk):
 
     # -- helpers ------------------------------------------------------------ #
 
+    def _on_original_modified(self, _event=None):
+        """Refresh the live word/character count after any Original edit.
+
+        Tk's modified flag latches "true" and stops firing <<Modified>> again
+        until it is explicitly cleared, so every handler run resets it.
+        """
+        if not self.original_box.edit_modified():
+            return
+        self.original_box.edit_modified(False)
+        self._refresh_status()
+
     def _refresh_status(self, extra=""):
         backend = self.cfg.get("backend", "anthropic")
         if backend == "anthropic":
@@ -1103,8 +1182,17 @@ class Scriptorium(ctk.CTk):
         else:
             where = f"Ollama · {self.cfg.get('ollama_model')} (local)"
             privacy = "stays on this machine"
-        chars = len(self.original_box.get("1.0", "end-1c"))
-        msg = f"Backend: {where}  —  {privacy}   |   {chars} characters"
+        original = self.original_box.get("1.0", "end-1c")
+        chars = len(original)
+        words = len(original.split()) if original.strip() else 0
+        msg = (f"Backend: {where}  —  {privacy}   |   "
+               f"{words} words, {chars} characters")
+        if self.last_result:
+            revised = self.last_result["revised"]
+            r_words = len(revised.split()) if revised.strip() else 0
+            delta = r_words - words
+            sign = f"+{delta}" if delta >= 0 else str(delta)
+            msg += f"   |   revision {r_words} words ({sign})"
         if extra:
             msg += f"   |   {extra}"
         self.status.configure(text=msg)
@@ -1155,6 +1243,21 @@ class Scriptorium(ctk.CTk):
 
     # -- actions ------------------------------------------------------------ #
 
+    def _set_busy(self, flag):
+        """Disable Process and Accept for the life of one backend call.
+
+        Accept used to stay clickable while a newer Process request was in
+        flight: clicking it applied the OLD revision and then, via
+        accept()'s call to reject(), silently cancelled the request that was
+        still running — with no warning that anything had been discarded.
+        Disabling Accept alongside Process closes that gap.
+        """
+        self.busy = flag
+        self.process_btn.configure(
+            text="Working…" if flag else "Process",
+            state="disabled" if flag else "normal")
+        self.accept_btn.configure(state="disabled" if flag else "normal")
+
     def _claim_request(self, request_id):
         """Return True if this callback still owns the UI.
 
@@ -1167,16 +1270,28 @@ class Scriptorium(ctk.CTk):
             return False
         if request_id != self._request_id:
             return False
-        self.busy = False
-        self.process_btn.configure(text="Process", state="normal")
+        self._set_busy(False)
         return True
 
     def _invalidate_inflight(self):
         """Drop any in-flight Process callback and re-enable the button."""
         self._request_id += 1
         if self.busy:
-            self.busy = False
-            self.process_btn.configure(text="Process", state="normal")
+            self._set_busy(False)
+
+    def _remember_for_undo(self, text, limit=50):
+        """Store one distinct document snapshot in a bounded undo history.
+
+        Without a cap, a long session of repeated Paste/Clear/Accept/Import
+        grows undo_stack forever. Skipping a snapshot identical to the last
+        one also stops Clear-on-an-already-empty-pane (and similar no-ops)
+        from adding a pointless Undo step.
+        """
+        if self.undo_stack and self.undo_stack[-1] == text:
+            return
+        self.undo_stack.append(text)
+        if len(self.undo_stack) > limit:
+            del self.undo_stack[:-limit]
 
     def _post_to_ui(self, callback, *args):
         """Queue a UI callback from a worker thread; do nothing if the window
@@ -1213,8 +1328,7 @@ class Scriptorium(ctk.CTk):
         # Stamp this request so a superseded or cancelled result can be ignored.
         self._request_id += 1
         request_id = self._request_id
-        self.busy = True
-        self.process_btn.configure(text="Working…", state="disabled")
+        self._set_busy(True)
         busy_note = "contacting the model…"
         if ph_map:
             busy_note = f"protecting {len(ph_map)} placeholder(s), contacting the model…"
@@ -1297,12 +1411,16 @@ class Scriptorium(ctk.CTk):
         """Replace the original with the accepted revision (chains edits)."""
         if not self.last_result:
             return
+        if self.busy:
+            self._refresh_status(
+                "wait for the current request to finish, or press Reject")
+            return
         if self._revision_is_stale() and not messagebox.askyesno(
                 "Revision may be out of date",
                 "The original text changed after this revision was generated. "
                 "Accept it anyway and overwrite the current text?"):
             return
-        self.undo_stack.append(self.original_box.get("1.0", "end-1c"))
+        self._remember_for_undo(self.original_box.get("1.0", "end-1c"))
         self.original_box.delete("1.0", "end")
         self.original_box.insert("1.0", self.last_result["revised"])
         self.reject()  # clear the revision pane now it has been folded in
@@ -1356,7 +1474,7 @@ class Scriptorium(ctk.CTk):
         if not incoming:
             self._refresh_status("clipboard is empty")
             return
-        self.undo_stack.append(self.original_box.get("1.0", "end-1c"))
+        self._remember_for_undo(self.original_box.get("1.0", "end-1c"))
         try:
             self.original_box.delete("sel.first", "sel.last")
         except tk.TclError:
@@ -1374,7 +1492,7 @@ class Scriptorium(ctk.CTk):
         self._refresh_status("undo")
 
     def clear_all(self):
-        self.undo_stack.append(self.original_box.get("1.0", "end-1c"))
+        self._remember_for_undo(self.original_box.get("1.0", "end-1c"))
         self.original_box.delete("1.0", "end")
         self.reject()
         self._refresh_status("cleared")
@@ -1416,7 +1534,7 @@ class Scriptorium(ctk.CTk):
             except OSError as exc:
                 messagebox.showerror("Import failed", str(exc))
                 return
-        self.undo_stack.append(self.original_box.get("1.0", "end-1c"))
+        self._remember_for_undo(self.original_box.get("1.0", "end-1c"))
         self.reject()
         self.original_box.delete("1.0", "end")
         self.original_box.insert("1.0", content)
@@ -1449,6 +1567,14 @@ class Scriptorium(ctk.CTk):
                 "Export failed",
                 "Saving Word files needs the python-docx package.\n\n"
                 "Install it with:  pip install python-docx")
+            return
+        except ValueError as exc:
+            # python-docx raises ValueError for ASCII control characters
+            # other than tab/LF/CR — common in text pasted from a PDF.
+            messagebox.showerror(
+                "Export failed",
+                "The text contains a character that cannot be stored in a "
+                f"Word document. Try exporting as .txt instead.\n\n{exc}")
             return
         except OSError as exc:
             messagebox.showerror("Export failed", str(exc))
