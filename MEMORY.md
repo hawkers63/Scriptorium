@@ -6,6 +6,38 @@ Mark saying "lets get started").
 
 ---
 
+## 2026-08-31 — Session paused after v2.3, by Mark's choice
+
+v2.1, v2.2 and v2.3 are all implemented, committed, and pushed to
+`origin/main` (HEAD is `c54e39e`, app now reports itself as v2.3). Mark
+chose to pause here — before v2.4 (tray/autostart, the most invasive
+release so far: process lifetime changes, registry writes, new binary
+assets) — specifically to hand-test the interactive behaviour this session
+could only verify by clean-launch + isolated logic tests, not by actually
+driving the GUI (no automation tooling is set up for this native Tk app;
+tried `System.Windows.Automation` from PowerShell and abandoned it — Tk
+exposes almost no named automation elements).
+
+**What still needs a person at the keyboard before v2.4, in priority
+order** (see also each release's acceptance checklist in `ROADMAP.md`):
+- v2.3: live word/char count while typing/pasting/undoing; each preset
+  sets exactly its four controls; Accept genuinely greys out during a real
+  Process call and re-enables after; the four new shortcuts fire correctly
+  and Ctrl+C/Ctrl+V still work for selection; Word-export of a control
+  character shows the friendly dialog.
+- v2.2: Detect button against a real/slow Ollama endpoint keeps Settings
+  responsive; closing the app mid-request produces no crash dialog
+  (ideally against the packaged `.exe`, not just `python scriptorium.py`).
+- v2.1: a forced `save_config` failure (e.g. read-only file) keeps
+  Settings open with a visible error; hand-edited invalid config values
+  boot cleanly with status/privacy in agreement.
+
+Next session: read this file + `ROADMAP.md`, ask whether the above was
+tested and what was found, fix anything that turns up, then move on to
+v2.4 once Mark is satisfied v2.1–v2.3 hold up in practice.
+
+---
+
 ## 2026-08-31 (continued) — v2.2 pushed; v2.3 (state fix + usability) implemented
 
 Pushed v2.2 to `origin/main` (`60d787c..9c5e584`) after Mark's go-ahead, and
