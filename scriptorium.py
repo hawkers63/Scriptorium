@@ -339,14 +339,26 @@ def normalise_tone_config(cfg):
     string; this folds it into the current "default_tones" list so an
     existing installation keeps working with no visible change, then drops
     the legacy key so the two representations cannot drift apart.
+
+    The legacy key, if present, is checked BEFORE "default_tones" rather
+    than as a fallback for a missing/malformed list. load_config() always
+    seeds its working dict from DEFAULT_CONFIG (which already supplies
+    "default_tones": ["Concise"]) before merging in the loaded file, so an
+    old file containing only "default_tone" would otherwise always find
+    "default_tones" already present as a valid list and never actually
+    reach the legacy branch — silently discarding the user's real stored
+    tone in favour of the default instead of migrating it.
     """
     clean = dict(cfg)
-    stored = clean.get("default_tones")
-    if isinstance(stored, str):
-        stored = [stored]
-    elif not isinstance(stored, list):
+    if "default_tone" in clean:
         legacy = clean.get("default_tone", "(keep original)")
         stored = [] if legacy == "(keep original)" else [legacy]
+    else:
+        stored = clean.get("default_tones")
+        if isinstance(stored, str):
+            stored = [stored]
+        elif not isinstance(stored, list):
+            stored = []
 
     try:
         clean["default_tones"] = validate_tones(stored)

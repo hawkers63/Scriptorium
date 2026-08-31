@@ -140,6 +140,54 @@ this session didn't try (Mark asked specifically for Claude).
 
 ---
 
+## 2026-09-01 (continued) — Rest of the v2.4 checklist hand-tested; one real bug found and fixed
+
+Worked through every remaining v2.4 acceptance-checklist item that
+doesn't need a live model call (the two that do are still blocked on the
+`anthropic-workspace-id` issue above; Ollama was checked and isn't
+running locally either, so those two stay open).
+
+**Found and fixed a real migration bug**, caught by actually exercising
+`load_config()` against a temp file containing only the legacy
+`default_tone` key (not a synthetic direct call to
+`normalise_tone_config()`, which had masked this): `load_config()` always
+seeds its working dict from `DEFAULT_CONFIG` — which already supplies
+`default_tones: ["Concise"]` — before merging in the loaded file. So a
+pre-v2.4 config containing only `default_tone` ended up with `clean.get
+("default_tones")` already a valid list by the time
+`normalise_tone_config()` ran, and the function's `elif not isinstance
+(stored, list)` legacy branch was structurally unreachable through the
+real load path — the user's actual stored tone was silently discarded in
+favour of the default instead of being migrated. Fixed by checking for
+the legacy key's presence first, before ever looking at `default_tones`,
+in `normalise_tone_config()` (`scriptorium.py`). Re-verified: a temp
+config with only `default_tone: "Diplomatic"` now loads as `default_tones:
+["Diplomatic"]` and persists correctly through a subsequent `save_config()`
+round-trip; all previously-passing tone/config tests still pass.
+
+**Also verified (all via the real classes/functions, no live model
+needed):**
+- A single selected tone still produces the plain "as the target tone"
+  phrasing, not the dominant/supporting language — confirmed at both the
+  `build_tone_instruction()` and full `build_system_prompt()` level.
+- Casual+Formal is refused in the picker exactly like Concise+Detailed
+  (dialog stays open, app state untouched).
+- A hand-edited config with a conflicting pair in `default_tones` falls
+  back to `["Concise"]` on load, without being flagged unreadable.
+- All three presets (Formal letter, Client reply, Technical note) apply
+  their exact original single tone under the new list-based storage.
+
+`ROADMAP.md`'s v2.4 checklist updated to reflect what's now ticked, what's
+genuinely blocked (both remaining items need the Claude API key issue or
+Ollama), and the bug found/fixed.
+
+**Still open, needs a live model (Claude once unblocked, or Ollama):**
+two-tone content-injection check (Detailed/Persuasive especially), and a
+Lawyer/Engineer spot-check for invented legal interpretation or technical
+conclusions.
+
+---
+
 ## 2026-08-31 — Session paused after v2.3, by Mark's choice
 
 v2.1, v2.2 and v2.3 are all implemented, committed, and pushed to

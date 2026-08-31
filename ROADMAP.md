@@ -247,26 +247,39 @@ with something already on the menu.
    attribution" guard in their instruction text, per notes_013's cautions.
 
 ### Acceptance checklist
-- [ ] A single selected tone behaves exactly as before (one bounded
+- [x] A single selected tone behaves exactly as before (one bounded
       instruction, no dominant/supporting language in the prompt).
 - [ ] Two selected tones show correct dominant/supporting phrasing, and a
       real run against the live backend changes wording/register only — no
       new facts, figures or invented detail (check combinations involving
-      Detailed or Persuasive specifically).
-- [ ] The picker refuses a third tone even though `validate_tones()` itself
+      Detailed or Persuasive specifically). **Blocked** — Mark's configured
+      Claude API key is identity-linked and needs an `anthropic-workspace-id`
+      header `call_anthropic()` doesn't send; no workspace ID was available
+      in the console to add it. Pre-existing, unrelated to v2.4 — see the
+      "Deferred" section below. Retry once a key/header fix is in place, or
+      against Ollama instead.
+- [x] The picker refuses a third tone even though `validate_tones()` itself
       accepts three; ticking a third checkbox shows the limit message and
       the checkbox reverts.
-- [ ] Choosing Concise+Detailed or Casual+Formal in the picker is refused
+- [x] Choosing Concise+Detailed or Casual+Formal in the picker is refused
       with the conflict message; a hand-edited config with that pairing in
       `default_tones` falls back to `["Concise"]` on load rather than
       crashing.
-- [ ] A config file with the legacy `default_tone` string still loads
+- [x] A config file with the legacy `default_tone` string still loads
       correctly and is silently migrated to `default_tones` on next save.
-- [ ] The three existing presets still apply their original single tone
+      **Caught a real bug while verifying this**: `load_config()` always
+      seeds its working dict from `DEFAULT_CONFIG` (which already supplies
+      `default_tones: ["Concise"]`) before merging in the loaded file, so
+      `normalise_tone_config()` found a valid list already present and
+      never actually reached the legacy-string branch — an old file with
+      only `default_tone` silently lost the user's real value to the
+      default instead of migrating it. Fixed by checking for the legacy
+      key first, rather than as a fallback for a missing/malformed list.
+- [x] The three existing presets still apply their original single tone
       correctly now that it is stored as a one-item list.
 - [ ] Spot-check the Lawyer and Engineer roles against real source text:
       no invented legal interpretation, obligation, or technical conclusion
-      not already present.
+      not already present. **Blocked** on the same Claude API issue above.
 
 ---
 
