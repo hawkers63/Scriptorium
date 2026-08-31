@@ -36,13 +36,14 @@ Dependencies
     Optional: install python-docx to import from and export to Word (.docx)
     files (`pip install python-docx`). Plain text and Markdown work without it.
 
-Author: built with Mark, August 2026. Version 2.1.
+Author: built with Mark, August 2026. Version 2.2.
 """
 
 import os
 import sys
 import re
 import json
+import secrets
 import threading
 import difflib
 import urllib.request
@@ -59,7 +60,7 @@ import customtkinter as ctk
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.1"
+APP_VERSION = "2.2"
 
 def _config_dir():
     """Return the folder that holds scriptorium_config.json.
@@ -357,6 +358,20 @@ class BackendError(Exception):
     """Raised for any backend/network/parse failure, with a friendly message."""
 
 
+def _payload_object(payload, label):
+    """Return payload if it is a JSON object, otherwise raise BackendError.
+
+    A successful HTTP response can still decode to a non-object JSON root
+    (a list, a bare string, null) if the provider or a proxy in front of it
+    misbehaves. Without this check, the .get() calls that follow raise a
+    raw AttributeError instead of the specific BackendError the rest of the
+    app expects to catch.
+    """
+    if not isinstance(payload, dict):
+        raise BackendError(f"{label} returned an unexpected response shape.")
+    return payload
+
+
 def _extract_json(text):
     """Pull a JSON object out of a model response, tolerating stray fences."""
     text = text.strip()
@@ -446,21 +461,31 @@ def call_anthropic(system_prompt, user_text, cfg):
         raise BackendError(f"Claude API error {exc.code}.\n\n{detail}")
     except urllib.error.URLError as exc:
         raise BackendError(f"Network error reaching the Claude API: {exc.reason}")
+    except TimeoutError:
+        raise BackendError(
+            "The request to Claude timed out. Try a shorter passage, or "
+            "check your network connection.")
     except json.JSONDecodeError as exc:
         raise BackendError(
             "The Claude API returned a non-JSON body.\n\n"
             f"(Parser detail: {exc})")
 
+    payload = _payload_object(payload, "The Claude API")
     if payload.get("stop_reason") == "max_tokens":
         raise BackendError(
             "Claude stopped because the reply hit the token limit. Try a "
             "shorter passage, or process the text in sections.")
 
+    content = payload.get("content")
+    if not isinstance(content, list):
+        raise BackendError("The Claude API response did not contain a content list.")
+
     # Concatenate all text blocks in the response.
     text = "".join(
         block.get("text", "")
-        for block in payload.get("content", [])
-        if block.get("type") == "text"
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text"
+        and isinstance(block.get("text", ""), str)
     )
     if not text:
         raise BackendError("The Claude API returned no text content.")
@@ -495,9 +520,22 @@ def call_ollama(system_prompt, user_text, cfg):
             "Could not reach Ollama at localhost:11434. Is it running? "
             f"Start it with 'ollama serve' and pull a model first.\n\n({exc.reason})"
         )
-    text = payload.get("message", {}).get("content", "")
-    if not text:
-        raise BackendError("Ollama returned no content.")
+    except TimeoutError:
+        raise BackendError(
+            "Ollama timed out. Try a shorter passage, or a smaller/faster "
+            "model.")
+    except json.JSONDecodeError as exc:
+        raise BackendError(
+            "Ollama returned a non-JSON body.\n\n"
+            f"(Parser detail: {exc})")
+
+    payload = _payload_object(payload, "Ollama")
+    message = payload.get("message")
+    if not isinstance(message, dict):
+        raise BackendError("Ollama returned no message object.")
+    text = message.get("content")
+    if not isinstance(text, str) or not text.strip():
+        raise BackendError("Ollama returned no text content.")
     return _extract_json(text)
 
 
@@ -643,16 +681,24 @@ _PLACEHOLDER_RE = re.compile("|".join(_PLACEHOLDER_PATTERNS))
 
 
 def mask_placeholders(text):
-    """Swap placeholders for opaque sentinels.
+    """Swap placeholders for opaque, per-call sentinels.
 
     Returns (masked_text, mapping), where mapping is an ordered list of
     (sentinel, original) pairs — one per occurrence, so a placeholder used
     several times is tracked independently each time.
+
+    A short random nonce is mixed into every sentinel so that source text
+    which already contains something shaped like ⟦PH0⟧ — e.g. a raw
+    sentinel left behind by a previous failed run — cannot collide with a
+    freshly generated one. Without the nonce, restore_placeholders() cannot
+    tell the two apart and corrupts the text (confirmed in
+    notes/01_Active/notes_012.txt, Bug A).
     """
+    nonce = secrets.token_hex(3)
     mapping = []
 
     def _swap(match):
-        sentinel = f"{_PH_OPEN}PH{len(mapping)}{_PH_CLOSE}"
+        sentinel = f"{_PH_OPEN}PH{nonce}_{len(mapping)}{_PH_CLOSE}"
         mapping.append((sentinel, match.group(0)))
         return sentinel
 
@@ -821,10 +867,30 @@ class SettingsDialog(ctk.CTkToplevel):
         self._refresh_state()
 
     def _detect_models(self):
-        """Ask Ollama which models are installed and offer them in the dropdown."""
+        """Ask Ollama which models are installed, without freezing Settings.
+
+        list_ollama_models() opens a socket (timeout=3) — running it directly
+        on the Tk thread used to freeze the modal Settings dialog for up to
+        three seconds. The HTTP call now runs on a daemon thread; only the
+        widget update at the end touches Tk, via self.after().
+        """
+        self.detect_btn.configure(state="disabled")
         self.ollama_status.configure(text="Detecting…")
-        self.update_idletasks()
-        models = list_ollama_models()
+
+        def worker():
+            models = list_ollama_models()
+            try:
+                self.after(0, self._finish_model_detection, models)
+            except (tk.TclError, RuntimeError):
+                pass  # the Settings dialog closed before detection finished
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_model_detection(self, models):
+        """Apply a completed Ollama model list on Tk's event thread."""
+        if not self.winfo_exists():
+            return
+        self._refresh_state()
         if not models:
             self.ollama_status.configure(
                 text="No response from Ollama at localhost:11434 — is "
@@ -1112,6 +1178,22 @@ class Scriptorium(ctk.CTk):
             self.busy = False
             self.process_btn.configure(text="Process", state="normal")
 
+    def _post_to_ui(self, callback, *args):
+        """Queue a UI callback from a worker thread; do nothing if the window
+        is already gone.
+
+        _claim_request()'s winfo_exists() guard only runs once a callback is
+        actually delivered — it cannot stop self.after() itself from being
+        called against an already-destroyed Tcl interpreter if the app is
+        closed while a request is still in flight. That raises tk.TclError
+        on the worker thread, which is otherwise unhandled.
+        """
+        try:
+            if self.winfo_exists():
+                self.after(0, callback, *args)
+        except tk.TclError:
+            pass
+
     def process(self):
         """Send the current text to the backend on a worker thread."""
         if self.busy:
@@ -1147,13 +1229,14 @@ class Scriptorium(ctk.CTk):
         def worker():
             try:
                 result = run_backend(system_prompt, masked, cfg_snapshot)
-                self.after(0, self._on_success,
-                           request_id, original, ph_map, result)
             except BackendError as exc:
-                self.after(0, self._on_error, request_id, str(exc))
+                self._post_to_ui(self._on_error, request_id, str(exc))
             except Exception as exc:  # noqa: BLE001 — surface anything unexpected
-                self.after(0, self._on_error,
-                           request_id, f"Unexpected error: {exc}")
+                self._post_to_ui(
+                    self._on_error, request_id, f"Unexpected error: {exc}")
+            else:
+                self._post_to_ui(
+                    self._on_success, request_id, original, ph_map, result)
 
         threading.Thread(target=worker, daemon=True).start()
 
