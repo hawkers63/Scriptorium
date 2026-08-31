@@ -17,12 +17,20 @@ Built in Python with a native-style CustomTkinter interface.
     minimum changes necessary.
   - **Clarify** — improve readability and structure without adding new claims.
 - **Adjustable strength** — Light, Standard, or Substantial.
-- **Optional tone control** — Formal, Neutral, Friendly, Concise, Confident,
-  Diplomatic.
+- **Optional tone control** — choose up to two of twelve tones (Formal,
+  Neutral, Casual, Friendly, Diplomatic, Empathetic, Direct, Confident,
+  Concise, Detailed, Constructive, Persuasive) via a compact picker. The
+  first tone chosen is dominant; a second is blended in as a supporting
+  characteristic. Each tone is a bounded, data-driven instruction rather than
+  a bare label, so it can only reshape wording and register — never invent
+  facts, evidence or detail. Genuinely contradictory pairs (e.g. Concise +
+  Detailed) are refused with an explanation.
 - **Writing roles** — an optional context (Creative, Software Developer,
-  Executive, Client Relations, Academic, Legal & Compliance) that steers
-  vocabulary and register without ever adding facts or bending the rules.
-  Role, mode, strength and tone are independent controls that stack.
+  Engineer, Executive, Project Manager, Client Relations, Academic,
+  Technical Writer, Journalist, Legal & Compliance, Lawyer) that steers
+  vocabulary and register without ever adding facts, technical conclusions
+  or legal interpretation the source doesn't already contain. Role, mode,
+  strength and tone are independent controls that stack.
 - **Placeholder protection** — placeholders like `[Name]`, `{{Date}}`,
   `{amount}` and `<Date>` are masked before the text is sent and restored
   afterwards, so they are never reworded; if the model drops one, you are

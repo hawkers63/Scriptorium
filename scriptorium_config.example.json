@@ -9,6 +9,6 @@
   "default_mode": "Paraphrase",
   "default_strength": "Substantial",
   "default_role": "Academic",
-  "default_tone": "Concise",
+  "default_tones": ["Concise"],
   "default_diff_view": "Inline"
 }

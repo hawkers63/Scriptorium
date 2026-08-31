@@ -6,6 +6,101 @@ Mark saying "lets get started").
 
 ---
 
+## 2026-09-01 — v2.4 (multi-tone composition & expanded roles) implemented
+
+Continuing from the v2.3 pause: Mark added `notes_013.txt` (Mark/Codex),
+proposing multi-tone selection and an expanded role menu, and explicitly
+left the choice of *which* new roles/tones to add to this session's
+discretion ("quantity does not necessarily improve the result"), with the
+stated priority of never letting a tone/role instruction inject or
+embellish content at the sentence level. Implemented directly rather than
+asking for a scoping round, per "apply the adjustments as you see fit."
+
+Inserted as **v2.4** ahead of the previously-planned tray/autostart release
+(now **v2.5**; the bug-diagnosis session is now **v2.6**) — see
+`ROADMAP.md` for the full task list and acceptance checklist.
+
+**Implemented in `scriptorium.py` (APP_VERSION bumped to "2.4"):**
+- `TONE_INSTRUCTIONS` (bounded, data-driven per-tone instruction text),
+  `TONES` derived from it, `TONE_CONFLICTS`, `MAX_SELECTED_TONES` (3, the
+  data-model cap) and `TONE_PICKER_LIMIT` (2, the UI cap — deliberately
+  more conservative than the data model, per notes_013's own
+  recommendation to calibrate two-tone output before opening a third), and
+  `validate_tones()` as the single validation boundary shared by config
+  loading, preset application, the picker dialogue and prompt
+  construction.
+- `build_tone_instruction()` replaces the old one-line "steer the tone
+  towards: X" with explicit dominant/supporting phrasing plus a "must not
+  introduce facts, increase certainty, invent feelings, create
+  commitments" guard on every combination. `build_system_prompt()`'s
+  `tone` parameter is now `tones` (list/tuple).
+- **Curated, not copied wholesale**, from notes_013's full lists: six new
+  tones — Casual, Direct, Empathetic, Detailed, Constructive, Persuasive
+  (one per stylistic dimension notes_013 itself identified) — and five new
+  roles — Engineer, Journalist, Lawyer, Project Manager, Technical Writer.
+  Left out as overlapping (with an existing entry or each other): Blogger/
+  Content Creator/Writer, Creative Professional, Designer/Graphic
+  Designer, Educator/Teacher, Business Professional, Copywriter, Novelist/
+  Story Writer, Product Manager, Assertive, Instructive, Inspirational.
+  Reasoning is recorded in the code comments beside `ROLES` and
+  `TONE_INSTRUCTIONS`, not just here.
+- `default_tone` (string) config key migrated to `default_tones` (ordered
+  list) via `normalise_tone_config()`, called from `normalise_config()`;
+  an invalid or conflicting stored value falls back to `["Concise"]`
+  rather than crashing. `scriptorium_config.example.json` updated; the
+  live `scriptorium_config.json` (holds the real API key) was
+  deliberately left untouched — it has neither key, so it already
+  inherits the new default. Existing presets keep exactly their original
+  single tone, now stored as a one-item list — no multi-tone behaviour was
+  added to the shipped defaults, since that needs the live-model
+  calibration testing notes_013 itself flags as a prerequisite.
+- `TonePickerDialog` (new class, before `SettingsDialog`) replaces the
+  single-select tone `CTkOptionMenu` with a toolbar button opening an
+  ordered checkbox picker (Clear/Cancel/Apply, live "N of 2 selected: X →
+  Y" status). `Scriptorium` gained `self.selected_tones`,
+  `_open_tone_picker()`, `_set_selected_tones()`, `_refresh_tone_button()`;
+  `process()` now wraps `build_system_prompt()` in `try/except ValueError`
+  so a should-be-impossible bad tone state (since `self.selected_tones` is
+  only ever set through already-validated paths) can't strand Process on
+  "Working…".
+- `README.md` updated (tone/role feature bullets); `ROADMAP.md`
+  restructured (new v2.4 section, old v2.4→v2.5, old v2.5→v2.6,
+  cross-references and the source-notes table updated to match).
+
+**Verification performed:**
+- `ast.parse()` syntax check — clean.
+- Isolated logic tests (stubbed `customtkinter`, no GUI): `validate_tones`
+  (dedup, keep-original strip, unknown-name drop, both conflict pairs, a
+  four-tone over-limit case), `TONES` derivation matches
+  `TONE_INSTRUCTIONS` keys, `build_tone_instruction` single- and
+  dual-tone phrasing plus the no-embellishment guard text,
+  `build_system_prompt` end-to-end, `normalise_tone_config` (legacy-string
+  migration, keep-original → empty list, conflicting stored pair →
+  `["Concise"]` fallback, missing key), `normalise_config` idempotency
+  with the tone migration wired in, `DEFAULT_CONFIG` round-trips through
+  `normalise_config` unchanged, every `WRITING_PRESETS` entry uses only
+  values actually in `MODES`/`STRENGTHS`/`ROLES`/`TONE_INSTRUCTIONS`, and
+  `ROLES`/`ROLE_INSTRUCTIONS` have identical membership — all pass.
+- Launched the live GUI via PowerShell (`Start-Process`, 4-second live
+  check): process stayed alive, correct window title, empty stderr.
+
+**Not yet verified live (needs a person at the keyboard, one item also
+needs real backend spend I won't incur without asking first):** the tone
+picker's checkbox/limit/conflict UI actually driven by hand (no Tk
+automation available for this app — same conclusion as every prior
+session); a genuine two-tone Process request against Claude or Ollama,
+checked specifically for injected/embellished content per Mark's stated
+concern (notes_013's own "Calibration Considerations" table is a good
+starting matrix); the new Lawyer/Engineer/Journalist roles similarly
+unverified against a real model response.
+
+Next session: hand-test the v2.4 acceptance checklist in `ROADMAP.md`
+(picker interaction, a few real two-tone combinations against the live
+backend, the config-migration path), then move on to v2.5 (tray/
+autostart) once Mark is satisfied v2.4 holds up in practice.
+
+---
+
 ## 2026-08-31 — Session paused after v2.3, by Mark's choice
 
 v2.1, v2.2 and v2.3 are all implemented, committed, and pushed to

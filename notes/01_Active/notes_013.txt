@@ -1,0 +1,817 @@
+**Date:** 31 August 2026  
+**Authors:** Mark  / Codex
+
+I have been contemplating a significant enhancement that could strengthen the application: the integration of additional 'Roles' and 'Tones' alongside our existing features. I am currently assessing the viability of enabling the selection of multiple tones concurrently—such as the combination of 'Casual' and 'Detailed'—which could potentially offer a broader spectrum of variations. 
+
+**Proposed Additional Roles for the Application:**  
+- Blogger  
+- Business Professional  
+- Content Creator  
+- Copywriter  
+- Creative Professional  
+- Designer  
+- Educator  
+- Engineer  
+- Graphic Designer  
+- Journalist  
+- Lawyer  
+- Novelist  
+- Product Manager  
+- Project Manager  
+- Story Writer  
+- Teacher  
+- Technical Writer  
+- Writer  
+
+**Proposed Additional Tones:**  
+- Casual  
+- Diplomatic  
+- Inspirational  
+- Professional  
+- Constructive  
+- Detailed  
+- Direct  
+- Confident  
+- Instructive  
+- Friendly  
+- Assertive  
+- Concise  
+- Empathetic  
+- Persuasive  
+
+The implementation of multiple simultaneous tones is indeed feasible, as the current prompt architecture is already nearing the capability to support this feature. A prudent approach would be to avoid creating separate prompts for every possible combination. Instead, I propose treating tones as composable instructions, maintaining the selection as a concise ordered list, allowing the prompt to balance them according to the existing meaning-preservation rules.
+
+**Recommendations:**  
+I recommend the following parameters for tone selection:  
+- A maximum of three tones per request  
+- An explicitly ordered selection  
+- The first tone designated as the dominant tone  
+- The second and third tones serving as supporting characteristics  
+- A minor conflict check for genuinely contradictory pairs  
+- A compact toolbar control featuring a checkbox picker  
+
+For instance:  
+- Casual + Detailed  
+- Professional + Empathetic  
+- Direct + Constructive  
+- Diplomatic + Assertive  
+- Inspirational + Persuasive  
+- Instructive + Friendly + Detailed  
+
+The order of tones is significant. For example, 'Diplomatic + Direct' would imply a primarily diplomatic tone that is clear and direct, whereas 'Direct + Diplomatic' would indicate a primarily direct tone, softened by diplomatic elements. This approach facilitates useful variations without necessitating a combinatorial prompt table.  
+
+**Rationale Against Merely Joining Tones into a String:**  
+The current implementation issues a single generic instruction:  
+- Steer the tone towards: concise.  
+
+A simplistic multi-tone version might yield:  
+- Steer the tone towards: casual, detailed.  
+
+While this could function to a degree, it would leave excessive interpretation to the model. Several of the proposed tones describe distinct stylistic dimensions:  
+
+| Dimension              | Tones                                   |
+|-----------------------|-----------------------------------------|
+| Register              | Casual, Professional                    |
+| Detail and Length     | Concise, Detailed                       |
+| Interpersonal Manner   | Friendly, Empathetic, Diplomatic       |
+| Force and Certainty   | Direct, Assertive, Confident           |
+| Purpose               | Instructive, Persuasive, Constructive, Inspirational |
+
+This structure is beneficial, as tones from different dimensions combine naturally. For example, 'Casual + Detailed' is coherent because one regulates the register while the other governs depth. Some combinations within the same dimension can also be advantageous:  
+- 'Direct + Diplomatic' implies clarity tempered by tact.  
+- 'Assertive + Empathetic' conveys firmness while acknowledging the reader.  
+- 'Professional + Friendly' suggests a polished yet approachable tone.  
+
+The only evidently contradictory pair within the proposed set is:  
+- 'Concise + Detailed'.  
+
+Even this combination could be interpreted as “information-dense without unnecessary wording”; however, it may lead to confusion for both users and models. Consequently, I would recommend initially prohibiting this combination and providing a brief explanation.  
+
+**Tone Definitions Should Be Data-Driven:**  
+The new tones should encompass explicit bounded instructions, as this approach is more reliable than merely sending their labels.  
+
+Please add the following immediately below TONES in `[scriptorium.py](C:\\Scriptorium\\scriptorium.py)`:
+
+```python
+TONE_INSTRUCTIONS = {
+    "Casual": (
+        "use relaxed, natural phrasing and contractions where appropriate, "
+        "without becoming careless, slang-heavy or overly familiar"
+    ),
+    "Diplomatic": (
+        "use tactful, measured language that acknowledges differing positions "
+        "and avoids unnecessary confrontation"
+    ),
+    "Inspirational": (
+        "use encouraging, forward-looking language that builds motivation "
+        "without adding exaggerated claims or empty enthusiasm"
+    ),
+    "Professional": (
+        "use polished, workplace-appropriate language with a clear and "
+        "respectful register"
+    ),
+    "Constructive": (
+        "frame criticism or difficulty around improvement, practical next "
+        "steps and achievable outcomes"
+    ),
+    "Detailed": (
+        "retain and organise the available detail clearly; do not invent "
+        "supporting facts, examples or explanations"
+    ),
+    "Direct": (
+        "state the central point promptly and unambiguously, avoiding hedging "
+        "that is not required by the source"
+    ),
+    "Confident": (
+        "use assured and composed phrasing without overstating certainty or "
+        "strengthening the source's claims"
+    ),
+    "Instructive": (
+        "present existing guidance in a clear, orderly and actionable manner "
+        "without creating new steps or requirements"
+    ),
+    "Friendly": (
+        "use warm, approachable and courteous phrasing without becoming "
+        "overfamiliar"
+    ),
+    "Assertive": (
+        "use firm, decisive language while remaining respectful and preserving "
+        "the source's actual level of authority"
+    ),
+    "Concise": (
+        "remove avoidable repetition and wordiness while retaining every "
+        "substantive point"
+    ),
+    "Empathetic": (
+        "acknowledge the reader's likely concerns or perspective where the "
+        "source supports doing so, without inventing feelings or circumstances"
+    ),
+    "Persuasive": (
+        "present the source's existing reasoning compellingly and emphasise "
+        "its strongest supported points without adding evidence or claims"
+    ),
+}
+```
+
+Subsequently, derive the visible list from the instruction table to ensure that the two structures remain aligned:  
+```python
+TONES = ["(keep original)", *TONE_INSTRUCTIONS]
+```
+
+This adjustment will enable the addition of future tones to be executed with a single data-table modification. The qualification in 'Detailed' is particularly critical; without it, the model may misinterpret “detailed” as an invitation to elaborate with new information, which would contravene Scriptorium’s meaning-preservation contract. The same principle holds for 'Persuasive', 'Inspirational', 'Empathetic', and 'Instructive', as each could otherwise encourage the introduction of fabricated evidence, feelings, steps, or promises.  
+
+**Tone Conflicts and Selection Limits:**  
+Please include the following immediately below `TONE_INSTRUCTIONS`:
+
+```python
+MAX_SELECTED_TONES = 3
+
+TONE_CONFLICTS = {
+    frozenset({"Concise", "Detailed"}): (
+        "'Concise' and 'Detailed' pull the revision in opposite directions. "
+        "Choose the one that best reflects the intended result."
+    ),
+}
+```
+
+**Function to Validate Tones:**  
+```python
+def validate_tones(tones):
+    """Return a normalised tone list or raise ValueError for a conflict.
+
+    Tone order is preserved because the first selection is treated as dominant.
+    Duplicate, blank and keep-original entries are removed. No more than three
+    tones are accepted, ensuring the model receives a clear stylistic direction.
+    """
+    normalised = []
+    for tone in tones:
+        if tone in ("", "(keep original)") or tone in normalised:
+            continue
+        if tone not in TONE_INSTRUCTIONS:
+            continue
+        normalised.append(tone)
+
+    if len(normalised) > MAX_SELECTED_TONES:
+        raise ValueError(
+            f"Choose no more than {MAX_SELECTED_TONES} tones.")
+
+    selected = set(normalised)
+    for pair, message in TONE_CONFLICTS.items():
+        if pair.issubset(selected):
+            raise ValueError(message)
+
+    return normalised
+```
+
+This function should serve as the sole validation boundary for:  
+- Configuration loading  
+- Preset application  
+- The tone-selection dialogue  
+- Prompt construction  
+
+It is imperative not to maintain separate validation logic across each UI method.  
+
+**Prompt Construction:**  
+Please amend the tone argument in `build_system_prompt()` to accommodate tones. Replace the existing tone block in `[scriptorium.py](C:\\Scriptorium\\scriptorium.py)` with the following:
+
+```python
+def build_tone_instruction(tones):
+    """Return a bounded prompt instruction for an ordered tone combination.
+
+    The first tone is dominant. Later tones refine it rather than competing
+    equally. Every instruction remains subordinate to meaning preservation.
+    """
+    tones = validate_tones(tones)
+    if not tones:
+        return ""
+
+    descriptions = [
+        f"- {tone}: {TONE_INSTRUCTIONS[tone]}."
+        for tone in tones
+    ]
+
+    if len(tones) == 1:
+        relationship = (
+            f"Use {tones[0]} as the target tone."
+        )
+    else:
+        supporting = ", ".join(tones[1:])
+        relationship = (
+            f"Use {tones[0]} as the dominant tone. Blend in {supporting} as "
+            "supporting characteristics. If the characteristics compete, "
+            f"preserve {tones[0]} as the priority."
+        )
+
+    return (
+        "\n- Tone guidance:\n"
+        f"  {relationship}\n"
+        + "\n".join(f"  {line}" for line in descriptions)
+        + "\n  Tone guidance may affect wording, rhythm and presentation only. "
+          "It must not introduce facts, increase certainty, invent feelings, "
+          "create commitments or alter the author's intended meaning."
+    )
+```
+
+Next, update the signature and assignment in `build_system_prompt()` as follows:
+
+```python
+def build_system_prompt(mode, strength, tones, role="(none)",
+                        protect_tokens=False):
+    """Assemble the system prompt governing a single suggested revision."""
+    # Existing placeholder and role construction remains unchanged.
+
+    tone_line = build_tone_instruction(tones)
+
+    # Existing return block remains unchanged.
+```
+
+The resulting prompt for my example would conceptually be:
+
+```
+Tone guidance:
+Use Casual as the dominant tone. Blend in Detailed as a supporting characteristic.
+
+- Casual: use relaxed, natural phrasing...
+- Detailed: retain and organise the available detail clearly; do not invent...
+```
+
+Tone guidance may influence the choice of wording, rhythm, and presentation exclusively. This approach is significantly safer and more deterministic compared to requesting a generic “casual and detailed tone”.
+
+**Internal State Representation**
+
+Utilise a list of names as follows:
+```python
+["Casual", "Detailed"]
+```
+It is imperative not to store:
+```python
+"Casual, Detailed"
+```
+**Advantages of Using a List:**
+- It naturally serialises to JSON.
+- It preserves the selection order.
+- It mitigates parsing issues in the event that a future label includes punctuation.
+- It simplifies validation processes.
+- It facilitates the clean addition or removal of a tone.
+- It supports migration from the existing singular string representation.
+
+The new configuration key should be defined as:
+```json
+"default_tones": ["Concise"]
+```
+For one compatibility release, it is essential to continue recognising the old `default_tone` key.
+
+**Helper Function Implementation**
+
+Add the following helper function directly below `validate_tones()`:
+```python
+def normalise_tone_config(cfg):
+    """Migrate and validate the configured default tone selection.
+
+    Existing installations using the singular default_tone key will continue 
+    to function as before. The returned dictionary will always contain default_tones.
+    """
+    clean = dict(cfg)
+
+    stored = clean.get("default_tones")
+    if isinstance(stored, str):
+        stored = [stored]
+    elif not isinstance(stored, list):
+        legacy = clean.get("default_tone", "(keep original)")
+        stored = [] if legacy == "(keep original)" else [legacy]
+
+    try:
+        clean["default_tones"] = validate_tones(stored)
+    except ValueError:
+        clean["default_tones"] = ["Concise"]
+
+    clean.pop("default_tone", None)
+    return clean
+```
+This function should be called near the end of the existing `normalise_config()`:
+```python
+clean = normalise_tone_config(clean)
+return clean
+```
+**Remove the Following Enumeration Entry:**
+From `normalise_config()`:
+```python
+"default_tone": tuple(TONES),
+```
+**Replace the Existing Default:**
+From:
+```python
+"default_tone": "Concise",
+```
+To:
+```python
+"default_tones": ["Concise"],
+```
+**Update Example Configuration:**
+In `scriptorium_config.example.json`, modify to reflect:
+```json
+"default_tones": [
+  "Concise"
+]
+```
+
+**Toolbar Design**
+
+The CustomTkinter library does not provide a robust native multi-select option menu. Substituting the current `CTkOptionMenu` with a large, permanently visible row of checkboxes would render the already cluttered toolbar excessively wide. 
+
+It is advisable to implement a compact button:
+```plaintext
+Tone: [Casual + Detailed ▾]
+```
+Selecting this button will reveal a small modal or transient picker containing the 14 tone checkboxes. A selection counter can display:
+```plaintext
+2 of 3 selected
+```
+**Buttons:**
+- Clear
+- Cancel
+- Apply
+
+This design maintains a lightweight appearance and allows for better scalability should additional tones be introduced in the future.
+
+**Suggested Picker Class**
+
+Insert the following class immediately before `SettingsDialog`:
+```python
+class TonePickerDialog(ctk.CTkToplevel):
+    """Facilitates an ordered selection of up to three compatible writing tones."""
+
+    def __init__(self, master, selected, on_apply):
+        super().__init__(master)
+        self.on_apply = on_apply
+        self.selected_order = list(validate_tones(selected))
+        self.variables = {}
+
+        self.title("Choose tones")
+        self.geometry("420x540")
+        self.resizable(False, False)
+        self.transient(master)
+        self.grab_set()
+
+        ctk.CTkLabel(
+            self,
+            text="Choose up to three tones",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).pack(anchor="w", padx=18, pady=(16, 2))
+
+        ctk.CTkLabel(
+            self,
+            text=(
+                "The first selected tone is dominant. Subsequent tones provide "
+                "supporting characteristics."
+            ),
+            wraplength=380,
+            justify="left",
+            text_color="gray65",
+        ).pack(anchor="w", padx=18, pady=(0, 10))
+
+        tone_frame = ctk.CTkScrollableFrame(self, height=350)
+        tone_frame.pack(fill="both", expand=True, padx=16, pady=4)
+
+        for tone in TONE_INSTRUCTIONS:
+            variable = tk.BooleanVar(value=tone in self.selected_order)
+            self.variables[tone] = variable
+            ctk.CTkCheckBox(
+                tone_frame,
+                text=tone,
+                variable=variable,
+                command=lambda name=tone: self._toggle_tone(name),
+            ).pack(anchor="w", padx=8, pady=5)
+
+        self.status_label = ctk.CTkLabel(
+            self, text="", text_color="gray65")
+        self.status_label.pack(anchor="w", padx=18, pady=(4, 0))
+
+        buttons = ctk.CTkFrame(self, fg_color="transparent")
+        buttons.pack(fill="x", padx=16, pady=14)
+
+        ctk.CTkButton(
+            buttons,
+            text="Clear",
+            width=90,
+            fg_color="gray30",
+            command=self._clear,
+        ).pack(side="left")
+
+        ctk.CTkButton(
+            buttons,
+            text="Cancel",
+            width=90,
+            fg_color="gray30",
+            command=self.destroy,
+        ).pack(side="right", padx=(8, 0))
+
+        ctk.CTkButton(
+            buttons,
+            text="Apply",
+            width=90,
+            command=self._apply,
+        ).pack(side="right")
+
+        self._refresh_status()
+    
+    def _toggle_tone(self, tone):
+        """Track selection order and limit selections to the defined maximum."""
+        selected = bool(self.variables[tone].get())
+
+        if selected:
+            if tone not in self.selected_order:
+                if len(self.selected_order) >= MAX_SELECTED_TONES:
+                    self.variables[tone].set(False)
+                    messagebox.showinfo(
+                        "Tone limit",
+                        f"Choose no more than {MAX_SELECTED_TONES} tones.",
+                        parent=self,
+                    )
+                    return
+                self.selected_order.append(tone)
+        elif tone in self.selected_order:
+            self.selected_order.remove(tone)
+
+        self._refresh_status()
+
+    def _refresh_status(self):
+        """Display the current count and dominant-tone order."""
+        count = len(self.selected_order)
+        if not self.selected_order:
+            description = "Original tone will be preserved."
+        else:
+            description = " → ".join(self.selected_order)
+        self.status_label.configure(
+            text=f"{count} of {MAX_SELECTED_TONES} selected: {description}"
+        )
+
+    def _clear(self):
+        """Clear all selected tones while preserving the source's original tone."""
+        self.selected_order.clear()
+        for variable in self.variables.values():
+            variable.set(False)
+        self._refresh_status()
+
+    def _apply(self):
+        """Validate the selection and return it to the application."""
+        try:
+            tones = validate_tones(self.selected_order)
+        except ValueError as exc:
+            messagebox.showwarning(
+                "Incompatible tones", str(exc), parent=self)
+            return
+
+        self.on_apply(tones)
+        self.destroy()
+```
+
+**Application State Management**
+
+In `Scriptorium.__init__()`, prior to invoking `_build_toolbar()`, initialise:
+```python
+self.selected_tones = list(
+    self.cfg.get("default_tones", ["Concise"])
+)
+```
+**Replace the Existing Tone CTkOptionMenu:**
+In `_build_toolbar()` at `[scriptorium.py](C:\\Scriptorium\\scriptorium.py)`, substitute with:
+```python
+ctk.CTkLabel(bar, text="Tone").grid(
+    row=0, column=6, padx=(20, 4))
+
+self.tone_button = ctk.CTkButton(
+    bar,
+    text="",
+    width=170,
+    fg_color="gray30",
+    command=self._open_tone_picker,
+)
+self.tone_button.grid(row=0, column=7, padx=4)
+self._refresh_tone_button()
+```
+**Add the Following Methods Immediately Below `_build_toolbar()`:**
+```python
+def _open_tone_picker(self):
+    """Open the compact multi-tone selection dialogue."""
+    TonePickerDialog(
+        self,
+        selected=self.selected_tones,
+        on_apply=self._set_selected_tones,
+    )
+
+def _set_selected_tones(self, tones):
+    """Apply a validated ordered tone selection to the current session."""
+    self.selected_tones = validate_tones(tones)
+    self._refresh_tone_button()
+
+def _refresh_tone_button(self):
+    """Display the current tone combination without overcrowding the toolbar."""
+    if not self.selected_tones:
+        label = "(keep original)"
+    else:
+        label = " + ".join(self.selected_tones)
+
+    if len(label) > 28:
+        label = f"{self.selected_tones[0]} +{len(self.selected_tones) - 1}"
+
+    self.tone_button.configure(text=label)
+```
+**Modify the Prompt Call in `process()`:**
+In `[scriptorium.py](C:\\Scriptorium\\scriptorium.py)`, change from:
+```python
+system_prompt = build_system_prompt(
+    self.mode_var.get(), self.strength_var.get(),
+    self.tone_var.get(), self.role_var.get(),
+    protect_tokens=bool(ph_map))
+```
+To:
+```python
+system_prompt = build_system_prompt(
+    self.mode_var.get(),
+    self.strength_var.get(),
+    tuple(self.selected_tones),
+    self.role_var.get(),
+    protect_tokens=bool(ph_map),
+)
+```
+This tuple snapshot ensures that any changes to tones during an active request do not affect the prompt for that request.
+
+**Preset Compatibility**
+
+The existing presets currently contain a single "tone" string. These should be transitioned to "tones" lists as follows:
+```python
+WRITING_PRESETS = {
+    "(none)": None,
+    "Formal letter": {
+        "mode": "Correct",
+        "strength": "Standard",
+        "role": "Executive",
+        "tones": ["Professional", "Diplomatic"],
+    },
+    "Client reply": {
+        "mode": "Clarify",
+        "strength": "Standard",
+        "role": "Client Relations",
+        "tones": ["Empathetic", "Constructive"],
+    },
+    "Technical note": {
+        "mode": "Clarify",
+        "strength": "Light",
+        "role": "Technical Writer",
+        "tones": ["Direct", "Concise"],
+    },
+}
+```
+In the `_apply_writing_preset()` method, replace:
+```python
+self.tone_var.set(preset["tone"])
+```
+With:
+```python
+self._set_selected_tones(preset.get("tones", []))
+```
+For temporary backward compatibility:
+```python
+tones = preset.get("tones")
+if tones is None:
+    legacy_tone = preset.get("tone", "(keep original)")
+    tones = [] if legacy_tone == "(keep original)" else [legacy_tone]
+self._set_selected_tones(tones)
+```
+### Role Assessment
+
+The proposed roles are indeed viable; however, the list exhibits significant semantic overlap:
+
+- Blogger, Content Creator, Copywriter, Writer
+- Creative Professional, Novelist, Story Writer
+- Designer, Graphic Designer
+- Educator, Teacher
+- Engineer, Software Developer
+- Lawyer, Legal & Compliance
+- Business Professional, Executive
+- Project Manager, Product Manager
+- Technical Writer, Writer
+
+While this overlap is not inherently problematic, it is essential that each role provides distinctly useful instructions. When multiple roles feature nearly identical prompt wording, the extensive menu may create an illusion of specificity without effectively altering the output.
+
+I propose maintaining the user-facing role names while defining each role along three dimensions:
+
+1. Intended Audience
+2. Structural Preference
+3. Vocabulary/Register
+
+For instance:
+
+```python
+ROLE_INSTRUCTIONS = {
+    "Blogger": (
+        "prioritise an accessible introduction, logical progression, and conversational "
+        "transitions suitable for a general online audience."
+    ),
+    "Business Professional": (
+        "emphasise polished workplace language, clear decisions, practical "
+        "outcomes, and concise next steps."
+    ),
+    "Content Creator": (
+        "focus on an engaging hook, accessible structure, and audience-centric "
+        "phrasing appropriate for digital content."
+    ),
+    "Copywriter": (
+        "utilise economical, memorable, and benefit-driven language while ensuring "
+        "all factual constraints from the source are preserved."
+    ),
+    "Creative Professional": (
+        "employ imaginative yet controlled phrasing suitable for portfolios, "
+        "creative proposals, and presentation narratives."
+    ),
+    "Designer": (
+        "utilise concise, user-focused language that articulates purpose, choices, "
+        "and experience without unnecessary technical jargon."
+    ),
+    "Educator": (
+        "prioritise logically sequenced explanations, accessible definitions, and "
+        "a clear, learning-oriented structure."
+    ),
+    "Engineer": (
+        "emphasise precise constraints, causal reasoning, measurable language, and "
+        "an orderly problem-solution structure."
+    ),
+    "Graphic Designer": (
+        "utilise visually aware, concise language regarding hierarchy, layout, "
+        "typography, colour, and communication objectives."
+    ),
+    "Journalist": (
+        "prioritise clear attribution, factual restraint, strong information hierarchy, "
+        "and neutral wording unless the source is explicitly opinionated."
+    ),
+    "Lawyer": (
+        "employ precise, qualified, and logically bounded language while maintaining "
+        "legal terminology and avoiding the introduction of invented obligations."
+    ),
+    "Novelist": (
+        "prioritise narrative rhythm, character-consistent voice, and vivid yet "
+        "source-grounded descriptions."
+    ),
+    "Product Manager": (
+        "focus on user needs, product outcomes, priorities, trade-offs, and clear "
+        "acceptance-oriented language."
+    ),
+    "Project Manager": (
+        "prioritise scope, responsibilities, dependencies, milestones, risks, and "
+        "unambiguous next actions."
+    ),
+    "Story Writer": (
+        "promote narrative flow, scene clarity, emotional continuity, and an "
+        "engaging progression without fabricating events."
+    ),
+    "Teacher": (
+        "prioritise supportive, age-appropriate explanations and clear instructions "
+        "tailored to learners."
+    ),
+    "Technical Writer": (
+        "emphasise unambiguous terminology, task-focused organisation, concise "
+        "steps, and consistent labels."
+    ),
+    "Writer": (
+        "prioritise balanced, polished prose with strong sentence flow while "
+        "maintaining the existing genre and voice of the source."
+    ),
+}
+```
+
+### A Few Cautions
+
+- Avoid instructing the model to “act as” or “adopt the persona of” a lawyer, engineer, or teacher. Scriptorium should apply a writing context rather than claim professional expertise.
+- The role of Lawyer should never imply legal advice or introduce legal interpretation.
+- The Engineer role must not generate technical conclusions absent from the source material.
+- The Journalist role must not fabricate attribution or corroboration.
+- The Copywriter and Persuasive roles should refrain from amplifying unsupported claims.
+- The Teacher, Educator, and Instructive roles must not create facts or steps that were not originally present.
+- The Detailed role must retain and organise detail without manufacturing it.
+
+### Proposed Role Names for Consideration
+
+A more cohesive menu structure may be achieved through the consolidation of roles:
+
+- **Creative and Creative Professional**: Retain as *Creative Professional*.
+- **Legal & Compliance and Lawyer**: Retain both only if:
+  - *Lawyer* focuses on legal drafting.
+  - *Legal & Compliance* centres on policies, controls, and obligations.
+- **Educator and Teacher**: Retain both only if:
+  - *Educator* encompasses explanatory or curriculum material.
+  - *Teacher* pertains to direct communication with learners.
+- **Designer and Graphic Designer**: Retain both only if:
+  - *Designer* is broader and user-centred.
+  - *Graphic Designer* explicitly addresses visual communication.
+- **Writer, Story Writer, and Novelist**: Differentiate between general prose, short-form narrative, and long-form fiction.
+
+Although the current **CTkOptionMenu** can accommodate an extensive role list, approximately 25 entries may become unwieldy. Transitioning to a **CTkComboBox** with predefined role values would represent a modest improvement, enabling users to type the initial letters. If this is implemented, it is advisable to validate the input against **ROLE_INSTRUCTIONS** prior to processing, rather than silently disregarding an invalid entry as if there were no role.
+
+### Combinatorial Range Analysis
+
+With 14 tones, the combinations are as follows:
+
+- **Single tones**: 14 combinations.
+- **Two-tone combinations**: 91 unordered combinations.
+- **Three-tone combinations**: 364 unordered combinations.
+
+This yields a total of 469 possible non-empty selections before considering the order.
+
+If order is significant:
+
+- **One tone**: 14.
+- **Ordered pairs**: 182.
+- **Ordered triples**: 2,184.
+
+This already provides more variation than users are likely to require. There is no justification for allowing four or more tones, as exceeding three can dilute, contradict, and complicate user expectations.
+
+The combination of model, editing mode, strength, role, and tone already creates a vast behavioural space. Given three modes, three strengths, approximately 25 roles, and hundreds of tone combinations, limiting to three tones serves as a usability safeguard rather than an arbitrary restriction.
+
+### Calibration Considerations
+
+The introduction of multiple tones will significantly influence prompt calibration, more so than the UI change may imply. It is recommended to test a small matrix before enabling all combinations:
+
+| Source Type        | Role               | Tones                     | Principal Risk                                   |
+|--------------------|--------------------|---------------------------|--------------------------------------------------|
+| Complaint Reply     | Client Relations    | Empathetic + Constructive  | Risk of invented acknowledgement or remedy      |
+| Business Memo       | Business Professional | Direct + Concise          | Potential loss of qualification or nuance       |
+| Legal Letter        | Lawyer              | Professional + Diplomatic  | Risk of softening legal meaning                  |
+| Tutorial            | Technical Writer    | Instructive + Detailed     | Possibility of invented steps                     |
+| Marketing Copy      | Copywriter          | Persuasive + Confident     | Risk of unsupported claims                        |
+| Blog Post           | Blogger             | Casual + Detailed          | Potential for unnecessary expansion               |
+| Staff Feedback      | Project Manager     | Assertive + Empathetic     | Risk of contradictory register                    |
+| Executive Update    | Executive           | Confident + Concise        | Potential for increased certainty                 |
+| Public Statement     | Journalist          | Neutral + Direct           | Risk of altered attribution                       |
+| Creative Draft      | Novelist            | Inspirational + Detailed    | Risk of introducing new narrative content        |
+
+For each scenario, please compare:
+- Names, figures, dates, and quotations.
+- Changes in sentence count and word count.
+- Added assertions versus removed qualifications.
+- Variations in certainty.
+- Whether “Detailed” resulted in elaboration.
+- Whether “Persuasive” strengthened factual claims.
+- Whether dominant-tone ordering produced a noticeable difference.
+
+Final Assessment:
+The implementation of multiple tones is warranted. This concept aligns particularly well with Scriptorium as the existing architecture already delineates:
+- Mode: the type of edit to perform.
+- Strength: the extent of the edit.
+- Role: the writing context.
+- Tone: the desired auditory quality of the result.
+
+The optimal approach includes:
+- Storing tones as an ordered list.
+- Limiting to a maximum of three tones.
+- Designating the first tone as dominant.
+- Providing explicit bounded instructions for every tone.
+- Initially prohibiting only genuinely confusing combinations.
+- Employing a compact picker rather than expanding the toolbar with multiple menus.
+- Maintaining migration from the existing **default_tone** string.
+- Updating presets to incorporate tone lists.
+- Testing for meaning preservation prior to expanding the conflict rules.
+
+I would advocate implementing two-tone support first in the UI while utilising a data model that permits three tones. This would facilitate the desired *Casual + Detailed* behaviour with a limited initial calibration surface. Once the two-tone matrix is reliable, increasing the picker limit from two to three can be accomplished with a simple configuration change, rather than necessitating another structural revision.
+
+---

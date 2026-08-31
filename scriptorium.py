@@ -36,7 +36,7 @@ Dependencies
     Optional: install python-docx to import from and export to Word (.docx)
     files (`pip install python-docx`). Plain text and Markdown work without it.
 
-Author: built with Mark, August 2026. Version 2.3.
+Author: built with Mark, August 2026. Version 2.4.
 """
 
 import os
@@ -60,7 +60,7 @@ import customtkinter as ctk
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.3"
+APP_VERSION = "2.4"
 
 def _config_dir():
     """Return the folder that holds scriptorium_config.json.
@@ -103,20 +103,140 @@ DEFAULT_OLLAMA_MODEL = "llama3.1:8b"
 
 MODES = ["Paraphrase", "Correct", "Clarify"]
 STRENGTHS = ["Light", "Standard", "Substantial"]
-TONES = ["(keep original)", "Formal", "Neutral", "Friendly",
-         "Concise", "Confident", "Diplomatic"]
+
+# Tones are data-driven, bounded instructions rather than bare labels, so the
+# model is told exactly what latitude a tone gives it instead of guessing —
+# this matters most for a tone that could otherwise be misread as licence to
+# add content (Detailed, Persuasive) rather than just adjust register. TONES
+# is derived from this table so the two structures can never drift apart.
+# Curated deliberately short: each entry covers a distinct stylistic
+# dimension (register, detail, interpersonal manner, force, purpose) rather
+# than padding the picker with near-synonyms.
+TONE_INSTRUCTIONS = {
+    "Formal": (
+        "use measured, correctly registered professional language; avoid "
+        "contractions and colloquialisms without becoming stiff or archaic"
+    ),
+    "Neutral": (
+        "keep the register even and impartial, favouring plain, unembellished "
+        "wording over strong emotional or persuasive colouring"
+    ),
+    "Casual": (
+        "use relaxed, natural phrasing and contractions where appropriate, "
+        "without becoming careless, slang-heavy or overly familiar"
+    ),
+    "Friendly": (
+        "use warm, approachable and courteous phrasing without becoming "
+        "overfamiliar"
+    ),
+    "Diplomatic": (
+        "use tactful, measured language that acknowledges differing positions "
+        "and avoids unnecessary confrontation"
+    ),
+    "Empathetic": (
+        "acknowledge the reader's likely concerns or perspective where the "
+        "source supports doing so, without inventing feelings or circumstances"
+    ),
+    "Direct": (
+        "state the central point promptly and unambiguously, avoiding hedging "
+        "that is not required by the source"
+    ),
+    "Confident": (
+        "use assured and composed phrasing without overstating certainty or "
+        "strengthening the source's claims"
+    ),
+    "Concise": (
+        "remove avoidable repetition and wordiness while retaining every "
+        "substantive point"
+    ),
+    "Detailed": (
+        "retain and organise the available detail clearly; do not invent "
+        "supporting facts, examples or explanations"
+    ),
+    "Constructive": (
+        "frame criticism or difficulty around improvement and practical next "
+        "steps that are already implied by the source, not new ones"
+    ),
+    "Persuasive": (
+        "present the source's existing reasoning compellingly and emphasise "
+        "its strongest supported points without adding evidence or claims"
+    ),
+}
+TONES = ["(keep original)", *TONE_INSTRUCTIONS]
+
+# Up to MAX_SELECTED_TONES may be combined, ordered with the first as
+# dominant and the rest as supporting characteristics (see
+# build_tone_instruction()). The toolbar picker is deliberately capped
+# lower, at TONE_PICKER_LIMIT, until a two-tone combination has actually
+# been checked against real output for injected content — raising it to
+# MAX_SELECTED_TONES is then a one-line change, not a redesign.
+MAX_SELECTED_TONES = 3
+TONE_PICKER_LIMIT = 2
+
+TONE_CONFLICTS = {
+    frozenset({"Concise", "Detailed"}): (
+        "'Concise' and 'Detailed' pull the revision in opposite directions. "
+        "Choose the one that best reflects the intended result."
+    ),
+    frozenset({"Casual", "Formal"}): (
+        "'Casual' and 'Formal' are opposite registers. Choose the one that "
+        "best reflects the intended result."
+    ),
+}
+
+
+def validate_tones(tones):
+    """Return a normalised, ordered, conflict-free tone list.
+
+    Order is preserved because the first entry is treated as dominant.
+    Duplicate, blank and "(keep original)" entries are dropped silently; an
+    unrecognised name is also dropped rather than raising, so a config from
+    an older or newer version of this file degrades gracefully instead of
+    crashing. This is the sole validation boundary for config loading,
+    preset application, the tone-picker dialogue and prompt construction —
+    no other method keeps its own copy of these rules.
+    """
+    normalised = []
+    for tone in tones:
+        if tone in ("", "(keep original)") or tone in normalised:
+            continue
+        if tone not in TONE_INSTRUCTIONS:
+            continue
+        normalised.append(tone)
+
+    if len(normalised) > MAX_SELECTED_TONES:
+        raise ValueError(f"Choose no more than {MAX_SELECTED_TONES} tones.")
+
+    selected = set(normalised)
+    for pair, message in TONE_CONFLICTS.items():
+        if pair.issubset(selected):
+            raise ValueError(message)
+
+    return normalised
+
 
 # Writing roles are data-driven *contexts*, not model personas. Each one steers
 # vocabulary, register and rhythm only — it never licenses adding facts or
 # jargon. Role, mode, strength and tone are independent knobs that stack.
+# Several plausible additions (Blogger, Content Creator, Writer, Creative
+# Professional, Designer/Graphic Designer, Educator/Teacher, Business
+# Professional, Copywriter, Novelist/Story Writer, Product Manager) were
+# deliberately left out: each overlaps heavily with an existing role or with
+# another candidate, and a longer menu that mostly repeats itself would
+# suggest more precision than it delivers.
 ROLES = [
     "(none)",
     "Creative",
     "Software Developer",
+    "Engineer",
     "Executive",
+    "Project Manager",
     "Client Relations",
     "Academic",
+    "Technical Writer",
+    "Journalist",
     "Legal & Compliance",
+    "Lawyer",
 ]
 
 ROLE_INSTRUCTIONS = {
@@ -129,9 +249,18 @@ ROLE_INSTRUCTIONS = {
         "structure; keep existing terminology exact and cut waffle and "
         "corporate buzzwords."
     ),
+    "Engineer": (
+        "favour precise constraints, causal reasoning and measurable language "
+        "in an orderly problem-then-solution structure; never state a "
+        "technical conclusion the source does not already support."
+    ),
     "Executive": (
         "favour a decisive, authoritative, outcome-focused register that is "
         "polite but direct, foregrounding decisions and clear next steps."
+    ),
+    "Project Manager": (
+        "favour clear scope, ownership, dependencies, milestones and risks, "
+        "ending on unambiguous next actions rather than open questions."
     ),
     "Client Relations": (
         "favour a warm, empathetic and reassuring register that stays courteous "
@@ -141,9 +270,26 @@ ROLE_INSTRUCTIONS = {
         "favour a formal, objective and measured register with careful hedging "
         "(indicates, suggests) and orderly, well-signposted transitions."
     ),
+    "Technical Writer": (
+        "favour unambiguous terminology, task-focused organisation and "
+        "consistent labelling for a reader following instructions or "
+        "documentation, not necessarily a technical specialist."
+    ),
+    "Journalist": (
+        "favour clear attribution, factual restraint and a strong information "
+        "hierarchy; keep wording neutral unless the source is explicitly "
+        "opinionated, and never add or imply a source or corroboration that "
+        "is not already present."
+    ),
     "Legal & Compliance": (
         "favour cautious, precise and tightly bounded phrasing that avoids "
         "accidental commitments, absolutes and ambiguous obligations."
+    ),
+    "Lawyer": (
+        "favour precise, qualified and logically bounded drafting language "
+        "that keeps existing legal terminology exact; never introduce a legal "
+        "interpretation, obligation or conclusion the source does not "
+        "already contain — this is not legal advice."
     ),
 }
 
@@ -157,15 +303,15 @@ WRITING_PRESETS = {
     "(none)": None,
     "Formal letter": {
         "mode": "Correct", "strength": "Standard",
-        "role": "Executive", "tone": "Formal",
+        "role": "Executive", "tones": ["Formal"],
     },
     "Client reply": {
         "mode": "Clarify", "strength": "Standard",
-        "role": "Client Relations", "tone": "Diplomatic",
+        "role": "Client Relations", "tones": ["Diplomatic"],
     },
     "Technical note": {
         "mode": "Clarify", "strength": "Light",
-        "role": "Software Developer", "tone": "Concise",
+        "role": "Software Developer", "tones": ["Concise"],
     },
 }
 
@@ -181,9 +327,34 @@ DEFAULT_CONFIG = {
     "default_mode": "Paraphrase",      # toolbar knobs applied at startup
     "default_strength": "Substantial",
     "default_role": "Academic",
-    "default_tone": "Concise",
+    "default_tones": ["Concise"],
     "default_diff_view": "Inline",
 }
+
+
+def normalise_tone_config(cfg):
+    """Migrate and validate the configured default tone selection.
+
+    A config written by an older version stores a single "default_tone"
+    string; this folds it into the current "default_tones" list so an
+    existing installation keeps working with no visible change, then drops
+    the legacy key so the two representations cannot drift apart.
+    """
+    clean = dict(cfg)
+    stored = clean.get("default_tones")
+    if isinstance(stored, str):
+        stored = [stored]
+    elif not isinstance(stored, list):
+        legacy = clean.get("default_tone", "(keep original)")
+        stored = [] if legacy == "(keep original)" else [legacy]
+
+    try:
+        clean["default_tones"] = validate_tones(stored)
+    except ValueError:
+        clean["default_tones"] = ["Concise"]
+
+    clean.pop("default_tone", None)
+    return clean
 
 
 def normalise_config(cfg):
@@ -203,7 +374,6 @@ def normalise_config(cfg):
         "default_mode": tuple(MODES),
         "default_strength": tuple(STRENGTHS),
         "default_role": tuple(ROLES),
-        "default_tone": tuple(TONES),
         "default_diff_view": ("Clean", "Inline"),
     }
     for key, allowed in choices.items():
@@ -219,6 +389,8 @@ def normalise_config(cfg):
             clean[key] = DEFAULT_CONFIG[key]
         else:
             clean[key] = value
+
+    clean = normalise_tone_config(clean)
     return clean
 
 
@@ -316,7 +488,37 @@ STRENGTH_INSTRUCTIONS = {
 }
 
 
-def build_system_prompt(mode, strength, tone, role="(none)",
+def build_tone_instruction(tones):
+    """Return a bounded prompt instruction for an ordered tone combination.
+
+    The first tone is dominant; later tones refine it rather than competing
+    equally. Every instruction stays subordinate to meaning preservation —
+    tone may reshape wording, rhythm and presentation only, never content.
+    """
+    tones = validate_tones(tones)
+    if not tones:
+        return ""
+
+    descriptions = [f"  - {tone}: {TONE_INSTRUCTIONS[tone]}." for tone in tones]
+
+    if len(tones) == 1:
+        relationship = f"Use {tones[0]} as the target tone."
+    else:
+        supporting = ", ".join(tones[1:])
+        relationship = (
+            f"Use {tones[0]} as the dominant tone. Blend in {supporting} as "
+            f"supporting characteristics. If they compete, {tones[0]} takes "
+            "priority.")
+
+    return (
+        "\n- Tone guidance:\n"
+        f"  {relationship}\n" + "\n".join(descriptions) +
+        "\n  Tone guidance may affect wording, rhythm and presentation only. "
+        "It must not introduce facts, increase certainty, invent feelings, "
+        "create commitments or alter the author's intended meaning.")
+
+
+def build_system_prompt(mode, strength, tones, role="(none)",
                         protect_tokens=False):
     """Assemble the system prompt that governs a single rewrite."""
     protect_line = ""
@@ -333,11 +535,7 @@ def build_system_prompt(mode, strength, tone, role="(none)",
                      "facts, technical claims or jargon that are not already "
                      "present or clearly implied in the source.")
 
-    tone_line = ""
-    if tone and tone != "(keep original)":
-        tone_line = (f"\n- Steer the tone towards: {tone.lower()}. "
-                     "Adjust word choice and phrasing accordingly, but never at "
-                     "the expense of the original meaning.")
+    tone_line = build_tone_instruction(tones)
 
     return f"""You are a meticulous British English copy-editor with decades of \
 experience in professional publishing.
@@ -809,6 +1007,107 @@ def audit_letter_conventions(text):
 
 
 # --------------------------------------------------------------------------- #
+#  Tone picker dialog
+# --------------------------------------------------------------------------- #
+# CustomTkinter has no built-in multi-select menu, and a permanently visible
+# row of tone checkboxes would overcrowd the toolbar, so the toolbar shows one
+# button summarising the current selection and opens this on demand instead.
+
+class TonePickerDialog(ctk.CTkToplevel):
+    """An ordered picker for up to TONE_PICKER_LIMIT compatible writing tones."""
+
+    def __init__(self, master, selected, on_apply):
+        super().__init__(master)
+        self.on_apply = on_apply
+        self.selected_order = list(validate_tones(selected))
+        self.variables = {}
+
+        self.title("Choose tones")
+        self.geometry("420x540")
+        self.resizable(False, False)
+        self.transient(master)
+        self.grab_set()
+
+        ctk.CTkLabel(
+            self, text=f"Choose up to {TONE_PICKER_LIMIT} tones",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).pack(anchor="w", padx=18, pady=(16, 2))
+
+        ctk.CTkLabel(
+            self,
+            text=("The first tone selected is dominant; a second tone "
+                  "supports it rather than competing equally."),
+            wraplength=380, justify="left", text_color="gray65",
+        ).pack(anchor="w", padx=18, pady=(0, 10))
+
+        tone_frame = ctk.CTkScrollableFrame(self, height=350)
+        tone_frame.pack(fill="both", expand=True, padx=16, pady=4)
+
+        for tone in TONE_INSTRUCTIONS:
+            variable = tk.BooleanVar(value=tone in self.selected_order)
+            self.variables[tone] = variable
+            ctk.CTkCheckBox(
+                tone_frame, text=tone, variable=variable,
+                command=lambda name=tone: self._toggle_tone(name),
+            ).pack(anchor="w", padx=8, pady=5)
+
+        self.status_label = ctk.CTkLabel(self, text="", text_color="gray65")
+        self.status_label.pack(anchor="w", padx=18, pady=(4, 0))
+
+        buttons = ctk.CTkFrame(self, fg_color="transparent")
+        buttons.pack(fill="x", padx=16, pady=14)
+
+        ctk.CTkButton(buttons, text="Clear", width=90, fg_color="gray30",
+                      command=self._clear).pack(side="left")
+        ctk.CTkButton(buttons, text="Cancel", width=90, fg_color="gray30",
+                      command=self.destroy).pack(side="right", padx=(8, 0))
+        ctk.CTkButton(buttons, text="Apply", width=90,
+                      command=self._apply).pack(side="right")
+
+        self._refresh_status()
+
+    def _toggle_tone(self, tone):
+        """Track selection order and enforce the picker's soft limit."""
+        if self.variables[tone].get():
+            if tone not in self.selected_order:
+                if len(self.selected_order) >= TONE_PICKER_LIMIT:
+                    self.variables[tone].set(False)
+                    messagebox.showinfo(
+                        "Tone limit",
+                        f"Choose no more than {TONE_PICKER_LIMIT} tones.",
+                        parent=self)
+                    return
+                self.selected_order.append(tone)
+        elif tone in self.selected_order:
+            self.selected_order.remove(tone)
+        self._refresh_status()
+
+    def _refresh_status(self):
+        """Show the current count and dominant-first tone order."""
+        count = len(self.selected_order)
+        description = (" → ".join(self.selected_order) if self.selected_order
+                       else "original tone will be preserved")
+        self.status_label.configure(
+            text=f"{count} of {TONE_PICKER_LIMIT} selected: {description}")
+
+    def _clear(self):
+        self.selected_order.clear()
+        for variable in self.variables.values():
+            variable.set(False)
+        self._refresh_status()
+
+    def _apply(self):
+        """Validate the selection (conflicts included) and hand it back."""
+        try:
+            tones = validate_tones(self.selected_order)
+        except ValueError as exc:
+            messagebox.showwarning("Incompatible tones", str(exc), parent=self)
+            return
+        self.on_apply(tones)
+        self.destroy()
+
+
+# --------------------------------------------------------------------------- #
 #  Settings dialog
 # --------------------------------------------------------------------------- #
 
@@ -975,6 +1274,7 @@ class Scriptorium(ctk.CTk):
         self.busy = False
         self._request_id = 0          # bumped on every Process and every cancel
         self._result_source = ""      # the text last_result was generated from
+        self.selected_tones = list(self.cfg.get("default_tones", ["Concise"]))
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
@@ -1040,10 +1340,11 @@ class Scriptorium(ctk.CTk):
                           ).grid(row=0, column=5, padx=4)
 
         ctk.CTkLabel(bar, text="Tone").grid(row=0, column=6, padx=(20, 4))
-        self.tone_var = ctk.StringVar(
-            value=self.cfg.get("default_tone", "Concise"))
-        ctk.CTkOptionMenu(bar, values=TONES, variable=self.tone_var, width=150
-                          ).grid(row=0, column=7, padx=4)
+        self.tone_button = ctk.CTkButton(
+            bar, text="", width=150, fg_color="gray30",
+            command=self._open_tone_picker)
+        self.tone_button.grid(row=0, column=7, padx=4)
+        self._refresh_tone_button()
 
         ctk.CTkLabel(bar, text="Preset").grid(row=0, column=8, padx=(20, 4))
         self.preset_var = ctk.StringVar(value="(none)")
@@ -1068,8 +1369,28 @@ class Scriptorium(ctk.CTk):
         self.mode_var.set(preset["mode"])
         self.strength_var.set(preset["strength"])
         self.role_var.set(preset["role"])
-        self.tone_var.set(preset["tone"])
+        self._set_selected_tones(preset.get("tones", []))
         self._refresh_status(f"preset applied: {name}")
+
+    def _open_tone_picker(self):
+        """Open the compact multi-tone selection dialogue."""
+        TonePickerDialog(self, selected=self.selected_tones,
+                         on_apply=self._set_selected_tones)
+
+    def _set_selected_tones(self, tones):
+        """Apply a validated, ordered tone selection to the current session."""
+        self.selected_tones = validate_tones(tones)
+        self._refresh_tone_button()
+
+    def _refresh_tone_button(self):
+        """Show the current tone combination without overcrowding the toolbar."""
+        if not self.selected_tones:
+            label = "(keep original)"
+        else:
+            label = " + ".join(self.selected_tones)
+        if len(label) > 24:
+            label = f"{self.selected_tones[0]} +{len(self.selected_tones) - 1}"
+        self.tone_button.configure(text=label)
 
     def _build_panes(self):
         panes = ctk.CTkFrame(self, fg_color="transparent")
@@ -1334,10 +1655,20 @@ class Scriptorium(ctk.CTk):
             busy_note = f"protecting {len(ph_map)} placeholder(s), contacting the model…"
         self._refresh_status(busy_note)
 
-        system_prompt = build_system_prompt(
-            self.mode_var.get(), self.strength_var.get(),
-            self.tone_var.get(), self.role_var.get(),
-            protect_tokens=bool(ph_map))
+        try:
+            system_prompt = build_system_prompt(
+                self.mode_var.get(), self.strength_var.get(),
+                tuple(self.selected_tones), self.role_var.get(),
+                protect_tokens=bool(ph_map))
+        except ValueError as exc:
+            # Defence-in-depth: self.selected_tones is only ever set through
+            # _set_selected_tones()/config normalisation, both of which
+            # already validate it, so this should not trigger in practice —
+            # but raising here, mid-_set_busy(True), would otherwise strand
+            # Process on "Working…" with no way to recover.
+            self._set_busy(False)
+            messagebox.showerror("Could not process", str(exc))
+            return
         cfg_snapshot = dict(self.cfg)  # Settings changes mid-request affect the next one only
 
         def worker():

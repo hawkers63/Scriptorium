@@ -4,16 +4,24 @@
 When Mark says "lets get started", that is the cue to open these three files
 before doing anything else.
 
-Current shipped version: **2.0** (standalone packaging, atomic config write).
-This roadmap scopes the next five releases: **2.1 → 2.5**.
+Current shipped version: **2.3** (state-consistency fixes, live counts,
+presets, review shortcuts). This roadmap scopes the next three releases:
+**2.4 → 2.6**.
 
-Scope was drawn from twelve accumulated review notes
+Scope through v2.3 was drawn from twelve accumulated review notes
 (`notes/01_Active/notes_001.txt` – `notes_012.txt`), written independently by
 three different reviewers (ChatGPT/Codex, Claude, Grok) across v1.0–v2.0.
 Where two or more reviewers converged on the same finding, that finding is
-treated as reliable. All findings below were cross-checked against the actual
-v2.0 source (`scriptorium.py`, 1,297 lines) on 2026-08-31 — every "still open"
-item below was confirmed absent from the code, not just asserted by a note.
+treated as reliable. All findings were cross-checked against the actual v2.0
+source (`scriptorium.py`, 1,297 lines) on 2026-08-31 — every "still open" item
+was confirmed absent from the code, not just asserted by a note.
+
+v2.4 was inserted ahead of the previously-planned tray/autostart release at
+Mark's request, on the strength of a thirteenth note (`notes_013.txt`,
+31 Aug, Mark/Codex) proposing multi-tone composition and an expanded role
+list — unrelated to tray/autostart, so it did not fit the existing v2.4 slot
+without pushing that work back a step. The former v2.4 (tray) is now v2.5,
+and the former v2.5 (bug diagnosis) is now v2.6.
 
 ---
 
@@ -27,7 +35,7 @@ a release sometimes depend on earlier ones (noted inline). Update
 written.
 
 Do not re-derive fixes from the older notes (001–008) — those defects are
-already closed in v2.0. Notes 009–012 are the live backlog this roadmap is
+already closed in v2.0. Notes 009–013 are the live backlog this roadmap is
 built from.
 
 ---
@@ -190,7 +198,79 @@ proposed since notes_002 and that still don't exist in v2.0.
 
 ---
 
-## v2.4 — Tray, Autostart & Distribution Polish
+## v2.4 — Multi-Tone Composition & Expanded Roles
+
+**Goal:** implement notes_013's two proposals — combining up to a handful of
+tones in one request instead of a single choice, and widening the role menu
+— while holding the line on Scriptorium's core contract: a tone or role may
+change wording, register and rhythm, never add content. Roles and tones
+actually added were curated down from notes_013's full lists (18 candidate
+roles, 14 candidate tones); see the code comments beside `ROLES` and
+`TONE_INSTRUCTIONS` for why each omission was left out — mostly heavy overlap
+with something already on the menu.
+
+1. **Data-driven, composable tones** (notes_013). Replace the single generic
+   "steer the tone towards: X" prompt line with `TONE_INSTRUCTIONS` — an
+   explicit, bounded instruction per tone — plus `build_tone_instruction()`,
+   which treats an ordered list as dominant-tone-first-with-supporting-tones
+   rather than joining labels into a string. `TONES` is derived from
+   `TONE_INSTRUCTIONS` so the two cannot drift apart.
+2. **Tone validation as a single boundary** (notes_013). `validate_tones()`
+   is the sole place that drops duplicates/unknowns, enforces
+   `MAX_SELECTED_TONES`, and rejects a genuinely contradictory pair via
+   `TONE_CONFLICTS` (Concise+Detailed, Casual+Formal) — config loading,
+   preset application, the picker dialogue and prompt construction all call
+   through it rather than keeping separate copies of the rules.
+3. **Config migration** (notes_013). `default_tone` (string) becomes
+   `default_tones` (ordered list); `normalise_tone_config()` migrates an
+   existing installation's old key on load and folds an invalid/conflicting
+   stored selection back to `["Concise"]` rather than crashing.
+4. **Compact tone picker UI** (notes_013). `TonePickerDialog` replaces the
+   single-select `CTkOptionMenu` with a toolbar button that opens an ordered
+   checkbox picker (Clear/Cancel/Apply). Deliberately capped at
+   `TONE_PICKER_LIMIT = 2` even though the data model and `validate_tones()`
+   support `MAX_SELECTED_TONES = 3` — notes_013's own recommendation, so a
+   two-tone combination can be checked against real output before the picker
+   is opened up to three with a one-line change.
+5. **Curated new tones** (notes_013, narrowed). Added Casual, Direct,
+   Empathetic, Detailed, Constructive and Persuasive alongside the existing
+   six, chosen to cover a distinct stylistic dimension each (register, force,
+   interpersonal manner, detail, purpose) rather than padding the list with
+   near-synonyms. "Detailed" and "Persuasive" carry the strictest bounding
+   text of any tone, since both are the ones most likely to be misread as
+   licence to add content.
+6. **Curated new roles** (notes_013, narrowed). Added Engineer, Journalist,
+   Lawyer, Project Manager and Technical Writer to the existing six, again
+   trimmed from notes_013's eighteen candidates down to entries that don't
+   substantially duplicate an existing role. Lawyer and Journalist in
+   particular carry an explicit "never imply legal advice" / "never fabricate
+   attribution" guard in their instruction text, per notes_013's cautions.
+
+### Acceptance checklist
+- [ ] A single selected tone behaves exactly as before (one bounded
+      instruction, no dominant/supporting language in the prompt).
+- [ ] Two selected tones show correct dominant/supporting phrasing, and a
+      real run against the live backend changes wording/register only — no
+      new facts, figures or invented detail (check combinations involving
+      Detailed or Persuasive specifically).
+- [ ] The picker refuses a third tone even though `validate_tones()` itself
+      accepts three; ticking a third checkbox shows the limit message and
+      the checkbox reverts.
+- [ ] Choosing Concise+Detailed or Casual+Formal in the picker is refused
+      with the conflict message; a hand-edited config with that pairing in
+      `default_tones` falls back to `["Concise"]` on load rather than
+      crashing.
+- [ ] A config file with the legacy `default_tone` string still loads
+      correctly and is silently migrated to `default_tones` on next save.
+- [ ] The three existing presets still apply their original single tone
+      correctly now that it is stored as a one-item list.
+- [ ] Spot-check the Lawyer and Engineer roles against real source text:
+      no invented legal interpretation, obligation, or technical conclusion
+      not already present.
+
+---
+
+## v2.5 — Tray, Autostart & Distribution Polish
 
 **Goal:** the deferred, higher-risk lifecycle feature (minimise-to-tray /
 start-with-Windows) that every earlier note has correctly pushed to "later,
@@ -243,16 +323,16 @@ remaining small distribution-polish items so packaging work lands together.
 
 ---
 
-## v2.5 — Bug Diagnosis & Resolution Session
+## v2.6 — Bug Diagnosis & Resolution Session
 
 **Goal:** this release is deliberately **not** pre-scoped with a fixed
 feature/fix list, per Mark's designation — it is a dedicated diagnosis
-session against whatever state v2.1–v2.4 actually left the app in,
+session against whatever state v2.1–v2.5 actually left the app in,
 including anything those releases introduced.
 
 Run this as a structured pass, in order:
 
-1. **Regression-verify every acceptance checklist item from v2.1–v2.4**
+1. **Regression-verify every acceptance checklist item from v2.1–v2.5**
    against the real app (source run *and* the packaged `.exe` — several
    confirmed defects in this backlog, e.g. the post-close crash dialog,
    only manifest in the windowed build, not `python scriptorium.py`).
@@ -275,13 +355,13 @@ Run this as a structured pass, in order:
    Import/Undo while busy, Settings Save mid-request).
 4. **Triage and fix** whatever the above turns up, smallest-safe-change
    style, consistent with every prior note's philosophy in this project.
-5. **Update this roadmap** with a v2.6+ scope once the diagnosis is
+5. **Update this roadmap** with a v2.7+ scope once the diagnosis is
    complete — do not pre-write it now; that defeats the purpose of a
    dedicated diagnosis session.
 
 ---
 
-## Deferred / explicitly out of scope for v2.1–v2.5
+## Deferred / explicitly out of scope for v2.1–v2.6
 
 - Migrating the API key to Windows Credential Manager (`keyring`) — real
   architectural change, correctly flagged as out-of-scope by every note
@@ -294,8 +374,8 @@ Run this as a structured pass, in order:
   schema, UI state and token cost; correctly ordered last by every review
   that mentions it, and not picked up in this roadmap either.
 - Recent-revisions history panel (notes_003/005/006) — sound idea, but
-  every subsequent review has consistently prioritised the six items above
-  it; revisit after v2.5 if it's still wanted.
+  every subsequent review has consistently prioritised the items above it;
+  revisit after v2.6 if it's still wanted.
 
 ---
 
@@ -307,11 +387,12 @@ Run this as a structured pass, in order:
 | notes_003–004 | 26 Aug | Antigravity / Claude | v1.2 | Closed by v1.3–v1.4 |
 | notes_005 | 27 Aug | Claude | v1.4 | Closed by v1.5–v1.7 |
 | notes_006–007 | 27 Aug | Grok | v1.5 | Closed by v1.7–v2.0 |
-| notes_008 | 28 Aug | Mark & Grok | v1.7 | Partially closed (tray deferred → v2.4) |
+| notes_008 | 28 Aug | Mark & Grok | v1.7 | Partially closed (tray deferred → v2.5) |
 | notes_009 | 29 Aug | ChatGPT / Codex | v1.9 | Partially closed by v2.0; remainder → v2.1–v2.3 |
 | notes_010 | 29 Aug | Grok | v2.0 | **Open — basis for v2.1–v2.3** |
-| notes_011 | 31 Aug | ChatGPT / Codex | v2.0 | **Open — basis for v2.1–v2.4** |
-| notes_012 | 31 Aug | Lynne | v2.0 (delta) | **Open — basis for v2.2–v2.4** |
+| notes_011 | 31 Aug | ChatGPT / Codex | v2.0 | **Open — basis for v2.1–v2.3, v2.5** |
+| notes_012 | 31 Aug | Lynne | v2.0 (delta) | **Open — basis for v2.2–v2.3, v2.5** |
+| notes_013 | 31 Aug | Mark / Codex | v2.3 | **Open — basis for v2.4** |
 
 All confirmed still-open as of 2026-08-31 by direct inspection of
 `scriptorium.py` (v2.0, 1,297 lines): no `normalise_config`, no
