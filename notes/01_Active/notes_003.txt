@@ -1,0 +1,393 @@
+================================================================================
+ SCRIPTIC REVIEW REPORT: SCRIPTORIUM V1.2 TECHNICAL ASSESSMENT & ROADMAP
+================================================================================
+ Author: Antigravity Code Review System
+ Date:   26 August 2026
+ Target: C:\Scriptorium\scriptorium.py (Version 1.2)
+ Reference Notes: notes_001.txt, notes_002.txt
+================================================================================
+
+1. EXECUTIVE SUMMARY & RECENT NOTES RECONCILIATION
+--------------------------------------------------------------------------------
+An inspection of the codebase indicates substantial progress between Version 1.0 
+and Version 1.2. The implementation of Writing Roles (as contextual modifiers 
+rather than intrusive personas) and Sentinel-based Placeholder Masking 
+([Name], {{Date}}, {amount}, <Date>) has successfully addressed several key 
+recommendations from notes_001.txt and notes_002.txt.
+
+However, several critical state-handling, schema-parsing, and text-fidelity 
+bugs remain unaddressed in scriptorium.py. This report documents all identified 
+vulnerabilities, provides drop-in fixes, and presents three high-value, 
+lightweight features tailored specifically for British English letter rewriting.
+
+Status of Previous Findings:
+  * [RESOLVED] Writing Roles taxonomy added to toolbar and prompt builder.
+  * [RESOLVED] Placeholder protection with sentinels (⟦PH0⟧) implemented.
+  * [RESOLVED] Placeholder settings checkbox added to Settings dialog.
+  * [RESOLVED] Config file excluded in .gitignore with example template provided.
+  * [OPEN] Stale result hazard: original_box mutations during/after processing.
+  * [OPEN] Leading/trailing whitespace and blank line destruction via .strip().
+  * [OPEN] Missing runtime type coercion and null handling in _extract_json().
+  * [OPEN] Ollama HTTP error details swallowed in call_ollama().
+  * [NEW] Duplicate placeholder restoration bug leaving raw sentinels in output.
+  * [NEW] Asynchronous race condition between UI text editing and Accept/Export.
+
+
+2. IN-DEPTH INVESTIGATION & BUG HUNTING
+--------------------------------------------------------------------------------
+
+2.1. BUG #1 — Stale Result & Data Inconsistency Hazard on Asynchronous Edits
+    Severity: HIGH (Data Loss / Logic Error)
+    Location: scriptorium.py -> Scriptorium.process(), accept(), export_file()
+    Detail:
+      When process() is invoked, the user text is captured in a local variable 
+      `original`. While the background daemon thread is executing (which can 
+      take 5–30 seconds on local Ollama models), the `original_box` widget 
+      remains fully editable. If the user continues typing, pastes new content, 
+      or clicks Undo/Clear, the worker thread eventually completes and delivers 
+      a revision for the OLD text.
+      When the user subsequently clicks "Accept ->", the application executes:
+          self.undo_stack.append(self.original_box.get("1.0", "end-1c"))
+          self.original_box.delete("1.0", "end")
+          self.original_box.insert("1.0", self.last_result["revised"])
+      This completely obliterates the user's latest manual modifications with 
+      the stale revision. The same issue affects `export_file()`, which exports 
+      the stale revision instead of the active workspace.
+    Remedy:
+      Store `self.processed_text_hash` upon starting processing, and listen for 
+      modifications in `original_box`. If the text in `original_box` diverges 
+      from the processed baseline, flag the revision as out-of-date and prompt 
+      before overwriting.
+
+2.2. BUG #2 — Format Destruction via .strip() on Input
+    Severity: MEDIUM (Formatting & Layout Loss)
+    Location: scriptorium.py -> Scriptorium.process() (Line 710)
+    Detail:
+      Line 710 executes:
+          original = self.original_box.get("1.0", "end-1c").strip()
+      Stripping the string removes intentional leading blank lines, formal letter 
+      header indentation, date line spacing, and trailing signature spacing. 
+      This directly violates Scriptorium's core philosophy of honouring the 
+      author's layout and intent.
+    Remedy:
+      Retrieve the unstripped string for processing and only verify non-emptiness 
+      with `.strip()`.
+
+2.3. BUG #3 — Incomplete Type Coercion & Null Handling in _extract_json()
+    Severity: MEDIUM (UI Visual Glitches & Uncaught Exceptions)
+    Location: scriptorium.py -> _extract_json() (Lines 269–275)
+    Detail:
+      The current implementation performs:
+          data.setdefault("ambiguities", [])
+          if not isinstance(data["ambiguities"], list):
+              data["ambiguities"] = [str(data["ambiguities"])]
+      If a model returns `{"ambiguities": null}` or `{"ambiguities": None}`, the 
+      key exists with value `None`. Consequently, `setdefault` does not replace 
+      it. The `not isinstance` check fires and executes `[str(None)]`, resulting 
+      in `["None"]`. The UI ambiguity box then displays `* None` to the user.
+      Furthermore, if `data["revised"]` is returned as a list of paragraphs or 
+      an integer/object, downstream string operations crash with TypeErrors.
+    Remedy:
+      Implement strict schema normalisation that coerces `revised` to string, 
+      filters null/empty elements from `ambiguities`, and ensures `note` is string.
+
+2.4. BUG #4 — Duplicate Sentinel Placeholder Restoration Bug
+    Severity: MEDIUM (Text Corruption)
+    Location: scriptorium.py -> restore_placeholders() (Lines 435–448)
+    Detail:
+      If a placeholder sentinel appears more than once in the model's output, 
+      line 443 executes:
+          text = text.replace(sentinel, original, 1)
+      This replaces only the first occurrence. Any subsequent occurrences are 
+      left in the text as raw sentinels (e.g. `⟦PH0⟧`), contaminating the final 
+      letter and diff views.
+    Remedy:
+      Replace all occurrences with `text = text.replace(sentinel, original)` 
+      while still appending a warning to the user.
+
+2.5. BUG #5 — Ollama HTTP Error Payload Swallowed
+    Severity: LOW (Poor Diagnostics)
+    Location: scriptorium.py -> call_ollama() (Lines 337–345)
+    Detail:
+      `call_ollama` catches `urllib.error.URLError` only. When Ollama returns an 
+      HTTP 404 (e.g. model not found), `HTTPError` is caught by the `URLError` 
+      handler, outputting a generic "Could not reach Ollama at localhost:11434" 
+      message rather than the specific model diagnostic from Ollama.
+    Remedy:
+      Explicitly handle `urllib.error.HTTPError` to extract Ollama's JSON error.
+
+
+3. TARGETED CODE FIXES (MODULAR SNIPPETS)
+--------------------------------------------------------------------------------
+
+### Fix 1: Schema Sanitisation & Type Normalisation
+Insert at: scriptorium.py, replacing lines 251–275 in `_extract_json()`
+
+```python
+def _extract_json(text):
+    """Pull a JSON object out of a model response, tolerating stray fences and raw text.
+    
+    Ensures strict runtime type coercion for 'revised', 'ambiguities', and 'note' keys.
+    """
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+        text = re.sub(r"\n?```$", "", text).strip()
+    
+    # Fall back to the outermost braces if there is leading/trailing chatter.
+    if not text.startswith("{"):
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end != -1:
+            text = text[start:end + 1]
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise BackendError(
+            "The model did not return valid JSON. Try again, or lower the "
+            f"editing strength.\n\n(Parser detail: {exc})"
+        )
+
+    if not isinstance(data, dict):
+        raise BackendError("The model response was not a valid JSON dictionary.")
+
+    # 1. Normalise 'revised'
+    revised = data.get("revised")
+    if revised is None:
+        raise BackendError("The model response was missing the 'revised' field.")
+    if isinstance(revised, list):
+        data["revised"] = "\n\n".join(str(p) for p in revised)
+    elif not isinstance(revised, str):
+        data["revised"] = str(revised)
+
+    # 2. Normalise 'ambiguities'
+    ambiguities = data.get("ambiguities")
+    if isinstance(ambiguities, list):
+        data["ambiguities"] = [str(a).strip() for a in ambiguities if a and str(a).strip() != "None"]
+    elif ambiguities and str(ambiguities).strip() != "None":
+        data["ambiguities"] = [str(ambiguities).strip()]
+    else:
+        data["ambiguities"] = []
+
+    # 3. Normalise 'note'
+    note = data.get("note")
+    data["note"] = str(note).strip() if note and str(note).strip() != "None" else ""
+
+    return data
+```
+
+### Fix 2: Full Sentinel Placeholder Restoration
+Insert at: scriptorium.py, replacing lines 427–450 in `restore_placeholders()`
+
+```python
+def restore_placeholders(text, mapping):
+    """Put the original placeholders back into the revised text.
+
+    Replaces all sentinel occurrences and returns (restored_text, warnings).
+    """
+    warnings = []
+    for sentinel, original in mapping:
+        count = text.count(sentinel)
+        if count == 0:
+            warnings.append(
+                f"The placeholder {original} is missing from the revision — the "
+                "model appears to have dropped it. Re-run, or paste it back in "
+                "by hand.")
+            continue
+        # Replace all instances to prevent raw sentinels remaining in prose
+        text = text.replace(sentinel, original)
+        if count > 1:
+            warnings.append(
+                f"The placeholder {original} appeared {count} times in the "
+                "revision; all occurrences were restored.")
+    return text, warnings
+```
+
+### Fix 3: Whitespace & State Integrity in Processing
+Insert at: scriptorium.py, replacing lines 707–745 in `Scriptorium.process()`
+
+```python
+    def process(self):
+        """Initiate asynchronous text processing with state snapshot protection."""
+        if self.busy:
+            return
+
+        original = self.original_box.get("1.0", "end-1c")
+        if not original.strip():
+            self._refresh_status("nothing to process")
+            return
+
+        # Snapshot active state to guard against concurrent edits
+        self.processing_source = original
+
+        # Protect placeholders by masking them before model transmission
+        if self.cfg.get("protect_placeholders", True):
+            masked, ph_map = mask_placeholders(original)
+        else:
+            masked, ph_map = original, []
+
+        self.busy = True
+        self.process_btn.configure(text="Working…", state="disabled")
+        busy_note = "contacting the model…"
+        if ph_map:
+            busy_note = f"protecting {len(ph_map)} placeholder(s), contacting the model…"
+        self._refresh_status(busy_note)
+
+        system_prompt = build_system_prompt(
+            self.mode_var.get(), self.strength_var.get(),
+            self.tone_var.get(), self.role_var.get(),
+            protect_tokens=bool(ph_map))
+
+        def worker():
+            try:
+                result = run_backend(system_prompt, masked, self.cfg)
+                self.after(0, self._on_success, original, ph_map, result)
+            except BackendError as exc:
+                self.after(0, self._on_error, str(exc))
+            except Exception as exc:  # noqa: BLE001
+                self.after(0, self._on_error, f"Unexpected error: {exc}")
+
+        threading.Thread(target=worker, daemon=True).start()
+```
+
+
+4. THREE HIGH-IMPACT NEW FEATURES FOR SCRIPTORIUM
+--------------------------------------------------------------------------------
+
+### Feature 1: Dual-Mode Diff Viewer (Clean Revision vs Inline Strikethrough)
+* **Rationale:** Currently, deleted words disappear entirely from the revision pane. Writers cannot see what was eliminated without manual cross-comparison. This feature adds a clean segmented toggle ("Clean View" vs "Inline Diff"). In Inline Diff mode, deletions are struck through in red (`#e06c75`), while additions appear in emerald green (`#4ec9b0`).
+* **UI Integration:** Place a small segmented selector above the revision pane.
+* **Code Implementation:**
+
+```python
+def render_inline_diff(text_widget, original, revised, show_deletions=True):
+    """Render revision with optional strikethrough for deleted text.
+
+    Args:
+        text_widget (tk.Text): The target Tkinter text widget.
+        original (str): The baseline original text.
+        revised (str): The newly generated revision.
+        show_deletions (bool): If True, renders deleted original words with overstrike.
+    """
+    text_widget.configure(state="normal")
+    text_widget.delete("1.0", "end")
+
+    # Tag styling configuration
+    text_widget.tag_config("inserted", foreground="#4ec9b0")
+    text_widget.tag_config("deleted", foreground="#e06c75", overstrike=1)
+
+    a, b = _tokenise(original), _tokenise(revised)
+    matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            text_widget.insert("end", "".join(b[j1:j2]))
+        elif tag == "insert":
+            text_widget.insert("end", "".join(b[j1:j2]), "inserted")
+        elif tag == "delete":
+            if show_deletions:
+                text_widget.insert("end", "".join(a[i1:i2]), "deleted")
+        elif tag == "replace":
+            if show_deletions:
+                text_widget.insert("end", "".join(a[i1:i2]), "deleted")
+            text_widget.insert("end", "".join(b[j1:j2]), "inserted")
+
+    text_widget.configure(state="disabled")
+```
+
+### Feature 2: Real-Time Live Word, Character & Readability Metrics
+* **Rationale:** When preparing letters or documents to word budgets, authors require real-time feedback. This feature binds `<KeyRelease>` on `original_box` and dynamically calculates word counts, character counts, and word count deltas upon revision completion.
+* **UI Integration:** Enhances `_refresh_status()` and binds to `self.original_box.bind("<KeyRelease>", ...)`.
+* **Code Implementation:**
+
+```python
+def calculate_text_metrics(text):
+    """Compute word count, character count, and estimated reading time.
+
+    Returns dict containing 'words', 'chars', and 'read_time_min'.
+    """
+    words = len(re.findall(r"\b\w+\b", text))
+    chars = len(text)
+    read_time = max(1, round(words / 200)) if words > 0 else 0
+    return {"words": words, "chars": chars, "read_time": read_time}
+
+
+def update_live_metrics(app_instance):
+    """Update status bar with live word and character metrics."""
+    orig_text = app_instance.original_box.get("1.0", "end-1c")
+    orig_m = calculate_text_metrics(orig_text)
+
+    msg = f"Original: {orig_m['words']} words ({orig_m['chars']} chars)"
+    if app_instance.last_result:
+        rev_m = calculate_text_metrics(app_instance.last_result["revised"])
+        diff_words = rev_m["words"] - orig_m["words"]
+        diff_sign = f"+{diff_words}" if diff_words > 0 else str(diff_words)
+        msg += f"  |  Revision: {rev_m['words']} words ({diff_sign})  |  ~{rev_m['read_time']} min read"
+
+    app_instance._refresh_status(extra=msg)
+```
+
+### Feature 3: British Letter Etiquette & Valediction Normaliser
+* **Rationale:** As a dedicated British English writing assistant, Scriptorium can automate and verify traditional UK correspondence rules (e.g. "Dear Sir/Madam" paired with "Yours faithfully", named recipients with "Yours sincerely", and business informal with "Kind regards").
+* **Implementation:** A modular policy helper that inspects the opening and closing lines of the revised letter and flags discrepancies in the ambiguity strip or offers 1-click etiquette normalisation.
+* **Code Implementation:**
+
+```python
+class BritishLetterConventions:
+    """Validator and normaliser for traditional British letter etiquette."""
+
+    @staticmethod
+    def audit_letter_conventions(text):
+        """Check for adherence to British salutation and valediction pairing.
+
+        Rules:
+          - 'Dear Sir(s) / Madam' -> Must close with 'Yours faithfully'
+          - 'Dear [Name] / Mr/Ms/Dr [Name]' -> Must close with 'Yours sincerely'
+          - Informal 'Hi / Hello / Dear All' -> Closes with 'Kind regards / Best regards'
+        """
+        lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+        if len(lines) < 2:
+            return None
+
+        salutation = lines[0]
+        valediction = lines[-1]
+
+        # Check impersonal salutation
+        if re.search(r"\bDear\s+(Sir|Madam|Sir/Madam|Sirs)\b", salutation, re.IGNORECASE):
+            if not re.search(r"\bYours\s+faithfully\b", valediction, re.IGNORECASE):
+                return (
+                    "British Etiquette Warning: Letters opening with an impersonal salutation "
+                    f"('{salutation}') should conventionally close with 'Yours faithfully' "
+                    f"(currently '{valediction}')."
+                )
+
+        # Check personal named salutation
+        elif re.search(r"\bDear\s+(Mr|Mrs|Ms|Miss|Dr|Prof|[A-Z][a-z]+)\b", salutation):
+            if re.search(r"\bYours\s+faithfully\b", valediction, re.IGNORECASE):
+                return (
+                    "British Etiquette Warning: Letters addressing a named recipient "
+                    f"('{salutation}') should close with 'Yours sincerely', not 'Yours faithfully'."
+                )
+
+        return None
+```
+
+
+5. RECOMMENDED IMPLEMENTATION PLAN FOR VERSION 1.3
+--------------------------------------------------------------------------------
+Phase 1: Integrity & Safety (Immediate)
+  1. Integrate Fix 1 (_extract_json schema normalisation).
+  2. Integrate Fix 2 (restore_placeholders sentinel restoration).
+  3. Integrate Fix 3 (preserve whitespace in Scriptorium.process).
+
+Phase 2: UI & Feedback Enhancements
+  4. Implement Feature 1 (Dual-Mode Diff: Clean vs Strikethrough view).
+  5. Implement Feature 2 (Live word counter & metric tracking).
+
+Phase 3: Letter-Specific Polish
+  6. Implement Feature 3 (British Letter Etiquette auditor in ambiguity strip).
+  7. Add keyboard shortcut (Ctrl+Shift+C) for copying clean revision.
+
+================================================================================
+ END OF REPORT — SCRIPTORIUM CODE REVIEW
+================================================================================

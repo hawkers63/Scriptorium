@@ -1,0 +1,284 @@
+================================================================================
+ SCRIPTORIUM v2.0 — READ-ONLY REVIEW (delta after notes_010)
+================================================================================
+ Author:  Lynne
+ Date:    31 August 2026
+ Target:  C:\Scriptorium\scriptorium.py
+          APP_VERSION = "2.0", 1,297 lines
+          SHA-256 b2e851e3b7bacf9e9e9a7bae48d3b252ec777f08dd1b24fda423325e5b212cc3
+ Scope:   Primary .py file plus notes_008, notes_009, and
+          notes\00_Drafts\scriptorium_notes_010.txt. Helper-level checks only
+          (import scriptorium; no GUI, no config writes, live config.json
+          not opened).
+ Writes:  this file only, at D:\Bot_Activity\notes_001.txt.
+          No file under C:\Scriptorium was modified, moved or deleted.
+================================================================================
+
+
+1. RECONCILIATION WITH RECENT NOTES
+--------------------------------------------------------------------------------
+The working tree is still v2.0 (mtime 29 Aug 2026 02:24). It matches the
+target of scriptorium_notes_010.txt. Do not re-apply v1.2–v1.7 patches.
+
+  Closed in v2.0 (confirmed in source + checks)
+  ---------------------------------------------
+  Stale Accept attaching the wrong source     _result_source + _request_id
+  In-flight result after Reject               _invalidate_inflight / _claim_request
+  Non-atomic config write (notes_009 HIGH)    tmp + fsync + os.replace
+  Claude stop_reason == max_tokens            handled in call_anthropic
+  Markdown [text](url) / [1] as placeholders  regex tightened; check PASS
+  Copy / Paste of Original                    copy_original / paste_original
+  Preferred session defaults                  DEFAULT_CONFIG default_* keys
+                                              Mode Paraphrase, Strength Substantial,
+                                              Role Academic, Tone Concise, Inline
+  JSON list/null coercion                     _extract_json check PASS
+  Worker cfg snapshot                         cfg_snapshot = dict(self.cfg)
+
+  Still open from notes_009 / notes_010 (re-traced today)
+  -------------------------------------------------------
+  Detect blocks the Settings UI thread        _detect_models + update_idletasks
+  Loaded config values not normalised         no normalise_config()
+  HTTP envelopes trusted as dict/list         json.loads then .get without type check
+  TimeoutError not caught                     urlopen(..., timeout=120/300)
+  Unknown backend treated as Anthropic        run_backend else-branch
+  Worker self.after after destroy             no try/except; winfo_exists is only
+                                              inside _claim_request after after()
+  Word-export illegal XML uncaught            notes_010 Bug 7 (not re-tested)
+  Accept during Process invalidates the run   reject() from accept()
+  No live word/character count                no KeyRelease
+  Tray / Start with Windows                   still absent (notes_008)
+
+This note does not reprint notes_010's full snippets. Apply those first
+for Detect, envelope/timeout, normalise_config, and worker TclError.
+Below: one NEW defect those notes missed, short restatements of the
+highest remaining holes, then three features that are still missing.
+
+
+2. NEW FINDING
+--------------------------------------------------------------------------------
+
+2.1  Bug A — Placeholder sentinels collide with existing prose     MEDIUM
+     Location: mask_placeholders() ~589–603, restore_placeholders() ~606–627.
+     Confirmed today:
+
+       Source:   Keep ⟦PH0⟧ and [Name]
+       Masked:   Keep ⟦PH0⟧ and ⟦PH0⟧
+       Restored: Keep [Name] and [Name]
+       Warning:  "[Name] appeared 2 times … all occurrences were restored."
+
+     The user's literal ⟦PH0⟧ is indistinguishable from the sentinel assigned
+     to [Name]. restore_placeholders() then replaces every occurrence.
+     Rare in ordinary letters, but a previous failed run that left a raw
+     sentinel in Original will silently corrupt the next Process.
+
+     notes_010 did not record this. The Markdown false-positive is fixed;
+     this collision is separate.
+
+     Remedy: nonce the sentinel per call. See Fix A.
+
+
+3. STILL-OPEN LOGIC / STATE ISSUES (short restatement)
+--------------------------------------------------------------------------------
+
+3.1  Worker after() versus destroy (notes_010 Bug 6)               MODERATE
+     worker() calls self.after(0, …) with no winfo_exists / TclError guard.
+     _claim_request checks winfo_exists, but that runs only if after()
+     successfully queued the callback. Closing the window during Process
+     can still raise TclError on a packaged pythonw/.exe with no console.
+
+3.2  TimeoutError (notes_010 Bug 4)                                MODERATE
+     urlopen(..., timeout=120) on Claude and timeout=300 on Ollama.
+     TimeoutError is not a URLError on Python 3.10+. It falls through to
+     "Unexpected error" instead of a friendly timeout dialog.
+
+3.3  run_backend fail-open (notes_010 Bug 5)                       MODERATE
+     Anything other than backend == "ollama" calls Claude, so a typo in
+     config still sends text off-machine while the status bar may claim
+     otherwise if the label is derived separately.
+
+3.4  Detect on the UI thread (notes_010 Bug 1)                     MODERATE
+     _detect_models() calls self.update_idletasks() then list_ollama_models()
+     (3s socket) on the Tk thread. Settings freezes until it returns.
+
+3.5  Accept while busy (notes_010 Bug 9)                           LOW
+     accept() → reject() → _invalidate_inflight(), which bumps _request_id
+     and re-enables Process. The in-flight worker is discarded. Disable
+     Accept (or ignore it) while self.busy.
+
+
+4. TARGETED FIXES
+--------------------------------------------------------------------------------
+Apply notes_010 Fix 1–7 for Detect, normalise_config, envelopes/timeouts,
+worker TclError, Word export, unreadable-config dialog, and Accept-while-
+busy. The only additional patch is Fix A.
+
+### Fix A — Nonce placeholder sentinels
+Insert at: scriptorium.py, top-level imports (add secrets) and replace
+the body of mask_placeholders() (~589–603). restore_placeholders() is
+unchanged; it already keys on the exact sentinel string.
+
+```python
+import secrets  # beside json / threading / urllib
+
+
+def mask_placeholders(text):
+    """Swap placeholders for opaque, per-call sentinels.
+
+    A short nonce is mixed into every token so a document that already
+    contains text shaped like ⟦PH0⟧ cannot collide with a fresh mask.
+    Returns (masked_text, mapping) of (sentinel, original) pairs.
+    """
+    nonce = secrets.token_hex(3)
+    mapping = []
+
+    def _swap(match):
+        sentinel = f"{_PH_OPEN}PH{nonce}_{len(mapping)}{_PH_CLOSE}"
+        mapping.append((sentinel, match.group(0)))
+        return sentinel
+
+    return _PLACEHOLDER_RE.sub(_swap, text), mapping
+```
+
+Also keep the notes_010 worker guard. Minimal version, inner worker in
+process() ~1050:
+
+```python
+        def worker():
+            try:
+                result = run_backend(system_prompt, masked, cfg_snapshot)
+                callback = (self._on_success, request_id, original, ph_map, result)
+            except BackendError as exc:
+                callback = (self._on_error, request_id, str(exc))
+            except TimeoutError:
+                callback = (self._on_error, request_id,
+                            "The request timed out. Try a shorter passage, or "
+                            "check that the backend is reachable.")
+            except Exception as exc:  # noqa: BLE001
+                callback = (self._on_error, request_id, f"Unexpected error: {exc}")
+            try:
+                if self.winfo_exists():
+                    self.after(0, *callback)
+            except tk.TclError:
+                return
+```
+
+And fail-closed backend, replacing run_backend():
+
+```python
+def run_backend(system_prompt, user_text, cfg):
+    """Dispatch to the configured backend; unknown names do not default to Claude."""
+    backend = cfg.get("backend", "anthropic")
+    if backend == "ollama":
+        return call_ollama(system_prompt, user_text, cfg)
+    if backend == "anthropic":
+        return call_anthropic(system_prompt, user_text, cfg)
+    raise BackendError(
+        f"Unknown backend {backend!r}. Open Settings and choose Claude or Ollama."
+    )
+```
+
+
+5. THREE FEATURES (still unimplemented, still lightweight)
+--------------------------------------------------------------------------------
+Live counts, named presets and keyboard-shortcut hints are already
+specified in notes_009. Tray/autostart is specified in notes_008.
+None of those landed. The three below are the highest remaining
+usability wins; they do not require a rewrite.
+
+### Feature 1 — Live word and character counts
+Bind KeyRelease on original_box; show words + chars, and a revision
+delta once last_result exists. Insert helper after _tokenise():
+
+```python
+def text_metrics(text):
+    """Return (word_count, character_count) for a pane of prose."""
+    words = len(re.findall(r"\w+", text, flags=re.UNICODE))
+    return words, len(text)
+```
+
+In __init__, after the existing bindings (~829):
+
+        self.original_box.bind("<KeyRelease>", lambda _e: self._refresh_status())
+
+Inside _refresh_status, replace the raw character fragment with:
+
+        orig = self.original_box.get("1.0", "end-1c")
+        words, chars = text_metrics(orig)
+        msg = f"Backend: {where}  —  {privacy}   |   {words} words, {chars} characters"
+        if self.last_result:
+            r_words, _r_chars = text_metrics(self.last_result["revised"])
+            delta = r_words - words
+            sign = f"+{delta}" if delta >= 0 else str(delta)
+            msg += f"   |   revision {r_words} words ({sign})"
+
+### Feature 2 — Minimise to tray and start with Windows
+Still the gap from notes_008. Close currently destroy()s (~1285–1288).
+Keep it Settings-gated. Use winreg + pythonw --minimised for autostart;
+ctypes Shell_NotifyIcon (or optional pystray) for the icon. Full sketch
+is in notes_008 sections 3.2–3.5; do not paste it again here. First
+slice: Settings checkboxes + _on_close → withdraw() + tray Quit that
+calls destroy(). Autostart Run-key second.
+
+### Feature 3 — Softer / Stronger one-click re-run
+Two buttons that nudge Strength and call process() again. Insert after
+STRENGTHS:
+
+```python
+def shift_strength(current, delta):
+    """Move one step along STRENGTHS, clamped at the ends."""
+    idx = STRENGTHS.index(current)
+    return STRENGTHS[max(0, min(len(STRENGTHS) - 1, idx + delta))]
+```
+
+On Scriptorium, after process():
+
+```python
+    def rerun_with_strength(self, delta):
+        """Re-run one strength notch softer (-1) or stronger (+1)."""
+        if self.busy:
+            return
+        self.strength_var.set(shift_strength(self.strength_var.get(), delta))
+        self.process()
+```
+
+In _build_actionbar, after Process:
+
+        ctk.CTkButton(bar, text="↓ Softer", width=80, fg_color="gray30",
+                      command=lambda: self.rerun_with_strength(-1)
+                      ).pack(side="left", padx=(12, 4))
+        ctk.CTkButton(bar, text="↑ Stronger", width=90, fg_color="gray30",
+                      command=lambda: self.rerun_with_strength(1)
+                      ).pack(side="left", padx=4)
+
+
+6. RECOMMENDED ORDER
+--------------------------------------------------------------------------------
+1. notes_010 Fix 4 (worker TclError) + TimeoutError in the same worker.
+2. Fix A (sentinel nonce) — one function, proven by the check above.
+3. notes_010 Fix 2 + fail-closed run_backend.
+4. notes_010 Fix 1 (Detect off-thread).
+5. Feature 1 (live counts), then Feature 3 (Softer/Stronger).
+6. Feature 2 (tray) last; it is the only process-lifetime change.
+
+Implementation still needs an explicit go-ahead. This review did not
+edit C:\Scriptorium.
+
+
+7. VERIFICATION
+--------------------------------------------------------------------------------
+  * Read scriptorium.py v2.0 (1,297 lines) and notes_008–010.
+  * Import-only checks:
+      PASS  preferred defaults in DEFAULT_CONFIG
+      PASS  placeholder round-trip [Name] / {amount} / {{Date}} / <Date>
+      PASS  Markdown [the guide](url) and [1] not masked; [Name] is
+      PASS  sentinel collision (Bug A) — source ⟦PH0⟧ + [Name] corrupts
+      PASS  _extract_json list/null coercion
+      PASS  os.replace atomic save
+      PASS  no normalise_config / PRESETS / KeyRelease
+      FAIL  worker() does not call winfo_exists before after()
+  * No Claude/Ollama call, no GUI, no write under C:\Scriptorium.
+  * D:\Bot_Activity was empty, so this file is notes_001.txt.
+
+================================================================================
+ END OF REPORT
+================================================================================

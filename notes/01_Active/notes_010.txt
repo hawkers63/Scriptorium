@@ -1,0 +1,728 @@
+================================================================================
+ SCRIPTORIUM v2.0 - READ-ONLY STATIC BUG HUNT
+================================================================================
+ Author:    Grok Bug-Hunter (read-only static analysis)
+ Date:      Saturday 29 August 2026
+ Target:    C:\Scriptorium\scriptorium.py (APP_VERSION = "2.0", 1,297 lines)
+            git HEAD 94cad61 "v2.0: standalone packaging ... and atomic config
+            write" (2026-08-29 02:42 +0100). Working tree of scriptorium.py
+            matches HEAD (no uncommitted diff).
+ Scope:     Dual-pane UI state, button enablement, text-widget locking, undo
+            stack, in-flight callbacks, urllib backends, encoding and path
+            handling. Targeted incremental fixes only.
+ Method:    git show HEAD:scriptorium.py plus git diff (working tree clean for
+            the application module). README.md, AGENTS.md, requirements.txt,
+            scriptorium_config.example.json, scriptorium.spec, and notes_007
+            through notes_009 were read so closed defects are not re-proposed.
+            The live scriptorium_config.json was not opened.
+ Writes:    this file only. No application code was executed, modified, moved
+            or deleted. The GUI was not launched and no tests were run.
+================================================================================
+
+
+1. EXECUTIVE SUMMARY
+--------------------------------------------------------------------------------
+Files analysed (10)
+
+  * C:\Scriptorium\scriptorium.py          (sole application module, v2.0)
+  * C:\Scriptorium\README.md
+  * C:\Scriptorium\AGENTS.md
+  * C:\Scriptorium\bug_hunter.md           (partial; one read was refused)
+  * C:\Scriptorium\requirements.txt
+  * C:\Scriptorium\scriptorium_config.example.json
+  * C:\Scriptorium\scriptorium.spec
+  * C:\Scriptorium\notes\notes_007.txt     (27 Aug hunt of working-tree v1.5)
+  * C:\Scriptorium\notes\notes_008.txt     (28 Aug tray/defaults investigation)
+  * C:\Scriptorium\notes\notes_009.txt     (29 Aug 00:12 review of v1.9)
+
+Note on numbering. The findings the parent brief attributed to
+notes\00_Drafts\notes_008.txt live in notes_007.txt (27 August, v1.5). The
+file currently named notes_008.txt is a later implementation summary
+(defaults, Copy/Paste, tray) against v1.7, not a bug hunt. notes_009.txt is
+a v1.9 review from earlier today. This report is notes_010 and does not copy
+any of those documents.
+
+General health of the logic
+
+  Version 2.0 is in sound condition for a compact single-module desktop app.
+  The dangerous asynchronous-state defects from the 27 August hunt are closed.
+  last_result is paired with _result_source; every Process call stamps a
+  monotonic _request_id; Reject, Undo, Clear, Import and WM_DELETE_WINDOW all
+  call _invalidate_inflight(); Accept / Copy revision / Export warn when the
+  original pane has moved on. Configuration load no longer crashes on a non-
+  object JSON root; save_config now writes via a sibling .tmp and os.replace()
+  (the v1.9 HIGH finding in notes_009). Claude stop_reason, placeholder
+  Markdown-link over-matching, Ollama model-list AttributeError, UTF-8 import
+  UnicodeDecodeError, JSON brace recovery, the close handler, and Detect-while-
+  Claude are all fixed. Do not re-apply the notes_003 / notes_004 / notes_007
+  snippets.
+
+  Remaining work is robustness around the new packaging path and a handful of
+  still-open notes_009 items: config value normalisation, backend envelope
+  checks, Detect still running urllib on the Tk thread, and after() from a
+  worker once the window is gone. Newly found in this pass: TimeoutError is
+  not caught on either backend; call_ollama still omits JSONDecodeError;
+  run_backend and the status bar default opposite ways on an unrecognised
+  backend string (privacy mismatch); load/save warnings use print(), which is
+  invisible in the windowed .exe; Accept while busy still cancels the in-flight
+  request via reject().
+
+Still open versus fixed since the 27 August hunt (notes_007 / brief "notes_008")
+  FIXED   Critical stale last_result vs _processing_source; Accept/Copy could
+          commit the wrong revision; Reject/Clear/Import did not cancel.
+  FIXED   load_config crash on non-object JSON; silent overwrite of a broken
+          file (unreadable flag + force=True on Settings).
+  FIXED   Claude stop_reason ignored (now raises a token-limit BackendError).
+  FIXED   Placeholder regex consumed Markdown links and numeric citations.
+  FIXED   list_ollama_models AttributeError on non-dict /api/tags bodies.
+  OPEN    Detect still calls urllib on the Tk event thread (timeout=3).
+  FIXED   import_file only catching OSError (UnicodeDecodeError is handled).
+  FIXED   _extract_json skipping brace recovery when the reply starts with {.
+  FIXED   No WM_DELETE_WINDOW handler.
+  FIXED   Detect still clickable on the Claude backend.
+
+Since notes_009 (v1.9, earlier today)
+  FIXED   HIGH - save_config was not atomic (v2.0 tmp + fsync + os.replace).
+  OPEN    Config values are still not normalised (invalid default_mode etc.).
+  OPEN    Backend HTTP envelopes are still not type-checked.
+  OPEN    Detect is still synchronous.
+  OPEN    Worker still calls Tk after() after destroy().
+  OPEN    write_docx illegal XML characters still escape export_file.
+  OPEN    Status character count is still action-driven, not live (minor).
+  FIXED   README / requirements present python-docx as optional, not required.
+
+Finding totals (this pass)
+  Critical   0
+  Moderate   7
+  Minor      4
+  Suspicion  2
+
+
+2. IDENTIFIED BUGS & SEVERITY
+--------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------
+ CONFIRMED FIXED - 27 August critical state machine (do not re-propose)
+------------------------------------------------------------------------------
+ File:    scriptorium.py, class Scriptorium
+ Evidence in v2.0:
+  * __init__ 811-812  _request_id, _result_source (no _processing_source)
+  * process 1034-1061 stamps request_id, snapshots cfg, worker marshals
+    _on_success/_on_error with that id
+  * _claim_request 995-1009 drops mismatched ids and checks winfo_exists()
+  * _invalidate_inflight 1011-1016 bumps the id and re-enables Process
+  * reject 1131-1140, undo 1191, clear_all 1199, import_file 1240, _on_close
+    1285-1288 all invalidate
+  * _revision_is_stale 1105-1107 compares the pane to _result_source
+  * accept 1120-1123, copy_revision 1145-1148, export_file 1246-1249 ask
+    before acting on a stale revision
+
+ The 27 August sequence (Process A, edit/Process B, Accept commits revision
+ of A with no warning) no longer holds: _result_source is only written in
+ _on_success, never at request start.
+
+------------------------------------------------------------------------------
+ MODERATE - Bug 1. Detect still blocks the Settings dialog on the UI thread
+            (still open from notes_007 Bug 5 / notes_009 Fix 4)
+------------------------------------------------------------------------------
+ File:    scriptorium.py
+ Class:   SettingsDialog
+ Method:  _detect_models, lines 767-780
+ Helper:  list_ollama_models, lines 466-494
+
+ Failure point
+  _detect_models calls list_ollama_models() directly after update_idletasks().
+  urlopen(..., timeout=3) therefore runs on the Tk thread. The modal Settings
+  dialog (grab_set, line 700) freezes for up to three seconds, or longer if
+  the socket hang is not interrupted promptly. The parse path itself no longer
+  throws (that part of notes_007 Bug 5 is fixed) and Detect is disabled when
+  the backend is anthropic (line 786).
+
+ Impact
+  The Settings window appears hung. A second click cannot queue because the
+  UI is frozen, but Cancel/Save are unreachable until the call returns.
+
+------------------------------------------------------------------------------
+ MODERATE - Bug 2. Loaded configuration values are not normalised
+            (still open from notes_009 Fix 2)
+------------------------------------------------------------------------------
+ File:    scriptorium.py
+ Functions / methods:
+  load_config 166-190
+  build_system_prompt 252-280 (MODE_INSTRUCTIONS[mode], STRENGTH_INSTRUCTIONS)
+  SettingsDialog.__init__ 744-752 (BooleanVar)
+  Scriptorium._build_toolbar 841-860; process 1044-1047
+
+ Failure point
+  load_config only insists that the root is a dict, then cfg.update(loaded).
+  A hand-edited or truncated file may contain "default_mode": "Rewrite",
+  "protect_placeholders": "false", or "privacy_ack": "false".
+
+  (i) process() passes mode_var / strength_var straight into
+      build_system_prompt, which indexes MODE_INSTRUCTIONS[mode]. An
+      unsupported mode raises KeyError in the worker and surfaces as
+      "Unexpected error: 'Rewrite'".
+
+  (ii) tk.BooleanVar(value=...) and later bool(self.protect_var.get()) do not
+       treat the JSON string "false" as False. A stringy privacy_ack of
+       "false" is truthy, so the cloud privacy notice is skipped.
+
+  (iii) Opening Settings with a non-Boolean protect_placeholders can raise
+        TclError in BooleanVar and prevent Settings from opening at all.
+
+ Impact
+  A recoverable config typo becomes a failed Process, a skipped privacy
+  notice, or a broken Settings dialog. API keys and free-form model names
+  should be left untouched; only enumerations and booleans need clamping.
+
+------------------------------------------------------------------------------
+ MODERATE - Bug 3. Backend HTTP envelopes are trusted as objects
+            (still open from notes_009 Fix 3; Ollama JSONDecodeError is new
+            relative to the Claude path)
+------------------------------------------------------------------------------
+ File:    scriptorium.py
+ Functions: call_anthropic 397-423; call_ollama 441-457
+
+ Failure point
+  Both functions json.loads the body and then call .get on the result.
+
+  call_anthropic (after the max_tokens check):
+      text = "".join(block.get("text", "") for block in payload.get("content", [])
+                     if block.get("type") == "text")
+  If payload is a list, payload.get raises AttributeError. If "content" is a
+  string or None, iteration / .get on a character raises TypeError /
+  AttributeError.
+
+  call_ollama:
+      text = payload.get("message", {}).get("content", "")
+  If the "message" key is present and null, .get("message", {}) returns None
+  and None.get raises AttributeError. If content is already a dict (some
+  Ollama format=json builds), text.strip() inside _extract_json raises
+  AttributeError.
+
+  call_anthropic catches json.JSONDecodeError (405-408). call_ollama does
+  not: a non-JSON Ollama body becomes the generic "Unexpected error" from
+  process()'s worker (1057-1059).
+
+ Impact
+  Malformed provider JSON is reported as an unexpected crash rather than a
+  BackendError the user can act on. The window itself stays up because the
+  worker catches Exception, but the message is useless.
+
+------------------------------------------------------------------------------
+ MODERATE - Bug 4. TimeoutError is not caught on either backend (new)
+------------------------------------------------------------------------------
+ File:    scriptorium.py
+ Functions: call_anthropic 397-408; call_ollama 441-453
+
+ Failure point
+  urlopen(..., timeout=120) / timeout=300. From Python 3.10 (the README
+  minimum) a timed-out urllib request raises TimeoutError, which is an
+  OSError but not a urllib.error.URLError. The existing except tuples are
+  HTTPError, URLError, and (Claude only) JSONDecodeError. TimeoutError
+  therefore falls through to process()'s generic Exception handler:
+  "Unexpected error: timed out".
+
+  list_ollama_models already includes OSError, so Detect is covered.
+
+ Impact
+  A slow Claude or Ollama call surfaces as an unexpected error instead of a
+  clear timeout. Same user-visible class of failure as Bug 3.
+
+------------------------------------------------------------------------------
+ MODERATE - Bug 5. Status bar and run_backend disagree on an unknown backend
+            (new; privacy / data-consistency)
+------------------------------------------------------------------------------
+ File:    scriptorium.py
+ Functions / methods:
+  run_backend 460-463
+  Scriptorium._refresh_status 954-961
+  Scriptorium._maybe_show_privacy_notice 968-978
+
+ Failure point
+  run_backend treats anything other than the exact string "ollama" as Claude:
+      if cfg.get("backend") == "ollama": return call_ollama(...)
+      return call_anthropic(...)
+
+  _refresh_status treats anything other than the exact string "anthropic" as
+  local Ollama:
+      if backend == "anthropic":  # "text is sent to Anthropic"
+      else:                       # "stays on this machine"
+
+  _maybe_show_privacy_notice only runs when backend == "anthropic".
+
+  So a hand-edited "Ollama", "local", "", or null:
+    * status bar claims the text stays on this machine;
+    * the privacy notice is not shown;
+    * run_backend sends the text to Anthropic (and will then fail the API
+      key check, or worse, succeed if a key is present).
+
+  Settings always writes the two canonical strings, so a UI-only session is
+  fine. The mismatch is real for a typed JSON file, a partial merge, or any
+  future key such as "claude".
+
+ Impact
+  The UI can lie about whether text leaves the machine. Combined with Bug 2
+  this is the remaining data-consistency hole in configuration.
+
+------------------------------------------------------------------------------
+ MODERATE - Bug 6. Worker calls Tk after() after the window is destroyed
+            (still open from notes_009 Finding 5; more visible now the app
+            is a windowed .exe)
+------------------------------------------------------------------------------
+ File:    scriptorium.py
+ Class:   Scriptorium
+ Methods: process.worker 1050-1061; _claim_request 1003-1004; _on_close 1285-1288
+
+ Failure point
+  _on_close invalidates in-flight work and destroy()s the window. The daemon
+  worker, when urlopen returns, still executes:
+      self.after(0, self._on_success, request_id, original, ph_map, result)
+  (or _on_error). _claim_request's winfo_exists() guard only runs if after()
+  successfully queued the callback. after() itself on a destroyed interpreter
+  raises tk.TclError on the worker thread.
+
+  scriptorium.spec sets console=False and disable_windowed_traceback=False.
+  An unhandled exception on that thread can therefore produce a PyInstaller
+  traceback dialog after the user has already closed the app.
+
+ Impact
+  Close-while-processing is the realistic case (Claude timeout is 120s). Not
+  data corruption, but a post-quit crash dialog on the packaged build.
+
+------------------------------------------------------------------------------
+ MODERATE - Bug 7. Word export of illegal XML characters is uncaught
+            (still open from notes_009)
+------------------------------------------------------------------------------
+ File:    scriptorium.py
+ Methods / functions: export_file 1261-1275; write_docx 516-522
+
+ Failure point
+  python-docx refuses ASCII control characters other than tab / LF / CR with
+  ValueError ("All strings must be XML compatible"). export_file catches
+  ImportError and OSError only. The exception leaves the Tk callback and is
+  not turned into "Export failed".
+
+ Impact
+  Pasted text that contains form-feed, NUL or other controls (common from
+  PDF copy) cannot be saved as .docx and the user sees a traceback rather
+  than a prompt to export as .txt.
+
+------------------------------------------------------------------------------
+ MINOR - Bug 8. load_config / save_config diagnostics are print()-only
+         (new in practice for v2.0 packaging)
+------------------------------------------------------------------------------
+ File:    scriptorium.py
+ Functions: load_config 181-187; save_config 203-215
+ Spec:    scriptorium.spec, EXE(console=False)
+
+ Failure point
+  Unreadable JSON, a non-object root, a refused overwrite, and a failed
+  atomic save are all reported with print(). The packaged build has no
+  console, so those warnings vanish. __init__ never inspects
+  load_config.unreadable to warn in the UI. The file is not overwritten
+  (that part is correct); the user simply boots on defaults with no
+  explanation that their API key was not loaded.
+
+ Impact
+  First frozen-app launch after a hand-edit error looks like "my key
+  disappeared" even though the damaged file is still on disk.
+
+------------------------------------------------------------------------------
+ MINOR - Bug 9. Accept while a request is in flight cancels that request
+------------------------------------------------------------------------------
+ File:    scriptorium.py
+ Class:   Scriptorium
+ Methods: _build_actionbar 925-927 (Accept is never stored or disabled);
+          accept 1116-1129; reject 1131-1133; process 1020-1021, 1037-1038
+
+ Failure point
+  Only process_btn is disabled while busy. Accept stays live. accept() does
+  not consult self.busy; it applies last_result and then calls reject(), and
+  reject() calls _invalidate_inflight(). Sequence: result A is showing, user
+  clicks Process for B, then Accept. A is committed and B is silently
+  dropped; the button returns to "Process" because invalidate cleared busy.
+
+  Copy revision and Export do not invalidate, so they are consistent; Accept
+  is the odd one out because it routes through reject().
+
+ Impact
+  Lost in-flight work, not a wrong-pane commit (the stale warning still
+  applies if the original changed). UI-state hole rather than the old
+  critical bug.
+
+------------------------------------------------------------------------------
+ MINOR - Bug 10. Character count does not follow ordinary editing
+         (still open from notes_006 / notes_009; UI-state consistency)
+------------------------------------------------------------------------------
+ File:    scriptorium.py
+ Methods: _refresh_status 954-966; _build_panes 889-891 (no <<Modified>> bind)
+
+ Failure point
+  chars is read from the Original pane only when some action calls
+  _refresh_status. Dedicated Paste refreshes it; typing, backspace and
+  Ctrl+V do not. The status line therefore disagrees with the pane.
+
+ Impact
+  Cosmetic. No data loss.
+
+------------------------------------------------------------------------------
+ MINOR - Bug 11. Frozen fallback config path drops the Scriptorium folder
+------------------------------------------------------------------------------
+ File:    scriptorium.py, _config_dir 72-80
+
+ Failure point
+  On a frozen build, a failed os.makedirs of %LOCALAPPDATA%\Scriptorium
+  returns os.path.expanduser("~") and CONFIG_PATH becomes
+  ~\scriptorium_config.json, not ~\Scriptorium\scriptorium_config.json.
+  The primary path is a dedicated folder; the fallback is a loose file in
+  the profile root, with no warning (and see Bug 8).
+
+ Impact
+  Low probability. A later successful LOCALAPPDATA would not see the home
+  fallback file, so settings could appear to reset.
+
+------------------------------------------------------------------------------
+ SUSPICION - S1. Custom Claude model ids may be clobbered by Settings Save
+------------------------------------------------------------------------------
+ File:    scriptorium.py, SettingsDialog.__init__ 722-726 and _save 791
+
+ CTkOptionMenu is created with values=ANTHROPIC_MODELS and a StringVar taken
+ from config. If anthropic_model is an older or custom id not in that list,
+ CustomTkinter may display values[0] instead. Clicking Save would then write
+ claude-sonnet-4-6 over the configured id. Not confirmed without running the
+ widget; do not treat as a defect until observed.
+
+------------------------------------------------------------------------------
+ SUSPICION - S2. CTkTextbox selection indices in paste_original
+------------------------------------------------------------------------------
+ File:    scriptorium.py, paste_original 1180-1184
+
+ delete("sel.first", "sel.last") is wrapped in TclError, so a CTkTextbox that
+ does not expose those indices simply inserts at the caret. Worst case is
+ "paste always inserts" rather than "paste replaces the selection". Confirm
+ on a running UI before changing it.
+
+
+3. PROPOSED SOLUTIONS
+--------------------------------------------------------------------------------
+British English throughout. Each snippet is local. Do not re-apply the
+v1.3 / v1.4 / notes_007 state-machine patches; they are already in the tree.
+
+
+### Fix 1 - Run Detect off the Tk thread (Bug 1)
+
+Replace SettingsDialog._detect_models (lines 767-780). Keep list_ollama_models
+as it is (already non-throwing).
+
+    def _detect_models(self):
+        """Ask Ollama which models are installed, without freezing Settings."""
+        self.detect_btn.configure(state="disabled")
+        self.ollama_status.configure(text="Detecting…")
+
+        def worker():
+            models = list_ollama_models()
+            try:
+                self.after(0, self._apply_detected_models, models)
+            except tk.TclError:
+                return
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_detected_models(self, models):
+        """Populate the Ollama combobox on the Tk thread."""
+        if not self.winfo_exists():
+            return
+        cloud = self.backend_var.get() == "anthropic"
+        self.detect_btn.configure(state="disabled" if cloud else "normal")
+        if not models:
+            self.ollama_status.configure(
+                text="No response from Ollama at localhost:11434 — is "
+                     "'ollama serve' running?")
+            return
+        current = self.ollama_combo.get().strip()
+        values = models if (current in models or not current) else [current] + models
+        self.ollama_combo.configure(values=values)
+        self.ollama_status.configure(text=f"Found {len(models)} model(s).")
+
+
+### Fix 2 - Normalise enumerations and booleans after load (Bug 2, Bug 5)
+
+Insert immediately below DEFAULT_CONFIG (after line 163). Call it from
+load_config before every return, including the missing-file path so defaults
+stay consistent.
+
+    def normalise_config(cfg):
+        """Return a copy whose typed preferences are known, supported values.
+
+        Free-form fields (API key, model tags) are left unchanged. An
+        unrecognised backend falls back to Claude so the privacy notice and
+        the actual HTTP path cannot disagree.
+        """
+        clean = dict(cfg)
+        choices = {
+            "backend": ("anthropic", "ollama"),
+            "default_mode": tuple(MODES),
+            "default_strength": tuple(STRENGTHS),
+            "default_role": tuple(ROLES),
+            "default_tone": tuple(TONES),
+            "default_diff_view": ("Clean", "Inline"),
+        }
+        for key, allowed in choices.items():
+            if clean.get(key) not in allowed:
+                clean[key] = DEFAULT_CONFIG[key]
+        for key in ("privacy_ack", "protect_placeholders",
+                    "check_letter_conventions"):
+            value = clean.get(key, DEFAULT_CONFIG[key])
+            if isinstance(value, str):
+                clean[key] = value.strip().lower() in ("1", "true", "yes", "on")
+            else:
+                clean[key] = bool(value)
+        return clean
+
+In load_config, change each `return cfg` after a successful or fallback load
+to `return normalise_config(cfg)`. Keep the unreadable flag behaviour as it
+is.
+
+Also make run_backend fail closed on a truly unknown value (defence in depth
+if someone bypasses load_config):
+
+    def run_backend(system_prompt, user_text, cfg):
+        """Dispatch to Claude or Ollama. Unknown backends are an error."""
+        backend = cfg.get("backend", "anthropic")
+        if backend == "ollama":
+            return call_ollama(system_prompt, user_text, cfg)
+        if backend == "anthropic":
+            return call_anthropic(system_prompt, user_text, cfg)
+        raise BackendError(
+            f"Unknown backend {backend!r}. Choose anthropic or ollama in "
+            "Settings.")
+
+
+### Fix 3 - Validate envelopes and catch TimeoutError / JSONDecodeError
+           (Bugs 3 and 4)
+
+Insert next to BackendError (after line 314). Use it from both call_*.
+
+    def _payload_object(payload, label):
+        """Return payload if it is a JSON object, otherwise raise BackendError."""
+        if not isinstance(payload, dict):
+            raise BackendError(
+                f"{label} returned an unexpected response shape.")
+        return payload
+
+In call_anthropic, extend the existing except and guard content:
+
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:400]
+        raise BackendError(f"Claude API error {exc.code}.\n\n{detail}")
+    except urllib.error.URLError as exc:
+        raise BackendError(f"Network error reaching the Claude API: {exc.reason}")
+    except TimeoutError:
+        raise BackendError(
+            "The request to Claude timed out. Try a shorter passage, or "
+            "check the network connection.")
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise BackendError(
+            "The Claude API returned a non-JSON body.\n\n"
+            f"(Parser detail: {exc})")
+
+    payload = _payload_object(payload, "The Claude API")
+    if payload.get("stop_reason") == "max_tokens":
+        raise BackendError(
+            "Claude stopped because the reply hit the token limit. Try a "
+            "shorter passage, or process the text in sections.")
+
+    content = payload.get("content")
+    if not isinstance(content, list):
+        raise BackendError("The Claude API returned no text content.")
+    text = "".join(
+        block.get("text", "")
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text"
+    )
+
+In call_ollama, add the missing JSON / timeout handlers and a dict message:
+
+    try:
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:400]
+        raise BackendError(f"Ollama returned an error ({exc.code}).\n\n{detail}")
+    except urllib.error.URLError as exc:
+        raise BackendError(
+            "Could not reach Ollama at localhost:11434. Is it running? "
+            f"Start it with 'ollama serve' and pull a model first.\n\n({exc.reason})"
+        )
+    except TimeoutError:
+        raise BackendError(
+            "Ollama timed out. Try a shorter passage, or a smaller model.")
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise BackendError(
+            "Ollama returned a non-JSON body.\n\n"
+            f"(Parser detail: {exc})")
+
+    payload = _payload_object(payload, "Ollama")
+    message = payload.get("message")
+    if not isinstance(message, dict):
+        raise BackendError("Ollama returned no content.")
+    text = message.get("content", "")
+    if isinstance(text, (dict, list)):
+        text = json.dumps(text)
+    if not isinstance(text, str) or not text:
+        raise BackendError("Ollama returned no content.")
+
+
+### Fix 4 - Swallow TclError from worker after() (Bug 6)
+
+Inside process(), replace the inner worker (lines 1050-1059) with:
+
+        def worker():
+            """Run the backend off the UI thread; ignore a destroyed window."""
+            try:
+                result = run_backend(system_prompt, masked, cfg_snapshot)
+                callback, args = self._on_success, (
+                    request_id, original, ph_map, result)
+            except BackendError as exc:
+                callback, args = self._on_error, (request_id, str(exc))
+            except Exception as exc:  # noqa: BLE001 — surface anything unexpected
+                callback, args = self._on_error, (
+                    request_id, f"Unexpected error: {exc}")
+            try:
+                self.after(0, callback, *args)
+            except tk.TclError:
+                return
+
+
+### Fix 5 - Friendly Word-export failure (Bug 7)
+
+In export_file, after the existing except OSError block (line 1273), add:
+
+        except ValueError as exc:
+            messagebox.showerror(
+                "Export failed",
+                "The text contains characters that Word cannot store. "
+                "Export as .txt instead.\n\n"
+                f"({exc})")
+            return
+
+
+### Fix 6 - Surface an unreadable config in the UI (Bug 8)
+
+In Scriptorium.__init__, immediately after self.cfg = load_config()
+(line 807), before building the toolbar:
+
+        if getattr(load_config, "unreadable", False):
+            messagebox.showwarning(
+                "Configuration unreadable",
+                "The settings file could not be read, so defaults are in "
+                "use. The existing file has not been overwritten. Open "
+                "Settings and Save to write a fresh copy, or repair the "
+                "JSON by hand.")
+
+
+### Fix 7 - Do not let Accept cancel an in-flight Process (Bug 9)
+
+Name the Accept button in _build_actionbar (line 925) so it can be locked,
+and refuse Accept while busy as a belt-and-braces check.
+
+In _build_actionbar, replace the anonymous Accept constructor:
+
+        self.accept_btn = ctk.CTkButton(
+            bar, text="Accept →", width=110, fg_color="#2f7d4f",
+            hover_color="#276a43", command=self.accept)
+        self.accept_btn.pack(side="left", padx=(12, 4))
+
+In process(), when setting busy (1037-1038), also disable Accept; in
+_claim_request (1007-1008) and _invalidate_inflight (1014-1016), re-enable
+it. Smallest helper:
+
+    def _set_busy(self, flag):
+        """Disable Process and Accept for the life of one backend call."""
+        self.busy = flag
+        self.process_btn.configure(
+            text="Working…" if flag else "Process",
+            state="disabled" if flag else "normal")
+        self.accept_btn.configure(state="disabled" if flag else "normal")
+
+Call _set_busy(True) from process() instead of the two-line busy/button
+update. Call _set_busy(False) from _claim_request (on a matching id) and
+from _invalidate_inflight (when it currently clears busy). Leave Reject
+enabled so it remains the cancel control.
+
+In accept(), as a guard if a binding races the button state:
+
+        if self.busy:
+            self._refresh_status(
+                "wait for the current request to finish, or press Reject")
+            return
+
+
+### Optional polish - live counts (Bug 10)
+
+Not required for correctness. If scheduled: bind <<Modified>> on
+original_box after it is gridded (line 891) and refresh words + characters
+inside _refresh_status. notes_009 Feature 1 already has a ready snippet;
+reuse that rather than inventing a second one.
+
+
+4. INSERTION POINTS
+--------------------------------------------------------------------------------
+All paths are C:\Scriptorium\scriptorium.py, version 2.0 (1,297 lines).
+
+Fix 1   Class SettingsDialog._detect_models, replace lines 767-780.
+        Add _apply_detected_models immediately below it. threading is
+        already imported (line 46).
+
+Fix 2   Module-level, after DEFAULT_CONFIG (line 163): insert
+        normalise_config().
+        load_config (166-190): return normalise_config(cfg) on every
+        successful path.
+        run_backend (460-463): replace the two-way if with the three-way
+        dispatch in section 3.
+
+Fix 3   After class BackendError (line 314): insert _payload_object().
+        call_anthropic try/except (397-408) and the content join (415-420).
+        call_ollama try/except (441-453) and the message/content read
+        (454-457). Do not touch _extract_json; its coercion is already
+        correct.
+
+Fix 4   Class Scriptorium.process, inner function worker, lines 1050-1059.
+
+Fix 5   Class Scriptorium.export_file, the except chain at 1267-1275.
+
+Fix 6   Class Scriptorium.__init__, after self.cfg = load_config() (line 807).
+        messagebox is already imported (line 52).
+
+Fix 7   Class Scriptorium._build_actionbar, Accept button at 925-927.
+        New _set_busy immediately above process() (before line 1018).
+        Call sites: process 1037-1038, _claim_request 1007-1008,
+        _invalidate_inflight 1014-1016. Guard at the top of accept()
+        (after line 1118).
+
+Recommended order
+  1. Fix 4 (close-while-processing crash on the .exe) - one try/except.
+  2. Fix 3 + Bug 4 (timeout / envelope) - same two functions.
+  3. Fix 2 + Bug 5 (normalise + fail-closed backend).
+  4. Fix 6 (unreadable config visible in a windowed build).
+  5. Fix 1 (Detect off-thread).
+  6. Fixes 5 and 7 (export ValueError; Accept-while-busy).
+
+Do not implement without an explicit go-ahead. v1.3 / v1.4 / notes_007
+state patches must not be re-applied.
+
+Verification not performed (guardrail)
+  The application was not launched, no tests were run, and no network call
+  was made. Findings are from a static trace of git HEAD v2.0. Bugs 5
+  (status vs run_backend) and 4 (TimeoutError not in the except tuple) are
+  deterministic from the source. Bug 6 depends on Tk callback timing after
+  destroy and is reported as a real hazard, not a reproduced crash.
+  Suspicions S1 and S2 were not confirmed.
+
+================================================================================
+ END OF REPORT
+================================================================================

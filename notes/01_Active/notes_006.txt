@@ -1,0 +1,345 @@
+Scriptorium enhancement proposal — notes_006
+============================================
+Author  : Grok (Enhancement & Refactoring Agent)
+Date    : 27 August 2026
+Against : C:\Scriptorium\scriptorium.py  (APP_VERSION = "1.5", 1,056 lines)
+Status  : ideation only — no core files modified
+
+This note is the next sequential draft. notes_001 to notes_005 live at
+C:\Scriptorium\notes\notes_00N.txt. This file is written to the protocol
+path 00_Drafts, as AGENTS.md and enhancement_agent.md require.
+
+
+0. Ground rules
+---------------
+Do not re-apply snippets from notes_001–005. Line numbers in those notes
+are for v1.0–v1.4.
+
+Already shipped in v1.5 (do not re-propose):
+  writing roles, placeholder mask/restore, Clean/Inline diff, British
+  letter-convention advisory, _extract_json coercion, Ollama HTTPError vs
+  URLError, unstripped process input, undo/import calling reject().
+
+Heavier README-roadmap items (leave for a later note):
+  .docx import/export, PyInstaller packaging, Windows Credential Manager.
+
+This note proposes three incremental patches, in recommended order, all
+inside the existing single file. British English in every new string,
+comment and docstring (favour, organise, standardise, colour, licence).
+
+
+1. Named toolbar presets  (lead proposal)
+-----------------------------------------
+Why
+    Role, mode, strength and tone already stack independently. A letter-
+    focused user still has to set four knobs for every job. A small
+    named-preset menu that *fills those existing knobs* is the highest-
+    value change that does not touch the backend, the JSON schema, or
+    config. After apply, the knobs stay independently editable.
+
+    notes_002 and notes_005 already asked for this. The design below is
+    remapped to v1.5 line numbers and uses the *current* role labels
+    (Executive, Client Relations, Software Developer — not the longer
+    names from notes_002).
+
+Do not persist the last-used preset in scriptorium_config.json on this
+pass. That keeps the change local to the toolbar and avoids a config-
+schema bump.
+
+1a. Data and helper — scriptorium.py, after ROLE_INSTRUCTIONS
+
+Insert between the closing brace of ROLE_INSTRUCTIONS (line 128) and
+DEFAULT_CONFIG (line 130), replacing the blank line 129.
+
+Surrounding context (before):
+        "favour cautious, precise and tightly bounded phrasing that avoids "
+        "accidental commitments, absolutes and ambiguous obligations."
+    ),
+}
+
+Surrounding context (after):
+DEFAULT_CONFIG = {
+    "backend": "anthropic",          # "anthropic" or "ollama"
+
+Snippet:
+
+PRESETS = {
+    "(none)": None,
+    "Formal letter": {
+        "mode": "Correct",
+        "strength": "Standard",
+        "role": "Executive",
+        "tone": "Formal",
+    },
+    "Client reply": {
+        "mode": "Clarify",
+        "strength": "Standard",
+        "role": "Client Relations",
+        "tone": "Diplomatic",
+    },
+    "Technical note": {
+        "mode": "Clarify",
+        "strength": "Light",
+        "role": "Software Developer",
+        "tone": "Concise",
+    },
+}
+
+
+def apply_preset(app, name):
+    """Populate the existing toolbar knobs from a named preset.
+
+    Knobs remain independently editable afterwards. '(none)' is a no-op
+    so the user can park the menu without resetting Mode/Strength/Role/Tone.
+    """
+    spec = PRESETS.get(name)
+    if not spec:
+        return
+    app.mode_var.set(spec["mode"])
+    app.strength_var.set(spec["strength"])
+    app.role_var.set(spec["role"])
+    app.tone_var.set(spec["tone"])
+
+1b. Toolbar control — Scriptorium._build_toolbar (lines 711–737)
+
+Today column 8 is the expanding spacer and column 9 is Settings. Insert
+the Preset label and option menu at columns 8–9, move Settings to
+column 11, and put the spacer on column 10.
+
+Replace the Settings button and columnconfigure at lines 735–737:
+
+        ctk.CTkButton(bar, text="? Settings", width=100, fg_color="gray30",
+                      command=self.open_settings).grid(row=0, column=9, padx=(20, 14))
+        bar.grid_columnconfigure(8, weight=1)
+
+with (keep the existing Settings button *text* — do not restyle the
+glyph; the file is UTF-8 and the current label must be preserved):
+
+        ctk.CTkLabel(bar, text="Preset").grid(row=0, column=8, padx=(20, 4))
+        self.preset_var = ctk.StringVar(value="(none)")
+        ctk.CTkOptionMenu(
+            bar, values=list(PRESETS), variable=self.preset_var, width=150,
+            command=lambda name: apply_preset(self, name),
+        ).grid(row=0, column=9, padx=4)
+
+        ctk.CTkButton(bar, text="? Settings", width=100, fg_color="gray30",
+                      command=self.open_settings).grid(row=0, column=11, padx=(20, 14))
+        bar.grid_columnconfigure(10, weight=1)
+
+Tone remains at columns 6–7 (lines 730–733). No other toolbar widgets
+move.
+
+Behaviour notes
+    * command= fires only on a user choice, not on the initial "(none)".
+    * Changing Mode/Strength/Role/Tone by hand after a preset is
+      applied does *not* reset the Preset menu. That is deliberate:
+      the menu records the last apply, not a live lock.
+    * Adding a fourth preset later is data-only (one PRESETS entry).
+
+
+2. Live word and character counts  (smallest visible polish)
+------------------------------------------------------------
+Why
+    _refresh_status (line 820) already prints "{chars} characters", but
+    it is only called after Process / Accept / Reject / and similar
+    actions. Typing into original_box is silent. Binding <KeyRelease>
+    (and a delayed <<Paste>>) is a few lines and needs no new widget.
+
+    Proposed in notes_002 and notes_005; still absent in v1.5.
+
+2a. Bind after the original box is gridded
+    File   : scriptorium.py
+    Class  : Scriptorium
+    Method : _build_panes
+    After  : self.original_box.grid(...)  (line 761)
+
+Surrounding context:
+        self.original_box = ctk.CTkTextbox(panes, wrap="word",
+                                           font=ctk.CTkFont(size=14))
+        self.original_box.grid(row=1, column=0, sticky="nsew", padx=(0, 6), pady=4)
+
+        # Revised: a themed tk.Text so we can apply diff tags reliably.
+
+Insert immediately after the .grid(...) line:
+
+        self.original_box.bind("<KeyRelease>",
+                               lambda _e: self._refresh_status())
+        # Paste may land after the event, so defer one tick.
+        self.original_box.bind("<<Paste>>",
+                               lambda _e: self.after(1, self._refresh_status))
+
+2b. Extend the status string
+    File   : scriptorium.py
+    Class  : Scriptorium
+    Method : _refresh_status  (line 820)
+    Replace the two lines that currently read:
+
+        chars = len(self.original_box.get("1.0", "end-1c"))
+        msg = f"Backend: {where}  -  {privacy}   |   {chars} characters"
+
+    with:
+
+        text = self.original_box.get("1.0", "end-1c")
+        chars = len(text)
+        words = len(text.split()) if text.strip() else 0
+        msg = (f"Backend: {where}  -  {privacy}   |   "
+               f"{words} words, {chars} characters")
+
+    Leave the extra= suffix as it is. Accept / Import already call
+    _refresh_status, so they pick this up for free.
+
+    Word count uses str.split() (whitespace tokens), which is the
+    expected behaviour for a letter-writing status bar. Do not add a
+    reading-time figure on this pass — it would crowd the existing
+    privacy line.
+
+
+3. Request-generation counter  (companion state fix)
+----------------------------------------------------
+Why
+    process() (line 861) snapshots _processing_source and refuses a
+    second Process while busy=True. That is not enough:
+
+      * Reject / Undo / Clear / Import while a worker is in flight
+        clear last_result, then _on_success still lands and puts the
+        stale revision back.
+      * copy_revision (line 979) never calls _revision_is_stale, unlike
+        accept (line 960) and export_file (line 1020).
+
+    A monotonic _request_id is the smallest fix. This is notes_005
+    Fix 1, remapped to v1.5. It is a state-consistency patch, not a
+    rewrite; include it with the two UI items so Accept/Copy cannot
+    apply a previous revision after the user has already moved on.
+
+3a. Initialise
+    File   : scriptorium.py
+    Class  : Scriptorium
+    Method : __init__  (line 682)
+    After  : self._processing_source = ""  (line 688)
+
+        self._request_id = 0
+
+3b. Capture the id in process() and pass it to the callbacks
+    File   : scriptorium.py
+    Class  : Scriptorium
+    Method : process  (line 861)
+
+    Immediately after the busy-guard (lines 863–864), increment:
+
+        self._request_id += 1
+        req_id = self._request_id
+
+    Change the three self.after(...) dispatches in worker() (lines 896–900):
+
+                self.after(0, self._on_success, req_id, original, ph_map, result)
+            except BackendError as exc:
+                self.after(0, self._on_error, req_id, str(exc))
+            except Exception as exc:  # noqa: BLE001 - surface anything unexpected
+                self.after(0, self._on_error, req_id, f"Unexpected error: {exc}")
+
+3c. Ignore mismatched callbacks
+    File   : scriptorium.py
+    Class  : Scriptorium
+    Methods: _on_success (line 904), _on_error (line 939)
+
+    Change signatures and return early *before* touching busy or the UI:
+
+    def _on_success(self, req_id, original, ph_map, result):
+        if req_id != self._request_id:
+            return
+        self.busy = False
+        ... existing body unchanged ...
+
+    def _on_error(self, req_id, message):
+        if req_id != self._request_id:
+            return
+        self.busy = False
+        ... existing body unchanged ...
+
+3d. Invalidate in-flight work when the user moves on
+    File   : scriptorium.py
+    Class  : Scriptorium
+    New method, insert just above reject() (line 971):
+
+    def _invalidate_in_flight(self):
+        """Drop any worker still running so its result cannot land."""
+        self._request_id += 1
+        if self.busy:
+            self.busy = False
+            self.process_btn.configure(text="Process  (Ctrl+Enter)",
+                                       state="normal")
+
+    Call self._invalidate_in_flight() at the top of:
+      * reject()        line 971
+      * undo()          line 986  (already calls reject; one call in reject is enough
+                        if undo goes through reject first — it does, at line 990,
+                        so do *not* double-bump in undo)
+      * clear_all()     line 995  (calls reject at 998 — same, one call in reject)
+      * import_file()   line 1001 (calls reject at 1014 — same)
+
+    Therefore the only extra call site is reject() itself. That covers
+    Undo, Clear and Import automatically.
+
+    Also, in copy_revision (line 979), mirror accept()'s stale guard:
+
+        if not self.last_result:
+            return
+        if self._revision_is_stale() and not messagebox.askyesno(
+                "Revision may be out of date",
+                "The original text changed after this revision was generated. "
+                "Copy it anyway?"):
+            return
+
+
+4. Deliberately deferred
+------------------------
+These are sound, but they should not ride in the same patch:
+
+  * Extract SettingsDialog (lines 570–678) or the prompt tables
+    (MODE_INSTRUCTIONS / ROLE_INSTRUCTIONS / build_system_prompt,
+    lines 163–245) to a sibling module. First modular cut, behaviour
+    unchanged. Worth doing *after* the toolbar has settled, otherwise
+    two files move at once.
+  * Appearance toggle (ctk.set_appearance_mode("dark") is hardcoded at
+    line 690). One Settings checkbox; needs the revised_box colours
+    (#1d1e1e / #dce4ee at lines 771–774) to follow the theme, so it is
+    not quite a one-liner.
+  * Keyboard shortcuts for Accept / Reject / Undo. Process already has
+    Ctrl+Enter. Fine as a follow-up polish.
+  * Session history (notes_005). Depends on the request-id work above.
+  * Tightening mask_placeholders so Markdown links and [1] citations
+    are not treated as placeholders. 
+  * load_config (line 141): cfg.update(json.load(...)) will raise
+    TypeError if the file decodes to a non-dict. Catch TypeError next
+    to JSONDecodeError when someone is already touching config. Do not
+    rewrite the file on a corrupt load — that is how an API key gets
+    lost (notes_005).
+  * Three alternatives in one request. notes_001 correctly put this
+    last: it changes the response schema, the pane state, latency and
+    token cost.
+
+
+5. Implementation order for Lynne
+---------------------------------
+  1. Patch 3 (request id) — no visible UI, closes the last stale-result hole.
+  2. Patch 2 (live counts) — one bind, one status-string change.
+  3. Patch 1 (presets) — new data + one OptionMenu.
+
+  Verify by hand (there is no test suite):
+    * Type and paste into Original: status bar words/characters update
+      without pressing Process.
+    * Apply "Formal letter": Mode=Correct, Strength=Standard,
+      Role=Executive, Tone=Formal. Then change Tone by hand; Process
+      still uses the new Tone.
+    * Start Process, then immediately Reject: when the worker returns,
+      the revision pane stays empty and Process is clickable again.
+    * Copy with a stale original: confirmation dialog appears.
+    * Placeholder, role, inline-diff and letter-advisory behaviour
+      unchanged.
+
+6. Files this note does not touch
+---------------------------------
+  scriptorium.py, scriptorium_config.json, README.md, AGENTS.md,
+  and every other core file remain unmodified. Write permission for
+  this agent in the ideation phase is limited to
+  C:\Scriptorium\notes\00_Drafts\notes_[N].txt.

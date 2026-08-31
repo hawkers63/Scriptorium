@@ -1,0 +1,790 @@
+================================================================================
+ SCRIPTORIUM CODE REVIEW — INDEPENDENT v1.4 AUDIT
+================================================================================
+ Author:  Claude (Sonnet 5, Claude Code review agent)
+ Date:    27 August 2026
+ Target:  C:\Scriptorium\scriptorium.py (Version 1.4, APP_VERSION = "1.4")
+ Scope:   Read-only review of the primary .py file (the only one in the
+          project — confirmed by a recursive glob for *.py), plus README.md,
+          AGENTS.md, requirements.txt, scriptorium_config.example.json,
+          .gitignore, and notes_001.txt through notes_005.txt.
+ Method:  Full line-by-line read of scriptorium.py against the actual
+          current line numbers (not carried over from older reviews), a
+          cross-check of every claim in notes_005.txt against that source,
+          and two standalone, read-only verification scripts run with
+          `python` outside the project directory (no project file was
+          imported, executed, or written) to mechanically confirm two of
+          the findings below rather than assert them from inspection alone.
+ Writes:  this file only. No project file was modified, moved or deleted.
+================================================================================
+
+
+1. RECONCILIATION WITH PRIOR NOTES
+--------------------------------------------------------------------------------
+Three independent reviews already exist for this project: ChatGPT
+(notes_001–002, v1.0), Claude (notes_003–004, v1.2), and Grok (notes_005,
+v1.4). notes_005's reconciliation table is accurate against the actual
+current source — I re-traced every "DONE" row myself rather than trusting
+the table, and confirmed: writing roles, placeholder sentinels, the
+Clean/Inline diff, the letter-convention advisory, _extract_json() type
+coercion, full-occurrence placeholder restoration, Ollama HTTPError vs
+URLError handling, the unstripped process() input, and undo()/import_file()
+calling reject() are all genuinely present in the file read for this
+report. Do not re-apply the v1.0/v1.2 snippets from notes_001–004.
+
+Where this report differs from notes_005:
+  * Bug 1 below folds in an additional, previously unreported angle: Reject,
+    Undo, Clear and Import do not cancel an in-flight request, so a result
+    that lands after any of them can silently repaint the revision pane the
+    user just dismissed (section 2.1).
+  * The fix for Bug 1 uses a single monotonic request-generation counter
+    instead of two parallel snapshot strings (_processing_source /
+    _result_source). One counter check at the top of _on_success/_on_error
+    invalidates every stale-callback scenario at once — the second
+    process() call, and Reject/Undo/Clear/Import during busy — with less
+    state to keep in sync. See Fix 1.
+  * Bug 2 (config handling) is re-scoped from "silently replaced" to
+    "silently replaced OR crashes the app outright", with a runnable
+    reproduction (section 2.2) rather than a description.
+  * Bugs 3–6 below are the same underlying issues notes_005 calls Bug #3,
+    #4, #6 and #7 (stop_reason, placeholder regex, cfg snapshot, window-
+    close race); independently re-verified against the live file and
+    re-written in this report's own words and line numbers. notes_005's
+    Bug #5 (copy_revision has no staleness check) is folded into Fix 1.
+
+
+2. INVESTIGATION AND BUG HUNTING
+--------------------------------------------------------------------------------
+
+2.1  Bug 1 — Stale or cancelled requests can still reach the UI      HIGH
+     Location: process() (819–860), _on_success() (862–895),
+               _on_error() (897–901), _revision_is_stale() (903–905),
+               _on_diff_view_change() (907–912), accept() (914–927),
+               copy_revision() (937–942), export_file() (977–998).
+
+     (a) Second-request case. process() sets self._processing_source to
+     the text it is about to send, then starts a daemon thread.
+     self.last_result is only replaced later, inside _on_success. Accept,
+     Copy and the Clean/Inline toggle all read _processing_source as if it
+     were "the text last_result was built from". That is true only until a
+     second request starts:
+         1. Process text A -> last_result is A's revision;
+            _processing_source == A.
+         2. Edit the box to B (or just click Process again on A) ->
+            process() immediately overwrites _processing_source with B,
+            before the first worker has returned.
+         3. last_result is still A's revision.
+         4. _revision_is_stale() compares the box (B) to _processing_source
+            (also B) -> returns False. Accept overwrites B with A's
+            revision with no warning; Copy silently clipboards A's
+            revision; the Inline toggle diffs A's revision against B,
+            producing nonsense highlighting.
+
+     (b) Dismiss-during-busy case (not previously reported). None of
+     Reject, Undo, Clear or Import check self.busy, and process()'s worker
+     callback is unconditional:
+         1. Click Process for text A. While the request is in flight,
+            click Clear (or Undo, or Import a different file B).
+            reject() runs, clearing last_result and the revised pane —
+            the user has explicitly moved on.
+         2. The request for A completes. self.after(0, self._on_success,
+            A, ph_map, result) fires regardless. _on_success sets
+            self.last_result = result and calls render_diff() for A,
+            repainting the pane the user just cleared. It does add a
+            "text changed while processing" warning to the ambiguity
+            strip, but that strip looks identical to a normal ambiguity
+            note and is easy to miss — the practical effect is a revision
+            for content that is no longer on screen reappearing
+            unannounced.
+
+     Verified: this is a direct trace of the code above; both paths are
+     deterministic from the source, not conjecture.
+
+     Remedy: a single monotonic request id, checked once at the top of
+     _on_success/_on_error, plus a `busy` guard on the action buttons.
+     See Fix 1.
+
+
+2.2  Bug 2 — A corrupt OR merely non-object config file crashes the
+     app, and a bad file can be silently overwritten                 HIGH
+     Location: load_config() (140–147), save_config() (150–155),
+               _maybe_show_privacy_notice() (792–802).
+
+     load_config() does:
+         cfg = dict(DEFAULT_CONFIG)
+         with open(CONFIG_PATH, ...) as fh:
+             cfg.update(json.load(fh))
+     guarded only by `except (FileNotFoundError, json.JSONDecodeError,
+     OSError): pass`.
+
+     Two distinct failures follow from this:
+       (i) If the file is *valid JSON but not a JSON object* — e.g. it was
+           hand-edited into a list, a bare string, or a number —
+           json.load() succeeds, so JSONDecodeError is never raised, and
+           cfg.update(...) then throws TypeError or ValueError, which is
+           NOT in the caught tuple. This propagates out of load_config(),
+           out of Scriptorium.__init__, and crashes the whole application
+           before the window ever appears. Confirmed by direct
+           reproduction (not just inspection) — running the equivalent of
+           load_config() against three sample payloads outside the
+           project directory:
+               input '[1, 2, 3]'       -> UNCAUGHT TypeError: cannot convert
+                                          dictionary update sequence element
+                                          #0 to a sequence
+               input '"just a string"' -> UNCAUGHT ValueError: dictionary
+                                          update sequence element #0 has
+                                          length 1; 2 is required
+               input '42'              -> UNCAUGHT TypeError: 'int' object
+                                          is not iterable
+       (ii) If the file is unreadable in a way that *is* caught (a
+            genuinely malformed/truncated JSON document, or a permissions
+            error), load_config() falls back to DEFAULT_CONFIG with no
+            flag at all. On first run with the Claude backend,
+            _maybe_show_privacy_notice() then sets privacy_ack and calls
+            save_config(cfg), which writes DEFAULT_CONFIG straight over
+            the broken file — destroying whatever API key and model choice
+            were in it, with no warning that anything was lost.
+
+     Remedy: validate that the loaded JSON is a dict before merging it,
+     and mark the config as unreadable (refusing to overwrite it) for both
+     failure modes instead of only the ones that happen to raise
+     JSONDecodeError/OSError. See Fix 2.
+
+
+2.3  Bug 3 — Truncated Claude responses produce a misleading error    MEDIUM
+     Location: call_anthropic() (302–343).
+     Detail: max_tokens is hard-coded to 4096 (line 313) and the response's
+     stop_reason is never inspected. When Claude is cut off mid-JSON, the
+     literal text handed to _extract_json() is a broken JSON fragment;
+     _extract_json() then raises "The model did not return valid JSON.
+     Try again, or lower the editing strength." — which sends the user
+     toward the wrong fix (strength has nothing to do with it; the source
+     text is too long for one 4096-token reply).
+     Remedy: check payload.get("stop_reason") before parsing and raise a
+     specific, actionable BackendError. See Fix 3.
+
+
+2.4  Bug 4 — Placeholder masking swallows Markdown links and
+     numeric citations                                               MEDIUM
+     Location: _PLACEHOLDER_PATTERNS (441–447).
+     Detail: `\[[^\[\]\n]+\]` matches any square-bracket content, so
+     "[Name]" and "[1]" or "[the guide]" in "[the guide](url)" are treated
+     identically. Confirmed by direct execution against the live regex
+     (not the proposed one):
+         input:   Dear [Name], see [the guide](https://example.com) and
+                  footnote [1]. The sum is {amount} on {{Date}} and <Date>.
+         current: ['[Name]', '[the guide]', '[1]', '{amount}',
+                   '{{Date}}', '<Date>']
+     "[the guide]" and "[1]" are not template slots — masking them either
+     corrupts a Markdown link (the model sees an opaque sentinel where the
+     link text belongs) or silently drops a numeric citation from the
+     prompt entirely.
+     Remedy: require a placeholder to start with a letter and refuse a
+     following "(", which is enough to exclude both cases while keeping
+     genuine slots like [Name] and [Recipient Name] intact — confirmed
+     against the same sample:
+         fixed:   ['[Name]', '{amount}', '{{Date}}', '<Date>']
+     See Fix 4.
+
+
+2.5  Bug 5 — Settings can be saved mid-request, mixing old and new
+     credentials for a call already in flight                        LOW
+     Location: process() worker (851–860), SettingsDialog.__init__ (555),
+               SettingsDialog._save() (623–632).
+     Detail: SettingsDialog is constructed with `self.cfg = cfg` — the
+     exact same dict passed as self.cfg by open_settings() (1000-1001),
+     not a copy. The worker closure created in process() reads
+     `run_backend(system_prompt, masked, self.cfg)`, i.e. it consults the
+     live dict at whatever moment its own code inside call_anthropic() /
+     call_ollama() happens to read cfg.get(...). If the user opens Settings
+     and clicks Save while a request is on the wire, the in-flight call can
+     end up built from a partially-updated mix of old and new values (e.g.
+     the new API key with the old model, or a backend switch mid-call).
+     Remedy: snapshot cfg at the moment process() sends the request, so
+     later Settings changes can only affect the *next* request. See Fix 5.
+
+
+2.6  Bug 6 — Closing the window during a request can raise from a
+     background thread                                                LOW
+     Location: process() worker (851–860).
+     Detail: the worker is a daemon thread that calls
+     `self.after(0, self._on_success, ...)` (or _on_error) with no check
+     that the window still exists. If the user closes Scriptorium before
+     the request completes, this call can raise against an already-torn-
+     down Tk root. It is a daemon thread so the process still exits
+     cleanly, but it prints a noisy traceback and — because the exception
+     happens after the actual HTTP call already succeeded or failed — the
+     result is simply lost rather than shown anywhere.
+     Note on limits: a `winfo_exists()` guard (as proposed in Fix 5) closes
+     the common case where a child window/widget is gone but the Tcl
+     interpreter is still alive; if the *entire* interpreter has already
+     been finalised, winfo_exists() itself can raise. Wrapping the delivery
+     call in a narrow try/except is therefore the more complete fix, and is
+     what Fix 5 below does.
+
+
+2.7  Residual risks (no code change proposed here)
+     * The Claude API key remains plain text in scriptorium_config.json.
+       .gitignore already excludes it from the repository. Moving it to
+       Windows Credential Manager would be a real architectural change —
+       out of scope per the "no major rewrites" brief; flagged for
+       awareness only, as notes_001 already did.
+     * self.undo_stack (and, after Feature 2 below, self.history) grow for
+       the life of the session with no cap on undo_stack today. Not a
+       correctness bug — a long session doing dozens of Clear/Import/
+       Accept cycles will hold that many full-text copies in memory. Worth
+       a `del self.undo_stack[:-N]`-style cap only if it is ever observed
+       to matter in practice; not proposed as a fix here to avoid touching
+       working code without a concrete symptom.
+     * CTkOptionMenu will not show anthropic_model if a future config value
+       is not in ANTHROPIC_MODELS (e.g. after a model ID is retired). Rare,
+       and easy to soften later by inserting the current value at the
+       front of the list if it is ever hit in practice.
+     * audit_letter_conventions() scans the whole text for "Yours
+       faithfully/sincerely", so a body that quotes the phrase in passing
+       could in principle affect the advisory. The current "warn only when
+       exactly one of the two is present" logic already keeps this quiet in
+       the common case; tightening it to only the last non-empty line is
+       optional polish, not a fix.
+
+
+3. TARGETED, MODULAR FIXES
+--------------------------------------------------------------------------------
+Every fix below is local to the function(s) it names. None changes the
+on-disk config schema, the model's JSON response contract, or the public
+shape of the Scriptorium class beyond two new private attributes.
+
+### Fix 1 — One request-generation counter replaces the stale-snapshot logic
+Resolves Bug 1 in full (both the second-request case and the
+dismiss-during-busy case), and folds in the missing staleness check on
+copy_revision() (notes_005's Bug #5).
+
+(a) In Scriptorium.__init__, replace line 646
+    (`self._processing_source = ""  # exact text last sent for processing`)
+    with:
+
+        self._request_id = 0     # bumped on every new/cancelled request
+        self._result_source = "" # original text last_result was built from
+
+(b) Replace process() (819–860) in full:
+
+    def process(self):
+        """Send the current text to the backend, guarding against concurrent edits."""
+        if self.busy:
+            return
+        original = self.original_box.get("1.0", "end-1c")
+        if not original.strip():
+            self._refresh_status("nothing to process")
+            return
+
+        # Every call gets its own id. A result or error that arrives after
+        # a newer request started, or after the user cancelled via Reject/
+        # Undo/Clear/Import, is discarded in _on_success/_on_error below.
+        self._request_id += 1
+        request_id = self._request_id
+
+        if self.cfg.get("protect_placeholders", True):
+            masked, ph_map = mask_placeholders(original)
+        else:
+            masked, ph_map = original, []
+
+        self.busy = True
+        self.process_btn.configure(text="Working…", state="disabled")
+        busy_note = "contacting the model…"
+        if ph_map:
+            busy_note = f"protecting {len(ph_map)} placeholder(s), contacting the model…"
+        self._refresh_status(busy_note)
+
+        system_prompt = build_system_prompt(
+            self.mode_var.get(), self.strength_var.get(),
+            self.tone_var.get(), self.role_var.get(),
+            protect_tokens=bool(ph_map))
+
+        cfg_snapshot = dict(self.cfg)  # freeze Settings as of "send" (see Fix 5)
+
+        def deliver(*args):
+            """Hand a result to the Tk main loop, ignoring an already-closed window."""
+            try:
+                self.after(0, *args)
+            except Exception:
+                pass  # window is gone; nothing left to update
+
+        def worker():
+            try:
+                result = run_backend(system_prompt, masked, cfg_snapshot)
+                deliver(self._on_success, request_id, original, ph_map, result)
+            except BackendError as exc:
+                deliver(self._on_error, request_id, str(exc))
+            except Exception as exc:  # noqa: BLE001 — surface anything unexpected
+                deliver(self._on_error, request_id, f"Unexpected error: {exc}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    (This single block also applies Fix 5 — the cfg snapshot and the
+    guarded delivery — since both touch the same method.)
+
+(c) Replace _on_success() (862–895) — new leading `request_id` parameter,
+    early-out on a superseded/cancelled request, and _result_source set
+    right before last_result:
+
+    def _on_success(self, request_id, original, ph_map, result):
+        self.busy = False
+        self.process_btn.configure(text="Process  (Ctrl+Enter)", state="normal")
+        if request_id != self._request_id:
+            return  # superseded by a newer request, or cancelled by the user
+
+        warnings = []
+        if ph_map:
+            result["revised"], warnings = restore_placeholders(
+                result["revised"], ph_map)
+
+        if self.original_box.get("1.0", "end-1c") != original:
+            warnings.append(
+                "The original text changed while this was processing, so this "
+                "revision reflects the earlier text. Review it carefully before "
+                "accepting.")
+
+        if self.cfg.get("check_letter_conventions", True):
+            advisory = audit_letter_conventions(result["revised"])
+            if advisory:
+                warnings.append(advisory)
+
+        self._result_source = original
+        self.last_result = result
+        render_diff(self.revised_box, original, result["revised"],
+                    inline=(self.diff_view_var.get() == "Inline"))
+        self._show_ambiguities(list(result.get("ambiguities", [])) + warnings)
+
+        note = result.get("note", "")
+        if ph_map and not warnings:
+            note = (note + "  " if note else "") + f"{len(ph_map)} placeholder(s) preserved"
+        self._refresh_status(note or "done")
+
+(d) Replace _on_error() (897–901):
+
+    def _on_error(self, request_id, message):
+        self.busy = False
+        self.process_btn.configure(text="Process  (Ctrl+Enter)", state="normal")
+        if request_id != self._request_id:
+            return  # the user already moved on; do not pop up a stale dialog
+        self._refresh_status("error")
+        messagebox.showerror("Could not process", message)
+
+(e) Replace _revision_is_stale() (903–905):
+
+    def _revision_is_stale(self):
+        """True if original_box no longer matches the revision's source text."""
+        if not self.last_result:
+            return False
+        return self.original_box.get("1.0", "end-1c") != self._result_source
+
+(f) Replace _on_diff_view_change() (907–912) — diff against _result_source:
+
+    def _on_diff_view_change(self, _value=None):
+        """Re-render the current revision when the Clean/Inline toggle changes."""
+        if self.last_result:
+            render_diff(self.revised_box, self._result_source,
+                        self.last_result["revised"],
+                        inline=(self.diff_view_var.get() == "Inline"))
+
+(g) In reject() (929–935), bump the request id so any still-outstanding
+    worker's eventual callback is discarded, and clear the source snapshot.
+    accept(), undo(), clear_all() and import_file() all call reject()
+    already, so this one change covers all four "the user moved on" paths:
+
+    def reject(self):
+        self._request_id += 1  # invalidate any in-flight request's result
+        self.revised_box.configure(state="normal")
+        self.revised_box.delete("1.0", "end")
+        self.revised_box.configure(state="disabled")
+        self.last_result = None
+        self._result_source = ""
+        self._show_ambiguities([])
+        self._refresh_status("revision cleared")
+
+(h) In accept() (914–927), add a busy guard immediately after the existing
+    `if not self.last_result: return`:
+
+        if self.busy:
+            self._refresh_status("still working — wait for this pass to finish")
+            return
+
+(i) Replace copy_revision() (937–942) in full — adds the busy guard and the
+    same staleness confirmation accept()/export_file() already have:
+
+    def copy_revision(self):
+        """Copy the current revision to the clipboard."""
+        if not self.last_result:
+            return
+        if self.busy:
+            self._refresh_status("still working — wait for this pass to finish")
+            return
+        if self._revision_is_stale() and not messagebox.askyesno(
+                "Revision may be out of date",
+                "The original text changed after this revision was generated. "
+                "Copy the older revision anyway?"):
+            return
+        self.clipboard_clear()
+        self.clipboard_append(self.last_result["revised"])
+        self._refresh_status("revision copied to clipboard")
+
+(j) In export_file() (977–998), add a busy guard as the very first line of
+    the method, before the existing staleness check:
+
+        if self.busy:
+            self._refresh_status("still working — wait for this pass to finish")
+            return
+
+
+### Fix 2 — Never crash on, or silently overwrite, a bad config file
+Insert at: scriptorium.py, replacing load_config() and save_config() (140–155).
+
+def load_config():
+    """Load scriptorium_config.json over the defaults.
+
+    A missing file is normal (first run). A file that cannot be parsed, or
+    that parses to something other than a JSON object (e.g. a list or a
+    bare string), must NOT be treated as "use defaults and carry on" —
+    that would let save_config() silently destroy the user's API key the
+    next time anything triggers a save. Both failure modes are tagged with
+    "_config_unreadable" so save_config() refuses to write.
+    """
+    cfg = dict(DEFAULT_CONFIG)
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
+            loaded = json.load(fh)
+    except FileNotFoundError:
+        return cfg
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"[warning] could not read config ({exc}); leaving the file untouched")
+        cfg["_config_unreadable"] = True
+        return cfg
+    if isinstance(loaded, dict):
+        cfg.update(loaded)
+    else:
+        print("[warning] config file is not a JSON object; leaving it untouched")
+        cfg["_config_unreadable"] = True
+    return cfg
+
+
+def save_config(cfg):
+    """Write the config file, unless load_config() flagged it as unreadable."""
+    if cfg.get("_config_unreadable"):
+        print("[warning] refusing to overwrite an unreadable config file")
+        return
+    try:
+        to_write = {k: v for k, v in cfg.items() if not k.startswith("_")}
+        with open(CONFIG_PATH, "w", encoding="utf-8") as fh:
+            json.dump(to_write, fh, indent=2)
+    except OSError as exc:
+        print(f"[warning] could not save config: {exc}")
+
+In _maybe_show_privacy_notice() (792–802), add a guard as the first line of
+the method so the user is told rather than finding Settings silently stop
+persisting:
+
+        if self.cfg.get("_config_unreadable"):
+            messagebox.showwarning(
+                "Could not read settings",
+                "scriptorium_config.json exists but could not be parsed.\n\n"
+                "It has been left untouched so your API key is not "
+                "overwritten. Repair or rename it, then restart Scriptorium.")
+            return
+
+
+### Fix 3 — Honour Claude's stop_reason
+Insert at: scriptorium.py, in call_anthropic(), immediately after the
+URLError handler and before the "Concatenate all text blocks" comment
+(between lines 333 and 335):
+
+        if payload.get("stop_reason") == "max_tokens":
+            raise BackendError(
+                "The model reached its output length limit before finishing, "
+                "so the revision is incomplete. Shorten the original text, "
+                "split it into sections, or process a smaller passage at a "
+                "time — lowering the strength will not help here."
+            )
+
+
+### Fix 4 — Tighten placeholder detection
+Insert at: scriptorium.py, replacing _PLACEHOLDER_PATTERNS (441–447).
+
+# Ordered longest-first so {{...}} is tried before {...}. Square brackets
+# must look like a template slot ([Name], [Recipient Name]) — a letter
+# immediately after "[", and not followed by "(" — so a Markdown link
+# [label](url) or a numeric citation [1] is left alone.
+_PLACEHOLDER_PATTERNS = [
+    r"\{\{[^{}\n]{1,60}\}\}",                 # {{Date}}
+    r"\[[A-Za-z][^\[\]\n]{0,40}\](?!\()",     # [Name], not [1] or [text](url)
+    r"\{[A-Za-z][^{}\n]{0,40}\}",              # {amount}
+    r"<[A-Za-z][A-Za-z0-9 _\-]{0,40}>",       # <Date>
+]
+_PLACEHOLDER_RE = re.compile("|".join(_PLACEHOLDER_PATTERNS))
+
+Verified (see section 2.4): "Dear [Name], see [the guide](https://example.com)
+and footnote [1]. The sum is {amount} on {{Date}} and <Date>." now masks
+only [Name], {amount}, {{Date}} and <Date>.
+
+### Fix 5 — cfg snapshot and safe delivery
+Already included in Fix 1(b) above, since both changes land in the same
+worker closure inside process(). Listed separately here only so it can be
+tracked/tested independently of the request-id change if you want to land
+it first.
+
+
+4. THREE NEW FEATURES (usability, no architectural growth)
+--------------------------------------------------------------------------------
+Three independent past reviews (ChatGPT, Claude, Grok) have each proposed
+live metrics, named presets and a change-summary/history aid, and none of
+the three has been implemented yet — confirmed by grep: no `text_metrics`,
+`PRESETS`, `summarise_changes` or `HistoryDialog` exists anywhere in the
+current file. That three-for-three convergence, on a lightweight app with
+no existing UI for any of them, is itself the strongest signal of which
+features are worth doing next, so this report endorses the same shortlist
+rather than inventing a fourth just to be different — but with fresh,
+independently written implementations checked against the file's real
+current line numbers, and (for the history feature) a lighter design than
+previously proposed.
+
+### Feature 1 — Live word/character metrics with a reading-time estimate
+Rationale: the status bar currently shows only a raw character count of
+the original, refreshed opportunistically. Anyone editing to a length
+(a one-page letter, a tweet-length reply) benefits from a live word count,
+and once a revision exists, how much longer or shorter it is.
+
+Insert at: scriptorium.py, immediately after _tokenise() (392), before the
+render_diff() definition (395):
+
+def text_metrics(text):
+    """Return (words, characters, reading_minutes) for a pane of prose.
+
+    Words are Unicode word-characters, so surrounding punctuation does not
+    inflate the count. Reading time assumes 200 words/minute, rounded up
+    to whole minutes (0 for empty text), matching the estimate most
+    writing tools show.
+    """
+    words = len(re.findall(r"\w+", text, flags=re.UNICODE))
+    minutes = -(-words // 200) if words else 0  # ceiling division
+    return words, len(text), minutes
+
+In Scriptorium.__init__, immediately after the existing key bindings
+(after line 662, `self.bind("<Control-s>", ...)`), add:
+
+        self.original_box.bind("<KeyRelease>", lambda _e: self._refresh_status())
+
+Replace _refresh_status() (778–790) in full:
+
+    def _refresh_status(self, extra=""):
+        """Rebuild the status line: backend, live metrics, and any extra note."""
+        backend = self.cfg.get("backend", "anthropic")
+        if backend == "anthropic":
+            where = f"Claude · {self.cfg.get('anthropic_model')}"
+            privacy = "text is sent to Anthropic"
+        else:
+            where = f"Ollama · {self.cfg.get('ollama_model')} (local)"
+            privacy = "stays on this machine"
+        original = self.original_box.get("1.0", "end-1c")
+        words, chars, minutes = text_metrics(original)
+        msg = f"Backend: {where}  —  {privacy}   |   {words} words, {chars} characters"
+        if minutes:
+            msg += f"  (~{minutes} min read)"
+        if self.last_result:
+            r_words, _, _ = text_metrics(self.last_result["revised"])
+            delta = r_words - words
+            sign = f"+{delta}" if delta > 0 else str(delta)
+            msg += f"   |   revision {r_words} words ({sign})"
+        if extra:
+            msg += f"   |   {extra}"
+        self.status.configure(text=msg)
+
+
+### Feature 2 — Session-only "Recent revisions" menu
+Rationale: sections 2.1 and the history in notes_001–005 both show ways a
+revision can be superseded (a second Process, Undo, Import, a stale async
+result). A tiny in-memory list the user can reopen turns "the revision I
+wanted is gone" into a two-click recovery. This is deliberately lighter
+than a full dialog class: a popup tk.Menu off a single toolbar button,
+capped at 5 entries, never written to disk.
+
+Depends on Fix 1 (uses self._result_source) — apply Fix 1 first.
+
+Insert at: scriptorium.py, immediately after restore_placeholders() (488),
+before the "British letter conventions" section header (491):
+
+# --------------------------------------------------------------------------- #
+#  Session history (recent revisions — kept in memory only, never persisted)
+# --------------------------------------------------------------------------- #
+
+MAX_HISTORY = 5
+
+
+def add_history_entry(history, original, result):
+    """Push a completed revision onto the front of an in-memory history list.
+
+    Mutates `history` in place and trims it to MAX_HISTORY, so a long
+    session cannot grow this into an unbounded log.
+    """
+    history.insert(0, {"original": original, "revised": result["revised"]})
+    del history[MAX_HISTORY:]
+
+
+def history_label(entry):
+    """Short, single-line menu label for one history entry."""
+    preview = entry["original"].strip().replace("\n", " ")
+    return (preview[:50] + "…") if len(preview) > 50 else (preview or "(empty)")
+
+In Scriptorium.__init__, add alongside the existing `self.undo_stack = []`
+(line 643):
+
+        self.history = []  # session-only; never written to disk
+
+In _on_success(), immediately after `self.last_result = result` (inside
+the version from Fix 1(c) above), add:
+
+        add_history_entry(self.history, original, result)
+
+Add two methods after open_settings()/_after_settings() (after line 1005),
+before `def main():`:
+
+    def show_history(self):
+        """Pop up a small menu of this session's recent revisions."""
+        if not self.history:
+            self._refresh_status("no revisions yet this session")
+            return
+        menu = tk.Menu(self, tearoff=0)
+        for idx, entry in enumerate(self.history):
+            menu.add_command(label=history_label(entry),
+                             command=lambda i=idx: self._restore_from_history(i))
+        x = self.history_btn.winfo_rootx()
+        y = self.history_btn.winfo_rooty() + self.history_btn.winfo_height()
+        menu.tk_popup(x, y)
+
+    def _restore_from_history(self, index):
+        """Reload a past session revision into both panes."""
+        entry = self.history[index]
+        self.undo_stack.append(self.original_box.get("1.0", "end-1c"))
+        self.reject()
+        self.original_box.delete("1.0", "end")
+        self.original_box.insert("1.0", entry["original"])
+        self.last_result = {"revised": entry["revised"], "ambiguities": [], "note": ""}
+        self._result_source = entry["original"]
+        render_diff(self.revised_box, entry["original"], entry["revised"],
+                    inline=(self.diff_view_var.get() == "Inline"))
+        self._refresh_status("restored from session history")
+
+Add a button in _build_actionbar(), after the Undo button (after line 761):
+
+        self.history_btn = ctk.CTkButton(bar, text="History ▾", width=90,
+                                         fg_color="gray30", command=self.show_history)
+        self.history_btn.pack(side="left", padx=4)
+
+
+### Feature 3 — Named presets for the four existing toolbar knobs
+Rationale: for letter-focused work, users repeatedly select the same
+Mode/Strength/Role/Tone combination. A preset is a frozen mapping onto
+those four existing controls — no fifth concept, and the user can still
+override any knob afterwards.
+
+Insert at: scriptorium.py, immediately after ROLE_INSTRUCTIONS (after
+line 126, before the blank lines preceding DEFAULT_CONFIG):
+
+PRESETS = {
+    "(none)": None,
+    "Formal letter": {"mode": "Correct", "strength": "Standard",
+                      "role": "Executive", "tone": "Formal"},
+    "Client reply": {"mode": "Clarify", "strength": "Standard",
+                     "role": "Client Relations", "tone": "Diplomatic"},
+    "Technical note": {"mode": "Clarify", "strength": "Light",
+                       "role": "Software Developer", "tone": "Concise"},
+}
+
+
+def apply_preset(mode_var, strength_var, role_var, tone_var, name):
+    """Copy a named preset onto the four existing toolbar variables.
+
+    '(none)' and unrecognised names are ignored, so the OptionMenu can
+    offer a neutral choice without resetting the user's current selection.
+    """
+    spec = PRESETS.get(name)
+    if not spec:
+        return
+    mode_var.set(spec["mode"])
+    strength_var.set(spec["strength"])
+    role_var.set(spec["role"])
+    tone_var.set(spec["tone"])
+
+In _build_toolbar(), replace lines 693–695 (the Settings button and the
+column-8 spacer) with:
+
+        ctk.CTkLabel(bar, text="Preset").grid(row=0, column=8, padx=(20, 4))
+        self.preset_var = ctk.StringVar(value="(none)")
+        ctk.CTkOptionMenu(
+            bar, values=list(PRESETS), variable=self.preset_var, width=150,
+            command=lambda name: apply_preset(
+                self.mode_var, self.strength_var, self.role_var,
+                self.tone_var, name)
+        ).grid(row=0, column=9, padx=4)
+
+        ctk.CTkButton(bar, text="⚙ Settings", width=100, fg_color="gray30",
+                      command=self.open_settings).grid(row=0, column=11, padx=(20, 14))
+        bar.grid_columnconfigure(10, weight=1)
+
+
+5. RECOMMENDED ORDER OF WORK
+--------------------------------------------------------------------------------
+1. Fix 1 (request-generation counter + busy guards). This is the one
+   remaining data-consistency hole and the highest-value single change.
+2. Fix 2 (config load/save safety). Cheap, prevents outright crashes and
+   silent API-key loss.
+3. Fix 4 (placeholder regex). Confirmed against Markdown/citations today.
+4. Fix 3 (stop_reason). Small, independent, low risk.
+5. Feature 1 (live metrics) — one binding and one function; immediately
+   visible value.
+6. Feature 3 (presets) — independent of everything else above.
+7. Feature 2 (history menu) — do this last since it reads self._result_source
+   from Fix 1.
+
+This review did not modify, move or delete any project file other than
+creating this note. Implementation should wait for an explicit go-ahead.
+
+
+6. VERIFICATION PERFORMED
+--------------------------------------------------------------------------------
+  * Read C:\Scriptorium\scriptorium.py in full (1,015 lines, v1.4) and
+    confirmed by glob that it is the only .py file in the project.
+  * Read README.md, AGENTS.md, requirements.txt, .gitignore, and
+    scriptorium_config.example.json (confirmed it now lists all seven
+    DEFAULT_CONFIG keys — the gap notes_004 flagged has been closed).
+  * Read notes_001.txt through notes_005.txt and cross-checked notes_005's
+    "DONE" reconciliation table line-by-line against the live source
+    rather than accepting it at face value.
+  * Two standalone, read-only checks executed with `python`, using code
+    copied out of the file rather than importing it (so nothing under
+    C:\Scriptorium was touched, and no dependency on customtkinter/network
+    access was needed):
+      CONFIRMED  current placeholder regex masks '[the guide]' and '[1]'
+                 alongside genuine placeholders; the proposed regex masks
+                 only the genuine ones (section 2.4).
+      CONFIRMED  load_config()'s update-in-place pattern raises an
+                 uncaught TypeError/ValueError for valid JSON that is a
+                 list, string or number, rather than falling back to
+                 defaults (section 2.2).
+  * The state-consistency findings (2.1) and the Settings-race finding
+    (2.5) are logic traces of deterministic code paths, not executed GUI
+    scenarios — no network call or GUI event loop was run.
+  * Tests requiring a live Claude/Ollama call were not performed.
+
+
+7. RISKS AND NEXT STEPS
+--------------------------------------------------------------------------------
+  * Applying notes_001–004's older snippets on top of this v1.4 tree would
+    regress working behaviour — use this note (or notes_005) instead.
+  * Fix 1 changes the signatures of _on_success and _on_error (adding a
+    leading request_id parameter). Every call site for both is listed in
+    Fix 1 above; there are no other callers of either method in the file.
+  * Feature 2 should land after Fix 1 for the reason stated in its
+    "Depends on" note.
+
+================================================================================
+ END OF REPORT
+================================================================================

@@ -1,3 +1,7 @@
 # Scriptorium runtime dependency.
 # Everything else (urllib, tkinter, json, difflib) ships with Python.
 customtkinter>=5.2.0
+
+# Optional extra (NOT installed by the line above) — only needed for Word
+# (.docx) import/export. Install it yourself if you want that support:
+#     pip install python-docx

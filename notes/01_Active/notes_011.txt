@@ -1,0 +1,875 @@
+================================================================================
+ SCRIPTORIUM v2.0 — COMPREHENSIVE READ-ONLY REVIEW
+================================================================================
+ Author:  ChatGPT / Codex
+ Date:    31 August 2026
+ Target:  C:\Scriptorium (application, packaging, repository helpers and notes)
+ Core:    C:\Scriptorium\scriptorium.py (APP_VERSION = "2.0", 1,297 lines)
+ Notes:   notes\notes_009.txt and notes\00_Drafts\scriptorium_notes_010.txt
+ Writes:  This report only. No existing project file was modified, moved or
+          deleted. No GUI, Claude request or Ollama request was launched.
+================================================================================
+
+
+1. EXECUTIVE SUMMARY
+--------------------------------------------------------------------------------
+
+Scriptorium v2.0 remains a sound compact application. Its high-risk revision
+state defects are closed: requests are generation-stamped, stale results retain
+their correct source, Reject/Undo/Clear/Import invalidate late callbacks, and
+Accept/Copy/Export warn when the original has changed. The new atomic config
+write is a worthwhile v2.0 improvement.
+
+The review found no critical corruption bug in the editor state machine. It did,
+however, confirm one HIGH repository/release consistency defect: the documented
+v2.0 build depends on `scriptorium.spec`, but that file and the icon assets are
+not tracked by Git. `update_repo.bat` stages only three hard-coded files and does
+not stop on commit/push failure, so it can announce a successful update while
+the remote repository is incomplete. At HEAD 94cad61 the tracked tree contains
+only `.gitignore`, `README.md`, `Scriptorium.bat`, notes_001/002,
+`requirements.txt`, `scriptorium.py`, and the example config; the spec is absent.
+
+The most important application-level issue is a privacy-state disagreement for
+an invalid backend string: the status bar says text stays local while
+run_backend falls back to Claude. Configuration normalisation closes that hole
+and also prevents invalid mode/strength values from crashing the Process button
+callback before its worker thread is even created.
+
+Finding totals in this review:
+
+  HIGH      1
+  MODERATE  8
+  LOW       5
+  DEFERRED  2 unconfirmed UI suspicions
+
+Recommended implementation order:
+
+  1. Repair repository synchronisation and commit the complete v2.0 source set.
+  2. Normalise configuration values, especially backend/privacy state.
+  3. Make save_config return success and keep Settings open on failure.
+  4. Harden provider envelopes and timeout reporting.
+  5. Move Ollama detection off the UI thread and guard post-close callbacks.
+  6. Add the small Word-export and bounded-undo fixes.
+  7. Add live counts, presets and review shortcuts as separate polish work.
+
+
+2. FILES, NOTES AND VERIFICATION REVIEWED
+--------------------------------------------------------------------------------
+
+Application and distribution
+
+  * scriptorium.py
+  * scriptorium_config.example.json
+  * live scriptorium_config.json (key names/types only; the API key value was
+    not printed or copied into this report)
+  * README.md
+  * requirements.txt
+  * Scriptorium.bat
+  * scriptorium.spec
+  * icon\icon-96.ico and icon\icon-96.png
+  * .gitignore
+  * update_repo.bat
+  * PyInstaller build warning file and dist\Scriptorium.exe metadata
+  * AGENTS.md plus the three local role instruction files
+
+Recent notes
+
+  * notes\notes_009.txt — v1.9 review, 29 August 2026
+  * notes\00_Drafts\scriptorium_notes_010.txt — v2.0 static hunt,
+    29 August 2026
+
+Verification performed without modifying project files
+
+  * `scriptorium.py` and `scriptorium.spec` parsed successfully with Python's
+    AST parser using the bundled workspace runtime and `-B`.
+  * Pure-function extraction confirmed JSON chatter recovery, placeholder
+    matching/restoration and the British letter advisory; console encoding
+    prevented printing the mathematical placeholder sentinel on one diagnostic
+    run, but the extraction itself had succeeded.
+  * Git tree/status/diff checks confirmed the working-tree and remote-source
+    mismatch described in Finding 1.
+  * The packaged executable exists (34,441,441 bytes; built 29 August), but was
+    not launched because this is a read-only static review.
+  * The bundled workspace runtime does not include customtkinter, so no GUI
+    widget behaviour was asserted from that runtime.
+
+Existing user changes were preserved. `.gitignore`, `requirements.txt`, the
+spec, icons, notes and helper files were already modified/untracked before this
+review.
+
+
+3. ASSESSMENT OF THE MOST RECENT NOTES
+--------------------------------------------------------------------------------
+
+notes_009.txt (v1.9)
+
+  FIXED in v2.0
+    * Atomic configuration persistence is now implemented with a sibling temp
+      file, fsync and os.replace.
+    * README/requirements now consistently make python-docx optional.
+
+  STILL OPEN
+    * Configuration values are not normalised.
+    * Backend response envelopes are not validated.
+    * Ollama Detect blocks the Tk event thread.
+    * Worker callbacks may schedule after the window is destroyed.
+    * Word export does not catch illegal-XML ValueError.
+    * Undo history is unbounded and admits no-op snapshots.
+    * Character count is action-driven rather than live.
+
+scriptorium_notes_010.txt (v2.0)
+
+  ACCURATE AND CONFIRMED
+    * synchronous Ollama detection;
+    * missing config value normalisation;
+    * malformed backend envelopes and missing Ollama JSONDecodeError handling;
+    * missing TimeoutError handling;
+    * backend/status privacy disagreement;
+    * post-destroy worker scheduling;
+    * Word-export ValueError;
+    * print-only configuration diagnostics in the windowed executable;
+    * Accept during an in-flight request silently cancels the new request;
+    * stale character count and frozen config fallback path.
+
+  REFINEMENT
+    * Invalid mode/strength does not fail "in the worker": build_system_prompt()
+      is called on the Tk thread before worker() is started. The KeyError is an
+      uncaught Tk callback error and leaves no friendly `_on_error` handling.
+    * Guarding `self.after()` with winfo_exists() from the worker still invokes
+      Tk from the worker. It reduces shutdown noise but is not a complete
+      cross-thread isolation guarantee.
+
+  NEW FINDINGS ADDED HERE
+    * incomplete Git/release synchronisation caused by update_repo.bat;
+    * Settings always claims success and closes when save_config fails;
+    * the packaged build has no icon or Windows version metadata even though
+      suitable icon files now exist (polish, not a correctness defect);
+    * source-to-frozen configuration is not migrated, so a first executable run
+      appears to lose source-mode preferences/API key unless the user re-enters
+      them (documented path change, but weak upgrade experience).
+
+
+4. IDENTIFIED BUGS, TARGETED FIXES AND INSERTION POINTS
+--------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+HIGH — Finding 1. Repository update helper can publish an incomplete release
+-------------------------------------------------------------------------------
+
+Files
+  update_repo.bat; README.md; scriptorium.spec; .gitignore; icon\*.
+
+Evidence
+  update_repo.bat runs:
+
+      git add scriptorium.py README.md scriptorium_config.example.json
+
+  It cannot stage requirements, `.gitignore`, the spec, icons, notes, new files
+  or deletions. It also continues after failed `git commit` or `git push` and
+  always prints "Repository update complete". HEAD's v2.0 message claims
+  standalone packaging, and README instructs `pyinstaller scriptorium.spec`, but
+  `git ls-tree HEAD` confirms the spec is not present in the remote source tree.
+
+Impact
+  A fresh clone cannot follow the documented primary build command. Local and
+  remote release state diverge while the helper reports success. Deletions can
+  never be mirrored, contrary to AGENTS.md's explicit `git add --all` rule.
+
+Targeted fix
+  Replace update_repo.bat completely. This is a batch snippet, so Python
+  docstring requirements do not apply.
+
+Insertion point
+  C:\Scriptorium\update_repo.bat, replace the full file during an authorised
+  implementation task.
+
+    @echo off
+    setlocal
+    rem Scriptorium - stage the complete working tree, commit and push safely.
+
+    cd /d "C:\Scriptorium" || exit /b 1
+    set "COMMIT_MSG=%~1"
+    if not defined COMMIT_MSG set /p "COMMIT_MSG=Enter commit message: "
+    if not defined COMMIT_MSG (
+        echo No commit message provided. Aborting update.
+        exit /b 1
+    )
+
+    git add --all || goto :failed
+    git diff --cached --quiet && (
+        echo No staged changes to commit.
+        exit /b 0
+    )
+    git commit -m "%COMMIT_MSG%" || goto :failed
+    git push origin main || goto :failed
+    git status --short
+    echo Repository update complete.
+    exit /b 0
+
+    :failed
+    echo Repository update failed. Review the Git error above.
+    exit /b 1
+
+Verification
+  In a disposable test tree, add, modify and delete separate files; confirm all
+  appear in the staged commit. Force commit/push failures and confirm a non-zero
+  exit with no false success message. Before the real push, explicitly review
+  `git status` so the live config/API key remains ignored.
+
+
+-------------------------------------------------------------------------------
+MODERATE — Finding 2. Invalid backend values can falsely claim local privacy
+-------------------------------------------------------------------------------
+
+Locations
+  load_config() 166–190; run_backend() 460–463; _refresh_status() 954–963;
+  _maybe_show_privacy_notice() 968–978; build_system_prompt() 252–280.
+
+Evidence
+  run_backend sends every value except exact "ollama" to Claude. The status bar
+  describes every value except exact "anthropic" as local Ollama. Therefore a
+  hand-edited value such as "Ollama", "local", null or "" can display "stays on
+  this machine", skip the privacy notice, and send via Claude if a key exists.
+  Invalid mode/strength values also raise KeyError on the Tk thread before the
+  worker starts.
+
+Targeted fix
+  Normalise enumerated and Boolean values immediately after config merge. Keep
+  model IDs and the API key untouched. Make run_backend fail closed on any value
+  that somehow bypasses normalisation.
+
+Insertion point A
+  Add immediately below DEFAULT_CONFIG, before load_config().
+
+    def normalise_config(cfg):
+        """Return a copy with constrained settings restored to safe values.
+
+        Free-form API keys and model tags are preserved. An unknown backend
+        becomes Anthropic so the status and privacy notice remain conservative.
+        """
+        clean = dict(cfg)
+        choices = {
+            "backend": ("anthropic", "ollama"),
+            "default_mode": tuple(MODES),
+            "default_strength": tuple(STRENGTHS),
+            "default_role": tuple(ROLES),
+            "default_tone": tuple(TONES),
+            "default_diff_view": ("Clean", "Inline"),
+        }
+        for key, allowed in choices.items():
+            if clean.get(key) not in allowed:
+                clean[key] = DEFAULT_CONFIG[key]
+
+        boolean_keys = (
+            "privacy_ack", "protect_placeholders",
+            "check_letter_conventions",
+        )
+        for key in boolean_keys:
+            if not isinstance(clean.get(key), bool):
+                clean[key] = DEFAULT_CONFIG[key]
+        return clean
+
+Insertion point B
+  In load_config(), replace `return cfg` after `cfg.update(loaded)` with:
+
+    return normalise_config(cfg)
+
+Insertion point C
+  Replace run_backend():
+
+    def run_backend(system_prompt, user_text, cfg):
+        """Dispatch to the explicitly selected backend or fail safely."""
+        backend = cfg.get("backend")
+        if backend == "ollama":
+            return call_ollama(system_prompt, user_text, cfg)
+        if backend == "anthropic":
+            return call_anthropic(system_prompt, user_text, cfg)
+        raise BackendError(
+            "The configured backend is invalid. Open Settings and choose "
+            "Anthropic or Ollama.")
+
+Verification
+  Load invalid/null/list/string values for every constrained key. Confirm the
+  status and actual dispatch always agree and the privacy notice is never
+  bypassed by an invalid cloud/local value.
+
+
+-------------------------------------------------------------------------------
+MODERATE — Finding 3. Settings reports success even when persistence fails
+-------------------------------------------------------------------------------
+
+Locations
+  save_config() 193–219; SettingsDialog._save() 788–797;
+  Scriptorium._after_settings() 1281–1283.
+
+Evidence
+  save_config prints on failure and returns None both on success and failure.
+  _save mutates the live cfg, calls save_config, calls on_save, then destroys the
+  dialog. The status becomes "settings saved" even when no file was written.
+  In the windowed executable the print warning is invisible.
+
+Impact
+  The current session uses unsaved settings, the dialog closes, and the next
+  launch silently reverts. This is a direct in-memory/disk consistency defect.
+
+Targeted fix and insertion points
+
+  A. In save_config, return False from the unreadable/failure branches and True
+     after os.replace succeeds:
+
+    def save_config(cfg, *, force=False):
+        """Persist configuration atomically and report whether it succeeded."""
+        if getattr(load_config, "unreadable", False) and not force:
+            return False
+        tmp_path = f"{CONFIG_PATH}.tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                json.dump(cfg, fh, indent=2)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_path, CONFIG_PATH)
+        except (OSError, TypeError, ValueError):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            return False
+        load_config.unreadable = False
+        return True
+
+  B. In SettingsDialog._save(), build a candidate copy and commit it to memory
+     only after persistence succeeds:
+
+    def _save(self):
+        """Validate and persist settings, keeping the dialog open on failure."""
+        candidate = dict(self.cfg)
+        candidate.update({
+            "backend": self.backend_var.get(),
+            "anthropic_api_key": self.key_entry.get().strip(),
+            "anthropic_model": self.model_var.get(),
+            "ollama_model": (
+                self.ollama_combo.get().strip() or DEFAULT_OLLAMA_MODEL),
+            "protect_placeholders": bool(self.protect_var.get()),
+            "check_letter_conventions": bool(self.letters_var.get()),
+        })
+        candidate = normalise_config(candidate)
+        if not save_config(candidate, force=True):
+            messagebox.showerror(
+                "Settings not saved",
+                "Scriptorium could not write its configuration file. "
+                "Your current settings have not been changed.",
+                parent=self,
+            )
+            return
+        self.cfg.clear()
+        self.cfg.update(candidate)
+        self.on_save()
+        self.destroy()
+
+Verification
+  Simulate PermissionError/os.replace failure. Confirm the dialog stays open,
+  an error is visible, in-memory values remain unchanged, and the status does
+  not claim success.
+
+
+-------------------------------------------------------------------------------
+MODERATE — Finding 4. Backend response envelopes are insufficiently validated
+-------------------------------------------------------------------------------
+
+Locations
+  call_anthropic() 373–423; call_ollama() 426–457.
+
+Evidence
+  Valid JSON with a list/null root, a non-list Claude content field, a scalar
+  content block, null Ollama message, or non-string content raises AttributeError
+  or TypeError. Ollama also omits JSONDecodeError handling.
+
+Targeted fix
+  Validate provider envelopes before extraction and consistently raise
+  BackendError.
+
+Insertion point A
+  In call_anthropic(), immediately after the response try/except:
+
+    if not isinstance(payload, dict):
+        raise BackendError(
+            "The Claude API returned an unexpected JSON structure.")
+    content = payload.get("content")
+    if not isinstance(content, list):
+        raise BackendError(
+            "The Claude API response did not contain a content list.")
+
+  Replace its text join with:
+
+    text = "".join(
+        block.get("text", "")
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text"
+        and isinstance(block.get("text", ""), str)
+    )
+
+Insertion point B
+  Add `except json.JSONDecodeError` to call_ollama, then validate:
+
+    if not isinstance(payload, dict):
+        raise BackendError("Ollama returned an unexpected JSON structure.")
+    message = payload.get("message")
+    if not isinstance(message, dict):
+        raise BackendError("Ollama returned no message object.")
+    text = message.get("content")
+    if not isinstance(text, str) or not text.strip():
+        raise BackendError("Ollama returned no text content.")
+
+Verification
+  Mock valid/invalid provider bodies without making network calls. Every invalid
+  shape must become a specific BackendError and never an "Unexpected error".
+
+
+-------------------------------------------------------------------------------
+MODERATE — Finding 5. Backend timeouts are reported as unexpected exceptions
+-------------------------------------------------------------------------------
+
+Locations
+  call_anthropic() 397–408; call_ollama() 441–453.
+
+Targeted fix
+  Add TimeoutError after HTTPError/URLError handling in both functions:
+
+    except TimeoutError as exc:
+        raise BackendError(
+            "The language-model request timed out. Check the connection and "
+            "try a shorter passage.") from exc
+
+Verification
+  Patch urlopen to raise TimeoutError and confirm the friendly BackendError for
+  each backend.
+
+
+-------------------------------------------------------------------------------
+MODERATE — Finding 6. Ollama Detect blocks the modal Settings window
+-------------------------------------------------------------------------------
+
+Locations
+  SettingsDialog._detect_models() 767–780; list_ollama_models() 466–494.
+
+Targeted fix
+  Run only the HTTP work in a daemon thread, disable Detect while active, and
+  apply the result on Tk's thread.
+
+Insertion point
+  Replace _detect_models() and insert _finish_model_detection() below it.
+
+    def _detect_models(self):
+        """Detect local Ollama models without blocking the Settings window."""
+        self.detect_btn.configure(state="disabled")
+        self.ollama_status.configure(text="Detecting…")
+
+        def worker():
+            models = list_ollama_models()
+            try:
+                self.after(0, self._finish_model_detection, models)
+            except (tk.TclError, RuntimeError):
+                pass  # The Settings dialog closed before detection completed.
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_model_detection(self, models):
+        """Apply detected Ollama tags after returning to Tk's event thread."""
+        if not self.winfo_exists():
+            return
+        self._refresh_state()
+        if not models:
+            self.ollama_status.configure(
+                text="No response from Ollama at localhost:11434 — is "
+                     "'ollama serve' running?")
+            return
+        current = self.ollama_combo.get().strip()
+        values = models if current in models or not current else [current, *models]
+        self.ollama_combo.configure(values=values)
+        self.ollama_status.configure(text=f"Found {len(models)} model(s).")
+
+Verification
+  Delay the model-list helper; confirm Settings can still repaint and close and
+  Detect is restored only when the Ollama backend remains selected.
+
+
+-------------------------------------------------------------------------------
+MODERATE — Finding 7. Worker callbacks can be posted after application shutdown
+-------------------------------------------------------------------------------
+
+Locations
+  process().worker() 1050–1061; _on_close() 1285–1288.
+
+Evidence
+  Request invalidation rejects a callback after it runs, but does not prevent
+  the worker from invoking self.after on a destroyed Tcl interpreter. The broad
+  except may then try a second self.after. In the windowed PyInstaller build this
+  may appear as a post-exit traceback dialogue.
+
+Incremental fix
+  Centralise guarded UI posting and use try/except/else so a failed success post
+  is not transformed into a second error post.
+
+Insertion point
+  Add _post_to_ui() directly above process(); replace process().worker().
+
+    def _post_to_ui(self, callback, *args):
+        """Attempt to queue a UI callback; return False during shutdown."""
+        try:
+            self.after(0, callback, *args)
+        except (tk.TclError, RuntimeError):
+            return False
+        return True
+
+    # Replacement worker body:
+    def worker():
+        try:
+            result = run_backend(system_prompt, masked, cfg_snapshot)
+        except BackendError as exc:
+            self._post_to_ui(self._on_error, request_id, str(exc))
+        except Exception as exc:  # defensive provider boundary
+            self._post_to_ui(
+                self._on_error, request_id, f"Unexpected error: {exc}")
+        else:
+            self._post_to_ui(
+                self._on_success, request_id, original, ph_map, result)
+
+Limitation
+  Tkinter calls from worker threads are platform/interpreter-sensitive. The
+  strict solution is a thread-safe queue polled by `after()` from the main
+  thread, but that is a wider change. The helper is the smallest current-code
+  improvement and must be tested on the packaged Windows build.
+
+
+-------------------------------------------------------------------------------
+MODERATE — Finding 8. Word export can escape its UI error boundary
+-------------------------------------------------------------------------------
+
+Locations
+  write_docx() 516–522; export_file() 1245–1276.
+
+Targeted fix
+  Catch python-docx's illegal-XML ValueError and explain the remedy.
+
+Insertion point
+  In export_file(), after the ImportError handler and before OSError:
+
+    except (ValueError, TypeError) as exc:
+        messagebox.showerror(
+            "Export failed",
+            "The text contains a character that cannot be stored in a Word "
+            f"document. Try exporting as plain text.\n\n{exc}")
+        return
+
+Verification
+  Export text containing U+0000 or U+000B to .docx and confirm a friendly
+  dialogue rather than a Tk traceback.
+
+
+-------------------------------------------------------------------------------
+MODERATE — Finding 9. Accept silently cancels the newer in-flight request
+-------------------------------------------------------------------------------
+
+Locations
+  action bar 921–933; accept() 1116–1129; reject() 1131–1140.
+
+Evidence
+  While revision A is visible, Process B disables only Process. Clicking Accept
+  applies A, calls reject(), and reject invalidates B. The user receives no
+  cancellation warning.
+
+Targeted fix
+  Keep references to result-action buttons and disable Accept/Reject while busy,
+  or explicitly confirm cancellation. Disabling is the simpler state contract.
+
+Insertion points
+  Store the Accept button as `self.accept_btn` in _build_actionbar(). Add:
+
+    def _set_processing_state(self, processing):
+        """Keep controls consistent while a model request is active."""
+        self.busy = processing
+        self.process_btn.configure(
+            text="Working…" if processing else "Process",
+            state="disabled" if processing else "normal",
+        )
+        self.accept_btn.configure(
+            state="disabled" if processing else "normal")
+
+  Call `_set_processing_state(True)` at request start and
+  `_set_processing_state(False)` in _claim_request/_invalidate_inflight.
+
+Verification
+  Display A, start B, confirm Accept cannot cancel B; after B completes Accept
+  becomes active and applies B.
+
+
+-------------------------------------------------------------------------------
+LOW — Finding 10. Configuration warnings are invisible in the packaged app
+-------------------------------------------------------------------------------
+
+The spec sets console=False. load/save print-only warnings disappear. Finding 3
+adds a visible save failure. For load failures, retain a message on load_config,
+for example `load_config.warning`, and show it once after the root window exists.
+
+Insertion point
+  In load_config(), set `load_config.warning` to a British-English explanation;
+  in Scriptorium.__init__, after building the status bar:
+
+    def _show_config_warning(self):
+        """Show a configuration warning that a windowed build cannot print."""
+        warning = getattr(load_config, "warning", "")
+        if warning:
+            messagebox.showwarning("Configuration problem", warning, parent=self)
+
+
+-------------------------------------------------------------------------------
+LOW — Finding 11. Undo history is unbounded and records duplicate/no-op states
+-------------------------------------------------------------------------------
+
+Insertion point
+  Add below _invalidate_inflight and replace every undo_stack.append call:
+
+    def _remember_for_undo(self, text, limit=50):
+        """Store one distinct snapshot in a bounded in-memory undo history."""
+        if self.undo_stack and self.undo_stack[-1] == text:
+            return
+        self.undo_stack.append(text)
+        if len(self.undo_stack) > limit:
+            del self.undo_stack[:-limit]
+
+
+-------------------------------------------------------------------------------
+LOW — Finding 12. Frozen config fallback abandons the application subfolder
+-------------------------------------------------------------------------------
+
+If `%LOCALAPPDATA%\Scriptorium` creation fails, _config_dir returns the bare home
+folder. A later successful launch will not find that fallback config. Prefer a
+second dedicated `%USERPROFILE%\Scriptorium` directory and return it only after
+successful creation; otherwise expose a visible configuration error.
+
+Insertion point
+  Replace the except branch inside _config_dir():
+
+    except OSError:
+        fallback = os.path.join(os.path.expanduser("~"), "Scriptorium")
+        try:
+            os.makedirs(fallback, exist_ok=True)
+        except OSError:
+            return os.path.expanduser("~")
+        return fallback
+
+
+-------------------------------------------------------------------------------
+LOW — Finding 13. Packaged build does not use the available icon/metadata
+-------------------------------------------------------------------------------
+
+`icon\icon-96.ico` exists, but scriptorium.spec has `icon=None`. The resulting
+EXE has blank FileDescription/ProductVersion fields. This is distribution polish,
+not an application bug. Once the spec is tracked, set its icon to the ICO and
+add a small PyInstaller version-info resource in a separate packaging task.
+
+
+-------------------------------------------------------------------------------
+LOW — Finding 14. First executable run does not migrate source configuration
+-------------------------------------------------------------------------------
+
+Source mode stores config next to the script; frozen mode uses LocalAppData.
+This is safer for packaging and documented, but a user upgrading from source sees
+defaults and must re-enter the API key. Prefer a one-time, explicit import prompt
+rather than silently copying credentials. Defer until the executable is the
+normal distribution path.
+
+
+Deferred suspicions requiring GUI confirmation
+
+  * A custom Claude model not in ANTHROPIC_MODELS may be replaced by the first
+    CTkOptionMenu value when Settings is saved.
+  * CTkTextbox selection indices used by Paste may insert rather than replace on
+    some CustomTkinter/Tk combinations.
+
+Do not change either without reproducing it in the actual Windows environment.
+
+
+5. THREE LIGHTWEIGHT FEATURE PROPOSALS
+--------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+FEATURE 1 — Live word and character counts
+-------------------------------------------------------------------------------
+
+Value
+  Immediate feedback for letters and word-limited drafts with no new package or
+  widget. It also fixes the stale status-bar count.
+
+Insertion point A
+  In _build_panes(), immediately after original_box.grid() at line 891:
+
+    self.original_box.bind("<<Modified>>", self._on_original_modified)
+    self.original_box.edit_modified(False)
+
+Insertion point B
+  Add immediately above _refresh_status():
+
+    def _on_original_modified(self, _event=None):
+        """Refresh document counts after any Original-pane text change."""
+        if not self.original_box.edit_modified():
+            return
+        self.original_box.edit_modified(False)
+        self._refresh_status()
+
+Insertion point C
+  Replace the count construction in _refresh_status():
+
+    original = self.original_box.get("1.0", "end-1c")
+    characters = len(original)
+    words = len(original.split()) if original.strip() else 0
+    msg = (f"Backend: {where}  —  {privacy}   |   "
+           f"{words} words, {characters} characters")
+
+Verification
+  Type, cut, paste, Clear, Import, Accept and Undo; counts must update once per
+  change without recursive Modified events.
+
+
+-------------------------------------------------------------------------------
+FEATURE 2 — Named writing presets
+-------------------------------------------------------------------------------
+
+Value
+  One-click setup of the existing mode/strength/role/tone controls. Presets add
+  no backend state and remain editable after application.
+
+Insertion point A
+  Below ROLE_INSTRUCTIONS and above DEFAULT_CONFIG:
+
+    WRITING_PRESETS = {
+        "(none)": None,
+        "Formal letter": {
+            "mode": "Correct", "strength": "Standard",
+            "role": "Executive", "tone": "Formal",
+        },
+        "Client reply": {
+            "mode": "Clarify", "strength": "Standard",
+            "role": "Client Relations", "tone": "Diplomatic",
+        },
+        "Technical note": {
+            "mode": "Clarify", "strength": "Light",
+            "role": "Software Developer", "tone": "Concise",
+        },
+    }
+
+Insertion point B
+  Add in Scriptorium immediately above _build_toolbar():
+
+    def _apply_writing_preset(self, name):
+        """Populate existing writing controls from a named preset."""
+        preset = WRITING_PRESETS.get(name)
+        if not preset:
+            return
+        self.mode_var.set(preset["mode"])
+        self.strength_var.set(preset["strength"])
+        self.role_var.set(preset["role"])
+        self.tone_var.set(preset["tone"])
+        self._refresh_status(f"preset applied: {name}")
+
+Insertion point C
+  In _build_toolbar after Tone, add a Preset OptionMenu at columns 8–9; move
+  Settings to column 11 and the weighted spacer to column 10.
+
+    ctk.CTkLabel(bar, text="Preset").grid(row=0, column=8, padx=(20, 4))
+    self.preset_var = ctk.StringVar(value="(none)")
+    ctk.CTkOptionMenu(
+        bar,
+        values=list(WRITING_PRESETS),
+        variable=self.preset_var,
+        command=self._apply_writing_preset,
+        width=145,
+    ).grid(row=0, column=9, padx=4)
+
+
+-------------------------------------------------------------------------------
+FEATURE 3 — Review keyboard shortcuts with one binding registry
+-------------------------------------------------------------------------------
+
+Value
+  Faster review without new UI weight. Process/Import/Export already bind
+  shortcuts, but Accept/Reject/Copy revision/Undo do not.
+
+Insertion point
+  Add immediately above _build_toolbar(). In __init__, replace the three direct
+  binds with `self._bind_shortcuts()`.
+
+    def _bind_shortcuts(self):
+        """Register keyboard access to common editing and review actions."""
+        bindings = {
+            "<Control-Return>": self.process,
+            "<Control-i>": self.import_file,
+            "<Control-s>": self.export_file,
+            "<Control-Shift-A>": self.accept,
+            "<Escape>": self.reject,
+            "<Control-Shift-C>": self.copy_revision,
+            "<Control-z>": self.undo,
+        }
+        for sequence, action in bindings.items():
+            self.bind(sequence, lambda _event, command=action: command())
+
+Notes
+  Do not override ordinary Ctrl+C/Ctrl+V in the Original textbox. Add shortcut
+  hints to a small Help dialogue or tooltips rather than widening every button.
+
+
+6. TEST MATRIX FOR AN AUTHORISED IMPLEMENTATION PASS
+--------------------------------------------------------------------------------
+
+Repository and packaging
+  [ ] Fresh clone contains scriptorium.spec and intended icon assets.
+  [ ] README's spec build works from the clean clone.
+  [ ] update_repo stages additions, modifications and deletions.
+  [ ] commit/push failure returns non-zero and never says complete.
+  [ ] frozen executable launches, shows icon/version metadata and stores config
+      under LocalAppData.
+
+Configuration/privacy
+  [ ] Invalid backend always fails safely or normalises to visible Anthropic.
+  [ ] Status, privacy notice and actual dispatcher agree for every backend value.
+  [ ] Invalid mode/strength/Boolean values cannot raise TclError/KeyError.
+  [ ] Failed save leaves Settings open and in-memory/disk state unchanged.
+  [ ] Broken config warning is visible in the windowed executable.
+
+Backends/concurrency
+  [ ] Malformed provider envelopes produce BackendError.
+  [ ] Claude/Ollama timeout produces the specific timeout message.
+  [ ] Ollama Detect does not freeze Settings.
+  [ ] Close during a delayed request produces no traceback dialogue.
+  [ ] Accept cannot silently cancel a newer request.
+
+Documents/editor
+  [ ] Illegal XML control character yields a Word-export error dialogue.
+  [ ] Stale Accept/Copy/Export protections remain unchanged.
+  [ ] Undo remains correct after Accept, Paste, Clear and Import and never exceeds
+      its chosen snapshot limit.
+  [ ] Live counts update on every text mutation.
+  [ ] Presets and keyboard shortcuts do not alter prompt or revision semantics.
+
+
+7. CONCLUSION
+--------------------------------------------------------------------------------
+
+Scriptorium's central editing state is now dependable; the next work should not
+be a rewrite. The immediate priority is release integrity: ensure that the Git
+repository genuinely contains the documented v2.0 packaging sources and that
+the update helper cannot hide failures. Within the application, configuration
+normalisation and truthful save reporting give the largest safety return for
+the smallest change. Backend envelope/timeout checks, asynchronous Detect and
+the Word-export boundary are independent, low-churn follow-ups.
+
+For usability, live counts provide the best value-to-code ratio, with named
+presets and review shortcuts close behind. Minimise-to-tray, autostart and
+credential migration remain worthwhile later projects, but should not be mixed
+into the focused robustness pass recommended here.
+
+No implementation should proceed without Mark's explicit authorisation.
+
+================================================================================
+ END OF REPORT
+================================================================================

@@ -1,0 +1,642 @@
+================================================================================
+ SCRIPTORIUM CODE REVIEW: STATE-CONSISTENCY AUDIT & INCREMENTAL ROADMAP
+================================================================================
+ Author: Claude (Claude Code review agent)
+ Date:   26 August 2026
+ Target: C:\Scriptorium\scriptorium.py (Version 1.2)
+ Scope:  Read-only static review of the primary .py file, cross-checked
+         against notes_001.txt, notes_002.txt and notes_003.txt.
+ Method: Manual line-by-line trace of every state-mutating code path
+         (process/accept/reject/undo/import/export) plus a hand trace of
+         the JSON-schema and placeholder-restoration pipelines against
+         malformed-input cases. No code was executed and no files other
+         than this report were written.
+================================================================================
+
+1. RECONCILIATION WITH PRIOR NOTES
+--------------------------------------------------------------------------------
+notes_003.txt (present in both notes/ and notes/00_Drafts/) already lists five
+bugs against this same v1.2 file. I independently re-traced the current
+scriptorium.py against each claim before writing anything new below.
+
+  * [CONFIRMED STILL OPEN] Bug #2 — .strip() on input destroys intentional
+    whitespace/blank lines. scriptorium.py:710.
+  * [CONFIRMED STILL OPEN] Bug #3 — _extract_json() does not coerce types;
+    null ambiguities becomes the literal string "None". scriptorium.py:251-275.
+    See section 2.1 below — this one is worse than previously described.
+  * [CONFIRMED STILL OPEN] Bug #4 — restore_placeholders() only replaces the
+    first occurrence of a repeated sentinel. scriptorium.py:427-448.
+  * [CONFIRMED STILL OPEN] Bug #5 — call_ollama() reports Ollama HTTP errors
+    (e.g. 404 model-not-found) as "could not reach Ollama". scriptorium.py:322-348.
+  * [PARTIALLY ADDRESSED, FIX INCOMPLETE] Bug #1 — the stale-result hazard.
+    notes_003.txt's own "Fix 3" snippet adds `self.processing_source = original`
+    to process() but that attribute is never read anywhere else in the class.
+    Applying that snippet as written would NOT fix the bug — it stores a
+    snapshot nobody consults. Section 2.2 below completes it.
+
+Two further bugs were found during this pass that none of the prior notes
+mention (section 2.3 and 2.1's crash consequence). Section 3 gives modular,
+drop-in fixes for all of it, and section 4 proposes three new features that
+do not duplicate the Dual-Mode Diff / Live Metrics / Letter-Etiquette ideas
+already on record in notes_003.txt (those three remain unimplemented and
+still worth doing — they just aren't repeated here).
+
+
+2. INVESTIGATION & BUG HUNTING
+--------------------------------------------------------------------------------
+
+2.1. Non-string "revised" silently crashes the result callback (HIGH)
+    Location: _extract_json() (scriptorium.py:262-275), consumed by
+              Scriptorium._on_success() (scriptorium.py:745-763).
+    Detail:
+      _extract_json() only checks `"revised" not in data` (line 269). It never
+      checks the *type* of data["revised"]. If a model returns
+      {"revised": ["para one", "para two"]} or {"revised": null} with the key
+      present-but-falsy handled elsewhere, the dict is returned unchanged.
+      Tracing what happens next when protect_placeholders is on:
+          result["revised"], warnings = restore_placeholders(result["revised"], ph_map)
+      restore_placeholders() immediately calls `text.count(sentinel)` and then
+      `text.replace(sentinel, original, 1)` (scriptorium.py:436, 443) — a list
+      has no .replace(), so this raises AttributeError.
+      With protect_placeholders off (ph_map empty), the crash instead happens
+      one line later in render_diff() -> _tokenise(revised) -> re.findall(...),
+      which requires a str/bytes-like object and raises TypeError for a list.
+      Either way the exception is raised inside a callback scheduled via
+      `self.after(0, self._on_success, ...)`. Tkinter's default
+      report_callback_exception prints a traceback to stderr and keeps the
+      mainloop alive — so the app does not crash, but self.busy was already
+      reset to False at the top of _on_success (line 746), the Process button
+      is already re-enabled, and nothing is shown to the user: no revision,
+      no error dialog, no status update. From the user's point of view the
+      click simply did nothing, with no clue why. This is a genuine data-
+      consistency failure, not just a cosmetic "None" string as previously
+      scoped — I am raising this from MEDIUM to HIGH accordingly.
+    Remedy: coerce/validate the full response shape inside _extract_json()
+      before it ever reaches the UI layer. See Fix 1.
+
+2.2. Stale-revision guard is still absent despite a draft fix on file (HIGH)
+    Location: Scriptorium.process(), accept(), export_file()
+              (scriptorium.py:707-743, 771-779, 827-843).
+    Detail:
+      process() captures `original` in a local variable and starts a daemon
+      thread that can run for many seconds (longer on local Ollama models).
+      original_box remains fully editable throughout. If the user edits,
+      pastes, or otherwise changes the text before the worker returns,
+      accept() will still overwrite whatever is currently in original_box
+      with the revision computed for the OLD text:
+          self.original_box.insert("1.0", self.last_result["revised"])
+      export_file() has the same exposure via `self.last_result["revised"]`.
+      notes_003.txt flagged this and proposed a fix that adds
+      `self.processing_source = original` inside process() — but no method
+      in the class ever reads `self.processing_source`, so that change is a
+      no-op against the actual bug. It would ship looking like a fix (it even
+      has a docstring saying "state snapshot protection") while leaving the
+      overwrite path completely intact.
+    Remedy: actually compare the live snapshot against the current textbox
+      contents at the two points that matter — when the result lands, and
+      when the user commits to Accept/Export — and ask for confirmation
+      instead of overwriting silently. See Fix 2.
+
+2.3. undo() and import_file() do not invalidate a pending revision (MEDIUM, new)
+    Location: Scriptorium.undo() (scriptorium.py:796-802),
+              Scriptorium.import_file() (scriptorium.py:810-825).
+    Detail:
+      This one needs no threading or timing at all to reproduce — it is a
+      plain synchronous logic error:
+        1. Type "Hello world" into Original, click Process, wait for a
+           revision (last_result is now set to the result for "Hello world").
+        2. Click Accept -> original_box becomes the revision, last_result is
+           cleared via reject() (accept() calls reject() at scriptorium.py:778).
+        3. Click Process again, get a second revision; last_result now holds
+           it.
+        4. Click Undo -> original_box reverts to "Hello world" (the snapshot
+           pushed in step 2). But undo() never calls reject(), so last_result
+           STILL holds the revision generated in step 3, and the Revised pane
+           still displays it.
+        5. Click Accept -> the app applies the step-3 revision (which belongs
+           to the pre-undo text) on top of the just-restored "Hello world",
+           silently discarding the user's Undo and reintroducing content that
+           has nothing to do with what is on screen.
+      import_file() has the identical gap: it pushes the old text onto
+      undo_stack and overwrites original_box, but never calls reject(), so an
+      unrelated revision from before the import can still be Accepted or
+      Exported onto the freshly imported document. clear_all() already gets
+      this right — it calls self.reject() (scriptorium.py:807) — so the fix
+      is simply to make undo() and import_file() consistent with clear_all().
+    Remedy: See Fix 3 — one line added to each method.
+
+2.4. Minor: example config omits a real default key (LOW / cosmetic)
+    Location: scriptorium_config.example.json vs. DEFAULT_CONFIG
+              (scriptorium.py:129-136).
+    Detail:
+      DEFAULT_CONFIG includes "protect_placeholders": true, but
+      scriptorium_config.example.json (the template new users copy) does not
+      list that key at all. This has no functional effect today because
+      load_config() does `cfg = dict(DEFAULT_CONFIG); cfg.update(json.load(fh))`
+      (scriptorium.py:140-146), so the in-app default still applies — but the
+      example file no longer documents the full, real config schema, which
+      will confuse anyone hand-editing it. Not a code fix, just flagged for
+      completeness since the task asked about consistency across the app.
+      Suggested one-line addition to scriptorium_config.example.json:
+          "protect_placeholders": true
+
+
+3. TARGETED, MODULAR FIXES
+--------------------------------------------------------------------------------
+Each fix below is self-contained and only touches the function(s) named. None
+of them change the JSON response schema, the settings file format, or the
+public shape of any class.
+
+### Fix 1 — Validate/coerce the model's response shape
+Insert at: scriptorium.py, replacing lines 251-275 (the whole _extract_json
+function body from the docstring to `return data`).
+
+```python
+def _extract_json(text):
+    """Pull a JSON object out of a model response and normalise its shape.
+
+    Tolerates stray Markdown code fences and leading/trailing chatter around
+    the JSON object. Beyond parsing, this also guarantees the *types* the
+    rest of the app assumes: "revised" is always a non-empty string,
+    "ambiguities" is always a list of non-empty strings, and "note" is
+    always a string. Without this, a model that returns a list for
+    "revised" or null for "ambiguities" corrupts the UI update silently
+    instead of raising a clear, catchable BackendError.
+    """
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+        text = re.sub(r"\n?```$", "", text).strip()
+    # Fall back to the outermost braces if there is leading/trailing chatter.
+    if not text.startswith("{"):
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end != -1:
+            text = text[start:end + 1]
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise BackendError(
+            "The model did not return valid JSON. Try again, or lower the "
+            f"editing strength.\n\n(Parser detail: {exc})"
+        )
+
+    if not isinstance(data, dict):
+        raise BackendError("The model response was not a JSON object.")
+
+    revised = data.get("revised")
+    if isinstance(revised, list):
+        revised = "\n\n".join(str(part) for part in revised)
+    elif revised is None:
+        raise BackendError("The model response was missing the 'revised' field.")
+    elif not isinstance(revised, str):
+        revised = str(revised)
+    data["revised"] = revised
+
+    ambiguities = data.get("ambiguities")
+    if isinstance(ambiguities, list):
+        ambiguities = [str(a).strip() for a in ambiguities if a not in (None, "")]
+    elif ambiguities in (None, ""):
+        ambiguities = []
+    else:
+        ambiguities = [str(ambiguities).strip()]
+    data["ambiguities"] = ambiguities
+
+    note = data.get("note")
+    data["note"] = str(note).strip() if note not in (None, "") else ""
+
+    return data
+```
+
+### Fix 2 — Complete the stale-revision guard
+Insert at: scriptorium.py.
+
+(a) In `Scriptorium.__init__`, immediately after line 540
+(`self.busy = False`), add:
+
+```python
+        self._processing_source = ""  # snapshot the last text sent for processing
+```
+
+(b) Replace lines 707-713 of `process()` (from `def process(self):` down to
+the `return` inside the empty-text check) with:
+
+```python
+    def process(self):
+        """Send the current original text to the active backend for rewriting.
+
+        Captures an unstripped snapshot of the source text so a later Accept
+        or Export can detect whether original_box changed while the request
+        was in flight, instead of silently applying a revision computed for
+        text that is no longer on screen.
+        """
+        if self.busy:
+            return
+        original = self.original_box.get("1.0", "end-1c")
+        if not original.strip():
+            self._refresh_status("nothing to process")
+            return
+        self._processing_source = original
+```
+
+(the rest of process(), from the placeholder-masking block onward, is
+unchanged and follows straight after)
+
+(c) In `_on_success` (scriptorium.py:745-763), insert a staleness check right
+after the placeholder-restoration block and before `self.last_result = result`:
+
+```python
+        if self.original_box.get("1.0", "end-1c") != original:
+            warnings.append(
+                "The original text changed while this was processing — this "
+                "revision reflects the OLDER text. Review carefully before "
+                "accepting.")
+```
+
+(d) Add a small helper just after `_on_error` (after scriptorium.py:769):
+
+```python
+    def _revision_is_stale(self):
+        """True if original_box changed since the pending revision was made."""
+        return self.original_box.get("1.0", "end-1c") != self._processing_source
+```
+
+(e) In `accept()` (scriptorium.py:771-779), add a guard as the first line of
+the body after the existing `if not self.last_result: return`:
+
+```python
+        if self._revision_is_stale() and not messagebox.askyesno(
+                "Revision may be out of date",
+                "The original text changed after this revision was generated. "
+                "Accept it anyway and overwrite the current text?"):
+            return
+```
+
+(f) In `export_file()` (scriptorium.py:827-843), add the same guard before the
+existing `text = (...)` line:
+
+```python
+        if self.last_result and self._revision_is_stale() and not messagebox.askyesno(
+                "Revision may be out of date",
+                "The original text changed after this revision was generated. "
+                "Export it anyway?"):
+            return
+```
+
+### Fix 3 — undo() and import_file() must drop a pending revision
+Insert at: scriptorium.py, replacing lines 796-802 (`undo()`) and lines
+810-825 (`import_file()`).
+
+```python
+    def undo(self):
+        """Restore the previous snapshot and discard any pending revision."""
+        if not self.undo_stack:
+            self._refresh_status("nothing to undo")
+            return
+        self.reject()
+        self.original_box.delete("1.0", "end")
+        self.original_box.insert("1.0", self.undo_stack.pop())
+        self._refresh_status("undo")
+```
+
+```python
+    def import_file(self):
+        path = filedialog.askopenfilename(
+            title="Import text",
+            filetypes=[("Text and Markdown", "*.txt *.md"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                content = fh.read()
+        except OSError as exc:
+            messagebox.showerror("Import failed", str(exc))
+            return
+        self.undo_stack.append(self.original_box.get("1.0", "end-1c"))
+        self.reject()
+        self.original_box.delete("1.0", "end")
+        self.original_box.insert("1.0", content)
+        self._refresh_status(f"imported {os.path.basename(path)}")
+```
+
+### Fix 4 — Restore every occurrence of a repeated placeholder
+Insert at: scriptorium.py, replacing lines 427-448 (`restore_placeholders`).
+
+```python
+def restore_placeholders(text, mapping):
+    """Put the original placeholders back into the revised text.
+
+    Returns (restored_text, warnings). A warning is recorded if the model
+    dropped a sentinel entirely; if a sentinel appears more than once, ALL
+    occurrences are restored (not just the first) so no raw sentinel like
+    "PH0" survives into the final text.
+    """
+    warnings = []
+    for sentinel, original in mapping:
+        count = text.count(sentinel)
+        if count == 0:
+            warnings.append(
+                f"The placeholder {original} is missing from the revision — the "
+                "model appears to have dropped it. Re-run, or paste it back in "
+                "by hand.")
+            continue
+        text = text.replace(sentinel, original)
+        if count > 1:
+            warnings.append(
+                f"The placeholder {original} appeared {count} times in the "
+                "revision; all occurrences were restored.")
+    return text, warnings
+```
+
+### Fix 5 — Report Ollama's actual HTTP error instead of "could not reach"
+Insert at: scriptorium.py, replacing lines 322-348 (`call_ollama`).
+
+```python
+def call_ollama(system_prompt, user_text, cfg):
+    """Call a local Ollama chat model and return its parsed JSON response.
+
+    Distinguishes an unreachable server (URLError) from an HTTP error the
+    server itself returned (HTTPError, e.g. 404 for an unpulled model), since
+    HTTPError is a subclass of URLError and must be caught first.
+    """
+    body = json.dumps({
+        "model": cfg.get("ollama_model", DEFAULT_OLLAMA_MODEL),
+        "stream": False,
+        "format": "json",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_text},
+        ],
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        OLLAMA_URL, data=body, method="POST",
+        headers={"content-type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:400]
+        raise BackendError(f"Ollama returned an error ({exc.code}).\n\n{detail}")
+    except urllib.error.URLError as exc:
+        raise BackendError(
+            "Could not reach Ollama at localhost:11434. Is it running? "
+            f"Start it with 'ollama serve' and pull a model first.\n\n({exc.reason})"
+        )
+    text = payload.get("message", {}).get("content", "")
+    if not text:
+        raise BackendError("Ollama returned no content.")
+    return _extract_json(text)
+```
+
+
+4. THREE NEW FEATURES (usability/UI, no architectural growth)
+--------------------------------------------------------------------------------
+notes_003.txt already specified full code for a Dual-Mode Diff viewer, Live
+Word/Character Metrics, and a British Letter Etiquette normaliser — all three
+remain unimplemented and are still good candidates. To avoid duplicating that
+work, the three below are deliberately different and are chosen to directly
+mitigate the state-consistency issues found in section 2: they give the user
+a manual safety net and faster iteration instead of relying purely on
+silent-overwrite prevention.
+
+### Feature 1 — Recent Revisions panel (in-memory only, no persistence)
+Rationale: sections 2.2/2.3 show several ways a revision can be lost or
+superseded (Undo, Import, a stale async result). A small session-only
+history the user can reopen turns "the revision I wanted is gone" into a
+two-click recovery instead of a support question. Capped at 8 entries and
+never written to disk, so it stays in keeping with the lightweight design.
+
+Insert the data helper at: scriptorium.py, after `restore_placeholders`
+(after line 448), before the "Settings dialog" section header (line 451):
+
+```python
+# --------------------------------------------------------------------------- #
+#  Session history (recent revisions, in-memory only — nothing is persisted)
+# --------------------------------------------------------------------------- #
+
+MAX_HISTORY = 8
+
+
+def add_history_entry(history, original, result, mode, strength, tone, role):
+    """Record a completed revision at the front of an in-memory history list.
+
+    Mutates `history` in place and caps it at MAX_HISTORY entries, so this
+    stays a small session aid rather than an unbounded log or a new file format.
+    """
+    history.insert(0, {
+        "original": original,
+        "revised": result["revised"],
+        "note": result.get("note", ""),
+        "mode": mode,
+        "strength": strength,
+        "tone": tone,
+        "role": role,
+    })
+    del history[MAX_HISTORY:]
+```
+
+Insert the browser dialog at: scriptorium.py, after the `SettingsDialog`
+class (after line 527), before the "Main application" section header:
+
+```python
+class HistoryDialog(ctk.CTkToplevel):
+    """Read-only browser for the current session's recent revisions."""
+
+    def __init__(self, master, history, on_restore):
+        super().__init__(master)
+        self.history = history
+        self.on_restore = on_restore
+
+        self.title("Recent revisions")
+        self.geometry("480x360")
+        self.grab_set()
+
+        if not history:
+            ctk.CTkLabel(self, text="No revisions yet this session."
+                         ).pack(padx=16, pady=16)
+            return
+
+        self.choice = ctk.StringVar(value="0")
+        for idx, entry in enumerate(history):
+            preview = entry["original"].strip().replace("\n", " ")[:60]
+            label = f"{entry['mode']} \u00b7 {entry['strength']} \u2014 {preview}\u2026"
+            ctk.CTkRadioButton(self, text=label, variable=self.choice,
+                               value=str(idx)).pack(anchor="w", padx=16, pady=4)
+
+        ctk.CTkButton(self, text="Restore", command=self._restore
+                     ).pack(side="bottom", pady=12)
+
+    def _restore(self):
+        entry = self.history[int(self.choice.get())]
+        self.on_restore(entry)
+        self.destroy()
+```
+
+Wire it into the app: add `self.history = []` to `__init__` right after
+`self.undo_stack = []` (line 538); add one line inside `_on_success`
+right after `self.last_result = result` (line 756):
+
+```python
+        add_history_entry(self.history, original, result, self.mode_var.get(),
+                           self.strength_var.get(), self.tone_var.get(),
+                           self.role_var.get())
+```
+
+Add the two methods after `open_settings`/`_after_settings`
+(after line 850), before `def main():`:
+
+```python
+    def show_history(self):
+        """Open the recent-revisions browser (session-only, nothing is persisted)."""
+        HistoryDialog(self, self.history, on_restore=self._restore_from_history)
+
+    def _restore_from_history(self, entry):
+        """Repopulate both panes from a past in-memory history entry."""
+        self.undo_stack.append(self.original_box.get("1.0", "end-1c"))
+        self.reject()
+        self.original_box.delete("1.0", "end")
+        self.original_box.insert("1.0", entry["original"])
+        self.last_result = {"revised": entry["revised"], "ambiguities": [],
+                             "note": entry["note"]}
+        render_diff(self.revised_box, entry["original"], entry["revised"])
+        self._refresh_status("restored from history")
+```
+
+Add a button in `_build_actionbar()`, after the Undo button (after line 649):
+
+```python
+        ctk.CTkButton(bar, text="History", width=90, fg_color="gray30",
+                      command=self.show_history).pack(side="left", padx=4)
+```
+
+### Feature 2 — "Copy change summary" (plain-English bullet list of edits)
+Rationale: letter/document authors often need to tell a colleague or client
+*what changed* without pasting the whole revised text. This reuses the exact
+same tokeniser and SequenceMatcher already used by render_diff(), so the
+summary can never disagree with what the diff pane highlights.
+
+Insert at: scriptorium.py, immediately after `render_diff()` (after line 383):
+
+```python
+def summarise_changes(original, revised, max_items=12):
+    """Produce a short list of word/phrase-level changes between two texts.
+
+    Reuses the same tokeniser and SequenceMatcher as render_diff() so the
+    summary always matches the diff pane. Capped at `max_items` so a heavy
+    rewrite still produces something skimmable rather than a second copy
+    of the whole text.
+    """
+    a, b = _tokenise(original), _tokenise(revised)
+    matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    changes = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        old = "".join(a[i1:i2]).strip()
+        new = "".join(b[j1:j2]).strip()
+        if tag == "delete":
+            changes.append(f"removed '{old}'")
+        elif tag == "insert":
+            changes.append(f"added '{new}'")
+        else:  # replace
+            changes.append(f"'{old}' -> '{new}'")
+        if len(changes) >= max_items:
+            break
+    return changes
+```
+
+Add the method after `copy_revision()` (after line 794), before `undo()`:
+
+```python
+    def copy_change_summary(self):
+        """Copy a short bullet list of what changed, instead of the full text."""
+        if not self.last_result:
+            return
+        original = self.original_box.get("1.0", "end-1c")
+        changes = summarise_changes(original, self.last_result["revised"])
+        if not changes:
+            self._refresh_status("no changes to summarise")
+            return
+        summary = "\n".join(f"- {c}" for c in changes)
+        self.clipboard_clear()
+        self.clipboard_append(summary)
+        self._refresh_status(f"copied {len(changes)} change(s) to clipboard")
+```
+
+Add a button in `_build_actionbar()`, after the "Copy revision" button
+(after line 647):
+
+```python
+        ctk.CTkButton(bar, text="Copy summary", width=120, fg_color="gray30",
+                      command=self.copy_change_summary).pack(side="left", padx=4)
+```
+
+### Feature 3 — "Softer" / "Stronger" one-click re-run
+Rationale: today, adjusting the editing strength means reaching for the
+toolbar segmented control and clicking Process again. This adds two small
+buttons that nudge Strength one notch and immediately re-run, for the very
+common "not quite enough" / "too much" iteration loop.
+
+Insert at: scriptorium.py, immediately after the `STRENGTHS` list
+(after line 83):
+
+```python
+def shift_strength(current, delta):
+    """Move `current` up or down the STRENGTHS ladder, clamped at the ends.
+
+    delta=-1 asks for a gentler edit, +1 for a more thorough one. Always
+    returns a valid value from STRENGTHS, so callers do not need to
+    bounds-check before calling this.
+    """
+    idx = STRENGTHS.index(current)
+    new_idx = max(0, min(len(STRENGTHS) - 1, idx + delta))
+    return STRENGTHS[new_idx]
+```
+
+Add the method after `process()` (after line 743), before `_on_success`:
+
+```python
+    def rerun_with_strength(self, delta):
+        """Re-run the current text one strength notch softer (-1) or stronger (+1)."""
+        if self.busy:
+            return
+        self.strength_var.set(shift_strength(self.strength_var.get(), delta))
+        self.process()
+```
+
+Add two buttons in `_build_actionbar()`, after the Process button
+(after line 639):
+
+```python
+        ctk.CTkButton(bar, text="\u2193 Softer", width=80, fg_color="gray30",
+                      command=lambda: self.rerun_with_strength(-1)
+                      ).pack(side="left", padx=(12, 4))
+        ctk.CTkButton(bar, text="\u2191 Stronger", width=90, fg_color="gray30",
+                      command=lambda: self.rerun_with_strength(1)
+                      ).pack(side="left", padx=4)
+```
+
+
+5. RECOMMENDED ORDER OF WORK
+--------------------------------------------------------------------------------
+1. Fix 1 (_extract_json validation) — cheapest, and the one silent-crash
+   scenario that can currently produce a click that visibly does nothing.
+2. Fix 3 (undo/import invalidation) — one line per method, closes a
+   deterministic, easily-reproduced bug today.
+3. Fix 2 (complete the stale-revision guard) — supersedes notes_003.txt's
+   Fix 3, which should NOT be applied as originally written since it does
+   not fix anything on its own.
+4. Fix 4 (full-occurrence placeholder restoration) and Fix 5 (Ollama HTTP
+   error surfacing) — both small, independent, low-risk.
+5. Feature 1 (Recent Revisions) pairs naturally with the Fix 2/3 work since
+   it gives users a manual recovery path for exactly the scenarios those
+   fixes guard against.
+6. Features 2 and 3 are independent and can land in any order once the
+   above is stable.
+7. notes_003.txt's Dual-Mode Diff, Live Metrics and Letter-Etiquette
+   features remain valid, unimplemented follow-on work.
+
+================================================================================
+ END OF REPORT
+================================================================================

@@ -1,0 +1,386 @@
+================================================================================
+ SCRIPTORIUM IMPLEMENTATION SUMMARY — DEFAULTS, CLIPBOARD, TRAY
+================================================================================
+ Author:  Mark & Grok Bot
+ Date:    28 August 2026
+ Target:  C:\Scriptorium\scriptorium.py (Version 1.7, 1167 lines)
+ Scope:   Investigation only. No project files were modified except this
+          draft note. Matches the screenshot: Mode Paraphrase, Strength
+          Substantial, Role Academic, Tone Concise, revision view Inline.
+ Writes:  this file only. Implementation needs an explicit go-ahead.
+================================================================================
+
+
+0. CURRENT BEHAVIOUR (v1.7)
+--------------------------------------------------------------------------------
+Toolbar defaults are hard-coded in _build_toolbar / _build_panes, not
+read from scriptorium_config.json:
+
+  Mode     StringVar(value="Correct")           ~line 777
+  Strength StringVar(value="Standard")          ~line 782
+  Role     StringVar(value="(none)")            ~line 787
+  Tone     StringVar(value="(keep original)")   ~line 792
+  Diff     StringVar(value="Clean")             ~line 814
+
+DEFAULT_CONFIG (~130–138) holds backend, API key, models, privacy_ack,
+protect_placeholders, check_letter_conventions. It does not store the
+five writing knobs.
+
+Clipboard: the only button is "Copy revision" (~861, copy_revision
+~1070). It copies last_result["revised"] and now warns if the original
+has changed. There is no Copy of the Original pane and no Paste
+button. Ctrl+C / Ctrl+V still work inside the CTkTextbox, which is
+what you are trying to avoid.
+
+Startup / close:
+  * Scriptorium.bat runs `python scriptorium.py` (console window).
+  * There is no Run-key or Startup-folder registration.
+  * protocol("WM_DELETE_WINDOW", self._on_close) ~765.
+  * _on_close (~1155) invalidates in-flight work then destroy() —
+    the process exits. No withdraw(), no tray icon, no pystray.
+
+The screenshot already shows the preferred session. The work is to
+make that the load-time default, add Original-pane Copy/Paste, and
+keep the process alive in the notification area.
+
+
+1. TASK 1 — PREFERRED SESSION DEFAULTS
+--------------------------------------------------------------------------------
+Wanted on every new session:
+  Mode = Paraphrase, Strength = Substantial, Role = Academic,
+  Tone = Concise, Suggested revision = Inline.
+
+### 1.1 Smallest change (hard-coded)
+Replace the five value= literals. One-line each. Always starts as you
+prefer; last-used combination is discarded on quit.
+
+Insert at: scriptorium.py, _build_toolbar / _build_panes.
+
+    self.mode_var = ctk.StringVar(value="Paraphrase")          # was "Correct"
+    self.strength_var = ctk.StringVar(value="Substantial")     # was "Standard"
+    self.role_var = ctk.StringVar(value="Academic")            # was "(none)"
+    self.tone_var = ctk.StringVar(value="Concise")             # was "(keep original)"
+    self.diff_view_var = ctk.StringVar(value="Inline")         # was "Clean"
+
+### 1.2 Recommended: persist in config (still incremental)
+Hard-coding will annoy you the first time the preference changes.
+Add keys to DEFAULT_CONFIG so load_config() / save_config() already
+do the I/O, and seed them with today's preferred values.
+
+Insert at: DEFAULT_CONFIG (~130), after check_letter_conventions:
+
+    "default_mode": "Paraphrase",
+    "default_strength": "Substantial",
+    "default_role": "Academic",
+    "default_tone": "Concise",
+    "default_diff_view": "Inline",
+
+Then in _build_toolbar / _build_panes, read from self.cfg (already
+loaded in __init__ before _build_toolbar):
+
+    self.mode_var = ctk.StringVar(
+        value=self.cfg.get("default_mode", "Paraphrase"))
+    self.strength_var = ctk.StringVar(
+        value=self.cfg.get("default_strength", "Substantial"))
+    self.role_var = ctk.StringVar(
+        value=self.cfg.get("default_role", "Academic"))
+    self.tone_var = ctk.StringVar(
+        value=self.cfg.get("default_tone", "Concise"))
+
+    self.diff_view_var = ctk.StringVar(
+        value=self.cfg.get("default_diff_view", "Inline"))
+
+Add the same five keys to scriptorium_config.example.json so a fresh
+copy documents the schema.
+
+Optional Settings checkbox or "Use current toolbar as my defaults"
+button that writes the five keys and save_config(self.cfg, force=True).
+Not required for the first pass: changing DEFAULT_CONFIG plus the
+StringVar fallbacks is enough, because load_config() merges file over
+defaults and missing keys keep the new defaults.
+
+Do not save the live toolbar on every Process click. Defaults are a
+startup preference, not "last used this hour".
+
+
+2. TASK 2 — COPY AND PASTE BUTTONS
+--------------------------------------------------------------------------------
+Keep "Copy revision" as it is (revision pane / last_result). Add two
+new buttons that operate on the Original pane, which is the editable
+"current text" in the screenshot.
+
+### 2.1 Placement
+Right-hand cluster of the action bar (~866), before Clear, so Import /
+Export stay together:
+
+    [Process] [Accept] [Reject] [Copy revision] [Undo]
+                                    [Paste] [Copy] [Clear] [Import] [Export]
+
+Or, cleaner for "I never want to right-click the Original pane", a
+tiny pair immediately under the "Original" label in _build_panes
+(~row 0, column 0). Either is a few pack/grid lines. Prefer the
+action bar so the Original header stays uncluttered.
+
+### 2.2 Methods
+Insert at: scriptorium.py, after copy_revision() (~1080).
+
+```python
+    def copy_original(self):
+        """Copy the Original pane to the clipboard (no revision involved)."""
+        text = self.original_box.get("1.0", "end-1c")
+        if not text:
+            self._refresh_status("nothing to copy")
+            return
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self._refresh_status("original copied to clipboard")
+
+    def paste_original(self):
+        """Insert clipboard text into Original at the current selection.
+
+        An empty clipboard is reported rather than raising TclError.
+        Existing content is pushed onto undo_stack so Undo restores it.
+        """
+        try:
+            incoming = self.clipboard_get()
+        except tk.TclError:
+            self._refresh_status("clipboard is empty")
+            return
+        if not incoming:
+            self._refresh_status("clipboard is empty")
+            return
+        self.undo_stack.append(self.original_box.get("1.0", "end-1c"))
+        try:
+            self.original_box.delete("sel.first", "sel.last")
+        except tk.TclError:
+            pass  # no selection — insert at the insertion cursor
+        self.original_box.insert("insert", incoming)
+        self._refresh_status("pasted from clipboard")
+```
+
+Wire in _build_actionbar(), after Undo (or in the right-hand group):
+
+        ctk.CTkButton(bar, text="Copy", width=80, fg_color="gray30",
+                      command=self.copy_original).pack(side="right", padx=4)
+        ctk.CTkButton(bar, text="Paste", width=80, fg_color="gray30",
+                      command=self.paste_original).pack(side="right", padx=4)
+
+Copy of a selection-only slice can come later; full-pane Copy matches
+"writes the current text to the clipboard". Paste replaces a selection
+if there is one, otherwise inserts at the caret, which is what Ctrl+V
+already does.
+
+No new packages. Tk clipboard_get / clipboard_append are already used.
+
+
+3. TASK 3 — START WITH WINDOWS, MINIMISE TO TRAY
+--------------------------------------------------------------------------------
+This is the only task that changes process lifetime. Keep it optional
+via Settings so a broken tray icon cannot trap you without a Quit.
+
+Three pieces: (a) hide on close instead of destroy, (b) a notification-
+area icon that restores the window, (c) a current-user autostart entry
+that launches pythonw (no console) hidden.
+
+### 3.1 Prefer no extra pip packages
+The app is Windows 11 only. Shell_NotifyIcon via ctypes plus winreg
+avoids pystray/Pillow. If you would rather a maintained wrapper,
+pystray + pillow can be added to requirements.txt later; do not add
+them unless the ctypes path proves painful.
+
+### 3.2 Config flags
+Insert in DEFAULT_CONFIG:
+
+    "minimise_to_tray": True,
+    "start_with_windows": True,
+    "start_minimised": True,
+
+Surface both as Settings checkboxes (same pattern as protect_placeholders).
+On save: write/delete the Run-key as well as the JSON.
+
+### 3.3 Close → tray (not quit)
+Replace _on_close (~1155):
+
+```python
+    def _on_close(self):
+        """Hide to the tray when that option is on; otherwise quit."""
+        if self.cfg.get("minimise_to_tray", True):
+            self.withdraw()
+            self._ensure_tray_icon()
+            return
+        self._quit_app()
+
+    def _quit_app(self):
+        """Real shutdown: drop in-flight work, remove the icon, destroy."""
+        self._invalidate_inflight()
+        self._remove_tray_icon()
+        self.destroy()
+
+    def _restore_from_tray(self):
+        """Single-click on the tray icon: show and raise the window."""
+        self.after(0, self._restore_from_tray_ui)
+
+    def _restore_from_tray_ui(self):
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+```
+
+Also bind the minimise button if you want it to join the tray rather
+than the taskbar:
+
+        self.bind("<Unmap>", self._on_unmap)
+
+    def _on_unmap(self, event):
+        if event.widget is self and self.state() == "iconic":
+            if self.cfg.get("minimise_to_tray", True):
+                self.withdraw()
+                self._ensure_tray_icon()
+
+Tray icon left-click → _restore_from_tray. Context menu: Open / Quit.
+Quit must call _quit_app, never destroy() alone (icon would leak).
+
+### 3.4 Autostart (current user, no admin)
+HKCU\Software\Microsoft\Windows\CurrentVersion\Run, value "Scriptorium".
+
+Command (no console, start withdrawn):
+
+    pythonw.exe C:\Scriptorium\scriptorium.py --minimised
+
+Insert at: new helpers after save_config(). Use winreg (stdlib).
+
+```python
+import sys
+import winreg
+
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+RUN_NAME = "Scriptorium"
+
+
+def autostart_command():
+    pythonw = sys.executable.replace("python.exe", "pythonw.exe")
+    script = os.path.abspath(__file__)
+    return f'"{pythonw}" "{script}" --minimised'
+
+
+def set_start_with_windows(enabled):
+    """Create or delete the current-user Run entry."""
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0,
+                        winreg.KEY_SET_VALUE) as key:
+        if enabled:
+            winreg.SetValueEx(key, RUN_NAME, 0, winreg.REG_SZ,
+                              autostart_command())
+        else:
+            try:
+                winreg.DeleteValue(key, RUN_NAME)
+            except FileNotFoundError:
+                pass
+```
+
+Call set_start_with_windows(...) from SettingsDialog._save after the
+other cfg assignments.
+
+In main():
+
+```python
+def main():
+    start_minimised = "--minimised" in sys.argv
+    app = Scriptorium()
+    if start_minimised and app.cfg.get("minimise_to_tray", True):
+        app.withdraw()
+        app._ensure_tray_icon()
+    app.mainloop()
+```
+
+Do not use Scriptorium.bat for the Run key: it calls `python` (console)
+and would flash a cmd window at logon. Keep the .bat for double-click
+debug launches.
+
+### 3.5 Tray icon implementation sketch (ctypes, no extra dep)
+A full Shell_NotifyIconW wrapper is ~80–120 lines. Put it in a new
+module tray_windows.py next to scriptorium.py so the GUI file stays
+readable. Responsibilities:
+
+  * Add / update / delete NIM_ADD, NIM_MODIFY, NIM_DELETE.
+  * Message window (hidden Tk or a tiny Win32 HWND) receiving
+    WM_LBUTTONUP → app._restore_from_tray and WM_RBUTTONUP → popup
+    with Open / Quit.
+  * Icon: load a .ico if present (C:\Scriptorium\scriptorium.ico);
+    otherwise LoadIcon(NULL, IDI_APPLICATION). Shipping a 16×16 /
+    32×32 .ico is the one binary add; generating one later is fine.
+
+pystray alternative (if you accept two extra packages):
+
+    pip install pystray pillow
+
+    Icon thread must marshal UI calls with self.after(0, ...), never
+    touch Tk from the pystray thread.
+
+Either way, _ensure_tray_icon() is idempotent (create once).
+
+### 3.6 Risks
+  * Closing the window no longer exits. Users who expect Alt+F4 to
+    quit need the tray Quit item, plus a Settings off-switch.
+  * A crashed tray thread with the window withdrawn looks like
+    "Scriptorium disappeared". Guard with a "Quit Scriptorium" tray
+    item and, during bring-up, a visible window unless --minimised.
+  * pythonw vs python: if pythonw is missing, fall back to python.exe
+    and accept a hidden console as a lesser evil.
+  * First-run privacy notice: if start_minimised, show the dialog
+    only after restore, or skip until the first visible session.
+    Call _maybe_show_privacy_notice() from _restore_from_tray_ui if
+    it was deferred.
+
+
+4. RECOMMENDED ORDER OF WORK
+--------------------------------------------------------------------------------
+1. Task 1.2 — DEFAULT_CONFIG keys + StringVar fallbacks + example JSON.
+   Trivial, immediately matches the screenshot on next launch.
+2. Task 2 — copy_original / paste_original + two action-bar buttons.
+   No new dependencies. Keep Copy revision.
+3. Task 3 — Settings checkboxes, _on_close withdraw, ctypes tray
+   module, Run-key helper, main() --minimised.
+   This is the only piece that should be tested on a real Windows 11
+   session (log off/on, left-click tray, Alt+F4, tray Quit).
+
+Do not mix tray work into the same first commit as the defaults if
+you want an easy revert. Two small commits on main is enough.
+
+
+5. FILES THAT WOULD CHANGE (when authorised)
+--------------------------------------------------------------------------------
+  * C:\Scriptorium\scriptorium.py
+      DEFAULT_CONFIG, toolbar StringVars, action bar, copy/paste
+      methods, _on_close / _quit_app / main(), Settings checkboxes.
+  * C:\Scriptorium\scriptorium_config.example.json
+      five default_* keys plus minimise_to_tray / start_with_windows.
+  * C:\Scriptorium\tray_windows.py   (new, tray only)
+  * Optional: C:\Scriptorium\scriptorium.ico
+  * Scriptorium.bat unchanged (manual launch). Autostart uses pythonw.
+
+scriptorium_config.json is gitignored; after code lands, the new
+default_* keys apply even without editing that file, because
+load_config() fills missing keys from DEFAULT_CONFIG.
+
+
+6. VERIFICATION PLAN (after implementation is authorised by Mark and Claude)
+--------------------------------------------------------------------------------
+  * Cold start: Mode Paraphrase, Strength Substantial, Role Academic,
+    Tone Concise, Inline selected — matching the screenshot.
+  * Copy: Original text reaches clipboard; Copy revision still copies
+    the suggestion only.
+  * Paste: inserts at caret / replaces selection; Undo restores.
+  * Empty clipboard: status line, no traceback.
+  * Close: window vanishes, process remains, tray icon present.
+  * Single left-click tray: window returns, focused.
+  * Tray Quit: process ends, icon gone.
+  * Settings: untick "Start with Windows" removes the Run value
+    (reg query HKCU\...\Run). Tick restores it.
+  * Logon with --minimised: no console, icon only, click opens.
+
+This investigation did not run the GUI or write any of the above.
+
+
+================================================================================
+ END OF SUMMARY
+================================================================================
