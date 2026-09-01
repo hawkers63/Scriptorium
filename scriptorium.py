@@ -36,7 +36,7 @@ Dependencies
     Optional: install python-docx to import from and export to Word (.docx)
     files (`pip install python-docx`). Plain text and Markdown work without it.
 
-Author: built with Mark, August 2026. Version 2.6.
+Author: built with Mark, August 2026. Version 2.7.
 """
 
 import os
@@ -76,7 +76,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.6"
+APP_VERSION = "2.7"
 
 def _config_dir():
     """Return the folder that holds scriptorium_config.json.
@@ -470,6 +470,7 @@ DEFAULT_CONFIG = {
     "minimise_to_tray": False,       # hide to the system tray instead of closing
     "start_with_windows": False,     # HKCU Run entry launching --minimised at logon
     "start_minimised": False,        # start withdrawn to tray even without --minimised
+    "always_on_top": False,          # pin the window above other applications
     "protect_placeholders": True,    # mask [Name], {{Date}} etc. during editing
     "check_letter_conventions": True,  # advisory salutation/sign-off check
     "default_mode": "Paraphrase",      # toolbar knobs applied at startup
@@ -1040,6 +1041,38 @@ def render_diff(text_widget, original, revised, inline=False):
     text_widget.configure(state="disabled")
 
 
+def summarise_diff(original, revised):
+    """Return a one-line British English summary of word-level changes.
+
+    Reuses the same tokenisation and SequenceMatcher opcodes as render_diff,
+    so the counts always agree with what the diff pane actually shows.
+    """
+    a, b = _tokenise(original), _tokenise(revised)
+    matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    word_re = re.compile(r"\w", re.UNICODE)
+
+    def n_words(tokens):
+        return sum(1 for tok in tokens if word_re.search(tok))
+
+    inserted = deleted = replaced = 0
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "insert":
+            inserted += n_words(b[j1:j2])
+        elif tag == "delete":
+            deleted += n_words(a[i1:i2])
+        elif tag == "replace":
+            replaced += n_words(b[j1:j2])
+
+    clauses = []
+    if inserted:
+        clauses.append(f"{inserted} word{'s' if inserted != 1 else ''} inserted")
+    if deleted:
+        clauses.append(f"{deleted} deleted")
+    if replaced:
+        clauses.append(f"{replaced} replaced")
+    return ", ".join(clauses) if clauses else "no wording changes"
+
+
 # --------------------------------------------------------------------------- #
 #  Placeholder protection
 # --------------------------------------------------------------------------- #
@@ -1282,7 +1315,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self.on_save = on_save
 
         self.title("Settings")
-        self.geometry("520x740")
+        self.geometry("520x780")
         self.resizable(False, False)
         self.transient(master)
         self.grab_set()  # modal
@@ -1375,6 +1408,12 @@ class SettingsDialog(ctk.CTkToplevel):
         self.start_minimised_check.pack(anchor="w", padx=16, pady=(10, 0))
         self._refresh_tray_dependent_state()
 
+        self.topmost_var = tk.BooleanVar(value=cfg.get("always_on_top", False))
+        ctk.CTkCheckBox(
+            self, variable=self.topmost_var,
+            text="Keep Scriptorium on top of other windows"
+        ).pack(anchor="w", padx=16, pady=(10, 0))
+
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
         btn_row.pack(fill="x", padx=16, pady=18, side="bottom")
         ctk.CTkButton(btn_row, text="Cancel", width=100, fg_color="gray30",
@@ -1457,6 +1496,7 @@ class SettingsDialog(ctk.CTkToplevel):
             "minimise_to_tray": bool(self.tray_var.get()),
             "start_with_windows": bool(self.autostart_var.get()),
             "start_minimised": bool(self.start_minimised_var.get()),
+            "always_on_top": bool(self.topmost_var.get()),
         })
         candidate = normalise_config(candidate)
         if not save_config(candidate, force=True):
@@ -1507,6 +1547,7 @@ class Scriptorium(ctk.CTk):
         self.minsize(920, 600)
         self._apply_window_icon()
         self.after(200, self._apply_window_icon)
+        self.attributes("-topmost", bool(self.cfg.get("always_on_top")))
 
         self._build_toolbar()
         self._build_panes()
@@ -1560,6 +1601,7 @@ class Scriptorium(ctk.CTk):
             "<Control-Shift-A>": self.accept,
             "<Escape>": self.reject,
             "<Control-Shift-C>": self.copy_revision,
+            "<Control-Shift-M>": self.copy_change_summary,
             "<Control-z>": self.undo,
         }
         for sequence, action in bindings.items():
@@ -1719,6 +1761,8 @@ class Scriptorium(ctk.CTk):
                       command=self.reject).pack(side="left", padx=4)
         ctk.CTkButton(bar, text="Copy revision", width=120, fg_color="gray30",
                       command=self.copy_revision).pack(side="left", padx=4)
+        ctk.CTkButton(bar, text="Copy summary", width=110, fg_color="gray30",
+                      command=self.copy_change_summary).pack(side="left", padx=4)
         ctk.CTkButton(bar, text="Undo", width=80, fg_color="gray30",
                       command=self.undo).pack(side="left", padx=4)
 
@@ -2121,6 +2165,16 @@ class Scriptorium(ctk.CTk):
         self.clipboard_append(self.last_result["revised"])
         self._refresh_status("revision copied to clipboard")
 
+    def copy_change_summary(self):
+        """Copy a one-line diff summary of the active revision to the clipboard."""
+        if not self.last_result:
+            self._refresh_status("nothing to summarise")
+            return
+        summary = summarise_diff(self._result_source, self.last_result["revised"])
+        self.clipboard_clear()
+        self.clipboard_append(summary)
+        self._refresh_status(f"summary copied: \"{summary}\"")
+
     def copy_original(self):
         """Copy the whole Original pane to the clipboard (no revision involved)."""
         text = self.original_box.get("1.0", "end-1c")
@@ -2262,6 +2316,7 @@ class Scriptorium(ctk.CTk):
         SettingsDialog(self, self.cfg, on_save=self._after_settings)
 
     def _after_settings(self):
+        self.attributes("-topmost", bool(self.cfg.get("always_on_top")))
         self._maybe_show_privacy_notice()
         self._refresh_status("settings saved")
 

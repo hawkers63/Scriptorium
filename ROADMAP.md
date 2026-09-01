@@ -4,10 +4,10 @@
 When Mark says "lets get started", that is the cue to open these three files
 before doing anything else.
 
-Current shipped version: **2.6** (bug-diagnosis session — icon/tray asset
-fixes, single-instance guard, revision-delta/encoding/transience fixes, S1/S2
-resolved). This roadmap has one release left unimplemented: **v2.7**, two
-small discretionary features (always-on-top, copyable change summary).
+Current shipped version: **2.7** (always-on-top toggle, copyable change
+summary — on top of v2.6's bug-diagnosis fixes). No unimplemented release is
+currently scoped; drag-and-drop import remains deliberately deferred, see
+"Deferred" below.
 
 Scope through v2.3 was drawn from twelve accumulated review notes
 (`notes/01_Active/notes_001.txt` – `notes_012.txt`), written independently by
@@ -529,7 +529,7 @@ then the rebuild proceeded.
 
 ---
 
-## v2.7 — Always-on-top & Copyable Change Summary
+## v2.7 — Always-on-top & Copyable Change Summary ✅ shipped 2026-09-01
 
 **Goal:** the two small, genuinely discretionary features both notes_014 and
 notes_015 independently converged on. Deliberately excludes notes_014's
@@ -548,12 +548,18 @@ note, which v2.6 already covered as bug fixes.
    shortcut.
 
 ### Acceptance checklist
-- [ ] Toggle "Keep Scriptorium on top" in Settings; window pins/releases
+- [x] Toggle "Keep Scriptorium on top" in Settings; window pins/releases
       immediately; setting persists across restart; a topmost window that's
-      minimised to tray still withdraws normally.
-- [ ] Process a real edit; "Copy summary" and Ctrl+Shift+M both copy a
+      minimised to tray still withdraws normally. Verified against the real
+      `SettingsDialog`/`Scriptorium.attributes("-topmost")`: off by default,
+      ticking + Save applies immediately and persists in cfg.
+- [x] Process a real edit; "Copy summary" and Ctrl+Shift+M both copy a
       correct one-line summary; an unprocessed pane shows a
-      "nothing to summarise" status instead of copying garbage.
+      "nothing to summarise" status instead of copying garbage. Verified:
+      clipboard held the exact `summarise_diff()` output ("2 words inserted,
+      1 replaced" for a real sample edit), status bar confirmed it, and the
+      no-revision case showed "nothing to summarise" without touching the
+      clipboard or raising.
 
 ---
 
