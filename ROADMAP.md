@@ -616,10 +616,13 @@ note, which v2.6 already covered as bug fixes.
 | notes_014 | 1 Sep | Gale | v2.5 (delta) | Closed by v2.6 (icon/single-instance) and v2.7 (always-on-top, change summary); drag-and-drop deferred (see "Deferred") |
 | notes_015 | 1 Sep | Antigravity | v2.5 (delta) | Closed by v2.6; its S1 "Confirmed" and S2 "Addressed" verdicts did not hold up against live re-testing — see v2.6 write-up |
 
-A duplicate of notes_014's content also landed at
+A near-duplicate of notes_014's content also landed at
 `notes/00_Drafts/scriptorium_notes_001.txt` under `AGENTS.md`'s newer
-draft-path convention — same author/date, not reprocessed separately, left
-in place rather than deleted unasked.
+draft-path convention — same author/date, same proposals, but not
+byte-identical: it correctly says `Scriptorium-256.ico` where notes_014.txt
+mistakenly says `Scriptorium-128.ico` (the implementation used 256, matching
+what's actually on disk and this corrected copy, not notes_014's number).
+Left in place rather than deleted, since it isn't pure duplicate clutter.
 
 All confirmed still-open as of 2026-08-31 by direct inspection of
 `scriptorium.py` (v2.0, 1,297 lines): no `normalise_config`, no
