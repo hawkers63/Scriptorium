@@ -8,6 +8,7 @@
   "minimise_to_tray": false,
   "start_with_windows": false,
   "start_minimised": false,
+  "always_on_top": false,
   "protect_placeholders": true,
   "check_letter_conventions": true,
   "default_mode": "Paraphrase",

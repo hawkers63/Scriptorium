@@ -6,6 +6,119 @@ Mark saying "lets get started").
 
 ---
 
+## 2026-09-02 — Three new review notes triaged; v2.9 (bug-fix pass) implemented
+
+Mark opened the session with three new notes already sitting in
+`notes/00_Drafts/` (notes_016 Mark/Codex architecture proposals, notes_017
+Lynne UI/UX audit, notes_018 Zoe bug hunt) and delegated the scoping
+decision entirely ("decide which items to implement and which to defer ...
+your decisions have my full support").
+
+**First, a repo-hygiene fix, not part of the review content itself**: all
+three notes had independently computed "next available note number" as
+001/002 (against an apparently-empty view of `00_Drafts`), colliding with
+the historical archive filenames in `notes/01_Active/`. The working tree
+already had the fix half-done (uncommitted renames to notes_017/018) from
+before this session started; committed it as a clean `git mv`-equivalent
+rename, plus removing `scriptorium_notes_001.txt` (a near-duplicate of the
+already-fully-closed notes_014, pure clutter at this point).
+
+**Scoping decision**: rather than one grab-bag release, split the three
+notes' very different content into staged versions:
+- **v2.9** (this session, done): every concrete bug notes_018 found —
+  correctness fixes only, no visual or prompt-generation surface touched.
+- **v2.10** (scoped in `ROADMAP.md`, not yet implemented): notes_017's
+  visual/UX polish — pure appearance, [[mark_meaning_preservation_priority]]
+  doesn't apply.
+- **v2.11+** (scoped, not yet implemented): notes_016's five proposals,
+  sequenced by risk — three-tone picker first (small, but touches the
+  prompt so needs the same live-model calibration discipline as v2.4),
+  then user presets, then the retry transport, then the two raw-Win32 items
+  (drag-and-drop `WNDPROC` subclassing, hand-rolled `CF_HTML` clipboard)
+  last, since this project's history shows Win32-level features carry the
+  highest single-bug blast radius and need the most hand-testing.
+
+**v2.9 implemented and verified** (full detail and acceptance evidence in
+`ROADMAP.md`'s v2.9 section); the two non-obvious parts:
+
+**Bug 3 (the one worth flagging specially)**: the v2.8 "fix" for the
+`_MEI.../base_library.zip` temp-dir crash computed `runtime_tmpdir` with
+`os.environ.get("LOCALAPPDATA", ...)` *inside `scriptorium.spec`* — which
+runs at PyInstaller *build* time, baking the builder's own account path
+into the bootloader. Confirmed by scanning the rebuilt `.exe`'s bytes: the
+old spec would have embedded an already-expanded `C:\Users\<builder>\...`
+path; the fix (a literal `r"%LOCALAPPDATA%\Scriptorium\runtime"` string) is
+now confirmed present unexpanded in the binary, letting PyInstaller's own
+bootloader do the per-user expansion at run time as documented. Rebuilt,
+launched for real, extracted to the correct per-user path, survived a
+15-second soak. True cross-account portability wasn't exercised (would need
+a second Windows account), but the binary-level confirmation is the direct
+fix for the root cause, not just a claim.
+
+**Suspicion S1, treated as a real fix rather than deferred**: notes_018
+flagged (as a "product decision, not a confirmed defect") that
+`normalise_config()`'s generic enum-clamp loop included `"backend"`,
+silently rewriting a mistyped value (e.g. `"Ollama"`) to `"anthropic"`
+*before* `run_backend()`'s own fail-closed check — added in v2.1
+specifically to stop the status bar and actual HTTP dispatch from
+disagreeing about whether text leaves the machine — ever saw it.
+`run_backend()`'s own docstring already admitted this dead-code situation.
+Given v2.1's precedent already settled the underlying product question
+("never silently fail open to the cloud"), judged this a regression rather
+than a genuinely open discretionary choice and fixed it: `backend` is no
+longer clamped, so an invalid stored value now surfaces as a real
+`BackendError` instead of a silent cloud switch; a genuinely missing key
+still defaults to `"anthropic"` as before.
+
+**Also fixed**: `always_on_top` added to the boolean-normalisation list
+(Bug 1); `_kernel32()` helper adds proper `HANDLE`/`BOOL`/`DWORD`
+argtypes/restype and NULL-handle checks to the mutex/restore-event code,
+closing both Bug 2 and Suspicion S2 (64-bit `HANDLE` truncation) together;
+`load_config()` now reads `utf-8-sig` so a BOM-prefixed config isn't
+rejected as unreadable (Bug 6); `scriptorium_config.example.json` gained
+the missing `always_on_top` key (Bug 7); tray-icon load failure now shows a
+`messagebox.showwarning` instead of a `print()` invisible in the packaged
+`.exe` (Bug 5, partial — only the tray-icon case, the note's two
+"optional" automatic-save-warning cases were left alone). Suspicion S3
+(Reject doesn't abort the in-flight HTTP call) deliberately left as-is —
+the note itself says it's informational, and the actual requirement (no
+stale result reaches the UI) is already met by the existing request-id
+mechanism.
+
+**Verification**: `ast.parse()` clean; a real isolated test script exercised
+every fix against the actual functions (stringy-boolean clamp, mistyped
+vs. missing vs. valid backend + `run_backend()`'s real raise, a real
+BOM-prefixed temp config through the real `load_config()`, a stubbed-NULL
+`CreateMutexW` through the real `_claim_single_instance()`); full regression
+pass (WRITING_PRESETS validity, `DEFAULT_CONFIG` round-trip, `ROLES`/`TONES`
+membership, `validate_tones`) all still pass; a real `Scriptorium()`
+constructed and destroyed cleanly from source with no exception (bypassing
+the single-instance mutex deliberately, see incident below, rather than
+going through `main()`); the tray-icon-failure path verified by patching
+`resource_path()` to a nonexistent directory and recording
+`messagebox.showwarning` calls against the real `_minimise_to_tray()`. The
+real `scriptorium_config.json` (holds the live API key) confirmed
+byte-identical (same mtime) throughout — nothing this session touched it.
+
+**Incident, handled correctly**: a stray `Scriptorium.exe` (v2.8, both
+bootloader and child process, same PID-confusion pattern as
+[[scriptorium_testing_gotchas]]) was already running before the rebuild
+step, predating this session. Asked Mark before closing it (nothing
+persists except via Export) — confirmed, closed cleanly, rebuild and
+real-launch verification proceeded without incident.
+
+`ROADMAP.md` updated: v2.9 section with full acceptance evidence, v2.10 and
+v2.11+ scoped (not started), "Current shipped version" line updated to 2.9,
+source-notes table extended for notes_016/017/018, the drag-and-drop
+"Deferred" entry marked superseded by notes_016's complete proposal.
+
+Next session: v2.10 (visual polish, low risk) or start v2.11+'s three-tone
+picker (needs live-model calibration per
+[[mark_meaning_preservation_priority]]) — whichever Mark wants to tackle
+first; both are fully scoped in `ROADMAP.md` already.
+
+---
+
 ## 2026-09-01 (continued) — v2.8: hand-testing fixes (layout, tray lifecycle, clipboard, packaging)
 
 Mark hand-tested v2.7 (screenshots `1.jpg`/`2.jpg` on the Desktop) and found

@@ -41,7 +41,6 @@ Notes
 """
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
-import os
 
 datas = collect_data_files("customtkinter")
 hiddenimports = collect_submodules("customtkinter")
@@ -66,9 +65,18 @@ except Exception:
 
 # See "runtime_tmpdir" note above — kept out of the shared, frequently-swept
 # %TEMP% so a running instance survives a generic temp/junk cleanup tool.
-runtime_tmpdir = os.path.join(
-    os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
-    "Scriptorium", "runtime")
+#
+# This MUST stay a literal %LOCALAPPDATA%\... string, not an expanded path.
+# PyInstaller's Windows bootloader calls ExpandEnvironmentStringsW on this
+# value at .exe run time, but only while it still contains %VAR% tokens.
+# os.environ.get()/os.path.expanduser() run when PyInstaller reads this spec
+# -- i.e. on the *build* machine -- so an already-expanded path bakes the
+# builder's own account into the bootloader. On any other account (or the
+# same account after a rename/profile-drive change) extraction then targets
+# a profile the running process cannot use. Confirmed 2026-09-02 (notes_018
+# Bug 3): the v2.8 runtime_tmpdir fix only ever worked for the machine that
+# built dist\Scriptorium.exe.
+runtime_tmpdir = r"%LOCALAPPDATA%\Scriptorium\runtime"
 
 
 a = Analysis(

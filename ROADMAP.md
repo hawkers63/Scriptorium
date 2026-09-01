@@ -4,10 +4,11 @@
 When Mark says "lets get started", that is the cue to open these three files
 before doing anything else.
 
-Current shipped version: **2.8** (action-bar layout fix, minimise/close
-lifecycle correction, right-click copy/paste, onefile runtime-tmpdir fix —
-see v2.8 below). No unimplemented release is currently scoped; drag-and-drop
-import remains deliberately deferred, see "Deferred" below.
+Current shipped version: **2.9** (bug-fix pass against three new review
+notes — see v2.9 below). v2.10 (UI/visual polish) and v2.11+ (notes_016's
+architecture proposals, in ascending risk order) are scoped but not yet
+implemented — see those sections. Drag-and-drop import remains deliberately
+deferred pending v2.11+, see "Deferred" below.
 
 Scope through v2.3 was drawn from twelve accumulated review notes
 (`notes/01_Active/notes_001.txt` – `notes_012.txt`), written independently by
@@ -651,7 +652,234 @@ screenshots `1.jpg`/`2.jpg`), none from the notes backlog.
 
 ---
 
-## Deferred / explicitly out of scope for v2.1–v2.8
+## v2.9 — Bug-fix pass ✅ shipped 2026-09-02
+
+**Goal:** three new independent review notes landed together on 2026-09-02
+(notes_016 Mark/Codex — architecture proposals for v2.9+; notes_017 Lynne —
+UI/UX visual audit; notes_018 Zoe — a fresh static bug hunt against v2.8).
+Rather than one grab-bag release, the work was split: this version closes
+every concrete, confirmed bug notes_018 found (all low individual risk, all
+worth fixing on their own merits); notes_017's visual polish and notes_016's
+five architecture proposals are scoped separately below (v2.10, v2.11+) since
+bundling correctness fixes with new-feature/visual work would make either
+harder to verify in isolation.
+
+1. **`always_on_top` omitted from boolean normalisation** (notes_018 Bug 1).
+   `normalise_config()`'s stringy-boolean clamp named seven keys but not
+   `always_on_top`; a hand-edited `"always_on_top": "false"` is
+   Python-truthy, so the window would pin itself on top with Settings'
+   checkbox showing unticked. Added to the clamp list.
+2. **Win32 mutex/event handles not validated** (notes_018 Bug 2 + Suspicion
+   S2). `_claim_single_instance()` and `_start_restore_listener()` never
+   checked for a NULL `CreateMutexW`/`CreateEventW` handle, and
+   `WaitForSingleObject`'s return was ignored — a failed `CreateEventW`
+   would busy-spin the restore-listener thread at 100% CPU, flooding the Tk
+   queue. A failed `CreateMutexW` would silently disable the single-instance
+   guard instead of refusing to start. New `_kernel32()` helper declares
+   proper `HANDLE`/`BOOL`/`DWORD` argtypes/restype (closing S2's 64-bit
+   `HANDLE` truncation risk from the default `c_int` restype at the same
+   time) and both call sites now treat a NULL handle as failure, not
+   success; the restore-listener loop stops instead of spinning on
+   `WAIT_FAILED`.
+3. **`runtime_tmpdir` baked in at build time, not run time** (notes_018 Bug
+   3 — the most consequential fix in this pass). The v2.8 onefile temp-dir
+   fix computed `runtime_tmpdir` with `os.environ.get("LOCALAPPDATA", ...)`
+   inside `scriptorium.spec`, which runs when PyInstaller *builds* the
+   `.exe` — baking the builder's own account path into the bootloader.
+   Anyone else running `dist\Scriptorium.exe` (or the same user after a
+   profile change) would extract into the wrong, likely inaccessible,
+   directory. Fixed by keeping `runtime_tmpdir` as the literal string
+   `%LOCALAPPDATA%\Scriptorium\runtime` so PyInstaller's bootloader expands
+   it itself at run time, per-user, as documented behaviour.
+4. **Module docstring version string stale** (notes_018 Bug 4) — folded into
+   the real version bump to 2.9 rather than fixed as a one-off.
+5. **Tray-icon load failure was `print()`-only** (notes_018 Bug 5, partial —
+   the tray-icon case only; the two "automatic save refused" cases the note
+   flagged as optional were left as-is). `_minimise_to_tray()` now shows a
+   `messagebox.showwarning` when neither `.ico` loads, since `print()` is
+   invisible in the packaged `.exe` (`console=False`).
+6. **`load_config()` rejected a BOM-prefixed config as unreadable** (notes_018
+   Bug 6). Changed the read encoding from `utf-8` to `utf-8-sig`, matching
+   `import_file()`'s existing BOM handling; `save_config()` still writes
+   plain `utf-8` (Python's `json.dump` output is already BOM-free).
+7. **Example config missing `always_on_top`** (notes_018 Bug 7). Added to
+   `scriptorium_config.example.json`, matching `DEFAULT_CONFIG`'s key order.
+8. **Unrecognised `backend` silently coerced to the cloud** (notes_018
+   Suspicion S1 — raised as a product decision, not a confirmed defect, but
+   fixed here on existing precedent rather than deferred). `normalise_config()`'s
+   generic enum-clamp loop included `"backend"`, so a hand-edited typo (e.g.
+   `"Ollama"`, `"local"`) was silently rewritten to `"anthropic"` *before*
+   `run_backend()`'s own fail-closed check — added in v2.1 for exactly this
+   scenario — ever saw it; `run_backend()`'s docstring already admitted this
+   ("load_config() already normalises backend ... so reaching the else
+   branch here means cfg was built some other way"). This is the same
+   privacy failure mode v2.1 was built to close (status bar and actual HTTP
+   dispatch disagreeing about whether text leaves the machine), reintroduced
+   through the config-normalisation layer rather than `run_backend()`
+   itself. `backend` is no longer in the enum-clamp loop — a missing key
+   still defaults to `"anthropic"`, but a present-and-invalid value is left
+   alone so `run_backend()`'s existing `BackendError` actually fires.
+   `_refresh_status()` also no longer mislabels an unrecognised backend as
+   "local"/Ollama in the status bar.
+
+**Not fixed, deliberately** (notes_018 Suspicion S3): Reject does not abort
+an in-flight HTTP call — the daemon thread stays blocked in `urlopen()` even
+after `_invalidate_inflight()` bumps `_request_id`. Noted by the reviewer
+only so it isn't mistaken for a UI-state bug; the actual requirement (stale
+results cannot overwrite the UI, and the UI itself unlocks immediately) is
+already met by the existing request-id mechanism. Aborting the socket itself
+would need a different HTTP stack — not worth it for a cosmetic
+connection-count concern.
+
+### Acceptance checklist
+- [x] Hand-edited `"always_on_top": "false"` normalises to Python `False`,
+      `"true"` to `True`, matching the Settings checkbox. Verified via
+      isolated `normalise_config()` calls against both stringy values plus
+      a real `bool`.
+- [x] A mistyped `backend` (e.g. `"Ollama"`) survives `normalise_config()`
+      unchanged and `run_backend()` raises `BackendError` for it; a
+      genuinely absent `backend` key still defaults to `"anthropic"`; a
+      valid value is untouched either way. Verified against the real
+      functions, all three cases.
+- [x] A UTF-8-BOM-prefixed config file loads correctly (not flagged
+      unreadable, values actually applied). Verified against a real temp
+      file with a literal BOM prefix and `load_config()`/`CONFIG_PATH`
+      patched to point at it.
+- [x] `_kernel32()`'s `CreateMutexW`/`CreateEventW` are `HANDLE`-typed; a
+      simulated NULL `CreateMutexW` handle makes `_claim_single_instance()`
+      return `False`, not `True`. Verified via a stub kernel32 (a genuine
+      OS-level `CreateMutexW` failure isn't practically triggerable from a
+      test).
+- [x] `runtime_tmpdir` is embedded in the rebuilt `.exe` as the literal
+      `%LOCALAPPDATA%\Scriptorium\runtime` token, not an expanded path.
+      Verified by scanning the built binary for the literal string.
+      Launched the rebuilt `.exe` for real: extracted to
+      `%LOCALAPPDATA%\Scriptorium\runtime\_MEI######`, survived a 15-second
+      soak with both the bootloader and child process alive and
+      `Responding: True`. Full cross-user portability (a second Windows
+      account) was not exercised — impractical in-session — but the
+      binary-level confirmation that the token is genuinely unexpanded is
+      the direct fix for the root cause notes_018 identified.
+- [x] Rebuilt `.exe`'s `FileVersion`/`ProductVersion` read `2.9.0.0`.
+- [x] Tray-icon load failure shows a `messagebox.showwarning` and leaves
+      `tray_icon` as `None` (fails safe, window stays open) instead of only
+      printing. Verified by patching `resource_path()` to a nonexistent
+      directory and `messagebox.showwarning` to a recording stub against the
+      real `Scriptorium`/`_minimise_to_tray()`.
+- [x] `ast.parse()` syntax check clean; full regression pass (WRITING_PRESETS
+      validity, `DEFAULT_CONFIG` round-trip through `normalise_config`,
+      `ROLES`/`TONES` membership, `validate_tones`) all still pass; real
+      `Scriptorium()` constructs and destroys cleanly from source with no
+      exception. The real `scriptorium_config.json` (holds the live API key)
+      was confirmed byte-identical (same mtime) after every test — none of
+      this session's tests wrote to it.
+
+**Incident, handled correctly this session**: a stray `Scriptorium.exe` (v2.8,
+both bootloader and child process) was already running before the
+packaged-`.exe` rebuild step, predating this session. Mark was asked before
+it was closed (nothing in the app persists except via Export) — confirmed,
+closed cleanly, rebuild proceeded.
+
+---
+
+## v2.10 — Visual & UX polish (scoped, not yet implemented)
+
+**Goal:** notes_017 (Lynne, UI/UX audit against v2.8) proposes a token-based
+visual pass — matched pane typography, better diff contrast, a dismissible
+notice banner, a Working… progress indicator, dialog Escape/positioning, and
+Claude/Ollama-labelled backend selection instead of raw `anthropic`/`ollama`
+ids. Pure visual/UX changes — no prompt or content-generation surface is
+touched, so [[mark_meaning_preservation_priority]] doesn't apply here the way
+it will for v2.11's three-tone work. Cherry-picked from notes_017's full
+proposal for value-to-risk; the note's own priority order (§5) is followed.
+
+1. Match pane typography, padding and background between Original and
+   Revised (notes_017 §1.2 / §2.2/3.3) — the single biggest "doesn't look
+   like one app" tell.
+2. Diff tag colour/contrast pass — background fills, not just foreground ink,
+   and a slightly brighter deleted-red (notes_017 §1.3/2.3/3.3) since the
+   current AA-only red is a tight pair on a dim panel.
+3. Dismissible notice/ambiguity banner replacing the disabled `CTkTextbox`
+   (notes_017 §1.6/2.7/3.5) — adds a Dismiss control and fixes the
+   selection-blocked-on-some-CTk-versions issue.
+4. Working… progress bar + Process-button pulse (notes_017 §1.5/2.6/3.4) so a
+   long Ollama call doesn't look frozen.
+5. Dialog Escape binding, `WM_DELETE_WINDOW`, and same-monitor-as-parent
+   positioning for `TonePickerDialog`/`SettingsDialog` (notes_017 §1.7/2.8/3.6);
+   Settings body wrapped in a `CTkScrollableFrame` so 150% DPI still reaches
+   Save.
+6. Claude/Ollama labels in the Settings backend selector, mapped back to the
+   internal `anthropic`/`ollama` ids (notes_017 §1.7/2.8).
+
+Deliberately **not** carried into v2.10: the two-row-toolbar-wrap-at-920px
+change (notes_017 §1.4/2.4/3.7) — real value is marginal at the app's actual
+920px minimum width today, revisit only if Mark resizes down that far in
+practice; character-level diff tokenisation, which notes_017 itself
+recommends against (§1.3/§5, word-level already matches how a copy-editor
+scans a British spelling change).
+
+### Acceptance checklist
+- [ ] Both panes render at the same face/size/padding; first glyphs align
+      horizontally between Original and Revised.
+- [ ] Diff insertions/deletions are legible at a glance (fill + ink), not
+      just AA-compliant as foreground-only colour.
+- [ ] The notice banner has a working Dismiss button and its list text is
+      selectable/copyable.
+- [ ] A slow (throttled or local-model) Process call shows visible motion,
+      not just a static "Working…" label.
+- [ ] Escape closes both dialogs; a dialog opens on the same monitor as the
+      main window in a real multi-monitor test if available.
+- [ ] Settings remains fully reachable (Save button visible) at a simulated
+      150% DPI / reduced height.
+- [ ] Settings shows "Claude"/"Ollama" in the backend selector; the saved
+      config still stores `anthropic`/`ollama`.
+
+---
+
+## v2.11+ — notes_016 architecture proposals (scoped, not yet implemented)
+
+**Goal:** notes_016 (Mark/Codex) proposes five substantial features for
+v2.9+. Given their very different risk profiles, they are sequenced rather
+than shipped as one release — lowest-risk/most self-contained first, the two
+raw-Win32 items (window-procedure subclassing, hand-rolled `CF_HTML`
+clipboard transfer) last, since this project's own history shows Win32-level
+features need the most hand-testing and carry the highest single-bug blast
+radius (a bad `WNDPROC` can hang or crash the whole app, not just one
+feature).
+
+1. **Three-tone picker** (notes_016 §2.3/3.4) — raise `TONE_PICKER_LIMIT` to
+   `MAX_SELECTED_TONES` (3, already supported by the data model per v2.4's
+   deliberately conservative rollout), add the `Neutral`/`Persuasive`
+   conflict pair, and the dominant/supporting/accent prompt hierarchy with
+   an explicit fidelity-first precedence ladder. **Subject to
+   [[mark_meaning_preservation_priority]]**: this directly touches prompt
+   construction, so needs the same live-model calibration discipline v2.4
+   used (the Persuasive+Confident embellishment bug found and fixed then is
+   the reason a third tone wasn't opened up sooner) — run notes_016's
+   calibration matrix (§2.3) against a real backend before shipping, not
+   just unit-test the validation logic.
+2. **Persisted user presets** (notes_016 §2.2/3.3) — `user_presets` config
+   key, `PresetManagerDialog`, `normalise_user_presets()`. Self-contained,
+   no prompt/content surface touched, well-specified in the note.
+3. **Backend retry transport** (notes_016 §2.5/3.6) — `_request_json_with_retries()`
+   beneath `call_anthropic()`/`call_ollama()`, bounded exponential backoff,
+   `Retry-After` handling. Moderate risk (touches the request path both
+   backends share) but no Win32/ctypes involved.
+4. **Explorer drag-and-drop** (notes_016 §2.1/3.2) — unlike notes_014/015's
+   incomplete `DragAcceptFiles`-only proposal (deferred after v2.7, see
+   below), this note supplies the full `WM_DROPFILES` `WNDPROC` subclass.
+   Legitimate now, but the highest platform risk in the backlog — needs
+   dedicated hand-testing per notes_016's own verification matrix (§5)
+   before it ships.
+5. **Markdown diff export + rich `CF_HTML` clipboard diff** (notes_016
+   §2.4/3.5) — the other raw-Win32 item (manual `GlobalAlloc`/clipboard
+   transaction); sequenced last for the same reason as drag-and-drop.
+
+No acceptance checklist yet — not started this session.
+
+---
+
+## Deferred / explicitly out of scope for v2.1–v2.9
 
 - Migrating the API key to Windows Credential Manager (`keyring`) — real
   architectural change, correctly flagged as out-of-scope by every note
@@ -696,7 +924,9 @@ screenshots `1.jpg`/`2.jpg`), none from the notes backlog.
   it would be dead code that looks like a feature but does nothing when a
   file is actually dropped. Revisit as its own properly-scoped session
   (real Win32 message-loop subclassing, needs hand-testing) rather than
-  guessing at it inside v2.7.
+  guessing at it inside v2.7. **Superseded 2026-09-02**: notes_016 supplies
+  the missing `WM_DROPFILES` subclass; now scoped as v2.11+ item 4 above,
+  no longer blocked on an incomplete proposal.
 
 ---
 
@@ -714,16 +944,22 @@ screenshots `1.jpg`/`2.jpg`), none from the notes backlog.
 | notes_011 | 31 Aug | ChatGPT / Codex | v2.0 | Closed by v2.1–v2.3, v2.5; S1/S2 resolved in v2.6 |
 | notes_012 | 31 Aug | Lynne | v2.0 (delta) | Closed by v2.2–v2.3, v2.5 |
 | notes_013 | 31 Aug | Mark / Codex | v2.3 | Closed by v2.4 |
-| notes_014 | 1 Sep | Gale | v2.5 (delta) | Closed by v2.6 (icon/single-instance) and v2.7 (always-on-top, change summary); drag-and-drop deferred (see "Deferred") |
+| notes_014 | 1 Sep | Gale | v2.5 (delta) | Closed by v2.6 (icon/single-instance) and v2.7 (always-on-top, change summary); drag-and-drop deferred, superseded by notes_016 (see "Deferred") |
 | notes_015 | 1 Sep | Antigravity | v2.5 (delta) | Closed by v2.6; its S1 "Confirmed" and S2 "Addressed" verdicts did not hold up against live re-testing — see v2.6 write-up |
+| notes_016 | 1 Sep | Mark / Codex | v2.9+ (architecture) | Scoped as v2.11+ (three-tone, presets, retry transport, drag-and-drop, rich clipboard — see that section); not yet implemented |
+| notes_017 | 1 Sep | Lynne | v2.8 (delta) | Scoped as v2.10 (visual/UX polish); not yet implemented |
+| notes_018 | 1 Sep | Zoe | v2.8 (delta) | Closed by v2.9 (Bugs 1–2/S2, 3–7, S1); S3 deliberately not fixed (informational only, see v2.9 write-up) |
 
-A near-duplicate of notes_014's content also landed at
-`notes/00_Drafts/scriptorium_notes_001.txt` under `AGENTS.md`'s newer
-draft-path convention — same author/date, same proposals, but not
-byte-identical: it correctly says `Scriptorium-256.ico` where notes_014.txt
-mistakenly says `Scriptorium-128.ico` (the implementation used 256, matching
-what's actually on disk and this corrected copy, not notes_014's number).
-Left in place rather than deleted, since it isn't pure duplicate clutter.
+`scriptorium_notes_001.txt`, a near-duplicate of notes_014 written under
+`AGENTS.md`'s (now-abandoned) `scriptorium_notes_[N].txt` draft-path
+convention, was removed 2026-09-02 as pure archive clutter now that
+notes_014's own findings are fully closed (v2.6/v2.7) — its one point of
+divergence from notes_014 (`Scriptorium-256.ico` vs. notes_014's mistaken
+`-128.ico`) carries no remaining information the implementation doesn't
+already reflect. notes_016/017/018 also had to be renumbered on arrival:
+all three independently computed "next available note number" as 001/002
+against an empty view of `00_Drafts`, colliding with the historical archive
+names in `01_Active`; renamed to 016–018 to continue this table's sequence.
 
 All confirmed still-open as of 2026-08-31 by direct inspection of
 `scriptorium.py` (v2.0, 1,297 lines): no `normalise_config`, no

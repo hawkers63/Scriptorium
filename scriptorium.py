@@ -36,7 +36,7 @@ Dependencies
     Optional: install python-docx to import from and export to Word (.docx)
     files (`pip install python-docx`). Plain text and Markdown work without it.
 
-Author: built with Mark, August 2026. Version 2.7.
+Author: built with Mark, August 2026. Version 2.9.
 """
 
 import os
@@ -48,6 +48,7 @@ import threading
 import difflib
 import winreg
 import ctypes
+from ctypes import wintypes
 import urllib.request
 import urllib.error
 
@@ -76,7 +77,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.8"
+APP_VERSION = "2.9"
 
 def _config_dir():
     """Return the folder that holds scriptorium_config.json.
@@ -153,25 +154,61 @@ _RESTORE_EVENT_NAME = "Local\\ScriptoriumRestore"
 _mutex_handle = None
 _ERROR_ALREADY_EXISTS = 183
 _INFINITE = 0xFFFFFFFF
+_WAIT_OBJECT_0 = 0
+_EVENT_MODIFY_STATE = 0x0002
+
+
+def _kernel32():
+    """Return kernel32 with HANDLE-safe argtypes/restype set.
+
+    ctypes.WinDLL leaves undeclared functions at the default restype
+    (c_int, 32-bit signed) on 64-bit Windows. A kernel HANDLE is
+    pointer-sized; a value with the high bit set would truncate rather
+    than compare correctly against NULL. Declaring HANDLE/BOOL/DWORD here
+    keeps every mutex/event call in this module honest about that.
+    """
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateMutexW.argtypes = (wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR)
+    k32.CreateMutexW.restype = wintypes.HANDLE
+    k32.CreateEventW.argtypes = (wintypes.LPVOID, wintypes.BOOL, wintypes.BOOL,
+                                 wintypes.LPCWSTR)
+    k32.CreateEventW.restype = wintypes.HANDLE
+    k32.OpenEventW.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR)
+    k32.OpenEventW.restype = wintypes.HANDLE
+    k32.SetEvent.argtypes = (wintypes.HANDLE,)
+    k32.SetEvent.restype = wintypes.BOOL
+    k32.ResetEvent.argtypes = (wintypes.HANDLE,)
+    k32.ResetEvent.restype = wintypes.BOOL
+    k32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    k32.WaitForSingleObject.restype = wintypes.DWORD
+    k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    k32.CloseHandle.restype = wintypes.BOOL
+    return k32
 
 
 def _claim_single_instance():
     """Return True if this process now owns the single-instance mutex.
 
-    False means another Scriptorium is already running. The handle is kept
-    at module level so it lives for the process lifetime rather than being
-    released early by garbage collection.
+    False means another Scriptorium is already running, OR the mutex could
+    not be created at all -- a NULL handle is treated as failure rather
+    than as "we must be unique", since starting a second unguarded copy on
+    a CreateMutexW error is worse than the rare false negative of refusing
+    to start. The handle is kept at module level so it lives for the
+    process lifetime rather than being released early by garbage collection.
     """
     global _mutex_handle
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    _mutex_handle = kernel32.CreateMutexW(None, False, _MUTEX_NAME)
+    kernel32 = _kernel32()
+    handle = kernel32.CreateMutexW(None, False, _MUTEX_NAME)
+    if not handle:
+        return False
+    _mutex_handle = handle
     return ctypes.get_last_error() != _ERROR_ALREADY_EXISTS
 
 
 def _signal_existing_instance():
     """Ask the already-running instance to show itself."""
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    handle = kernel32.OpenEventW(0x0002, False, _RESTORE_EVENT_NAME)  # EVENT_MODIFY_STATE
+    kernel32 = _kernel32()
+    handle = kernel32.OpenEventW(_EVENT_MODIFY_STATE, False, _RESTORE_EVENT_NAME)
     if handle:
         kernel32.SetEvent(handle)
         kernel32.CloseHandle(handle)
@@ -531,7 +568,6 @@ def normalise_config(cfg):
     """
     clean = dict(cfg)
     choices = {
-        "backend": ("anthropic", "ollama"),
         "default_mode": tuple(MODES),
         "default_strength": tuple(STRENGTHS),
         "default_role": tuple(ROLES),
@@ -541,9 +577,21 @@ def normalise_config(cfg):
         if clean.get(key) not in allowed:
             clean[key] = DEFAULT_CONFIG[key]
 
+    # "backend" is deliberately NOT clamped to a valid value above. Doing so
+    # would silently coerce a mistyped or corrupted backend string (e.g.
+    # "Ollama", "local") to the cloud backend before run_backend()'s own
+    # fail-closed check ever sees it -- reintroducing, through a different
+    # path, exactly the privacy bug v2.1 fixed (status bar and actual HTTP
+    # dispatch disagreeing about whether text leaves the machine). Only a
+    # genuinely absent key gets the default; anything else is left alone so
+    # run_backend() can raise its own friendly BackendError instead.
+    if "backend" not in clean:
+        clean["backend"] = DEFAULT_CONFIG["backend"]
+
     for key in ("privacy_ack", "protect_placeholders",
                 "check_letter_conventions", "import_prompt_shown",
-                "minimise_to_tray", "start_with_windows", "start_minimised"):
+                "minimise_to_tray", "start_with_windows", "start_minimised",
+                "always_on_top"):
         value = clean.get(key, DEFAULT_CONFIG[key])
         if isinstance(value, str):
             clean[key] = value.strip().lower() in ("1", "true", "yes", "on")
@@ -569,7 +617,7 @@ def load_config():
     load_config.unreadable = False
     cfg = dict(DEFAULT_CONFIG)
     try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
+        with open(CONFIG_PATH, "r", encoding="utf-8-sig") as fh:
             loaded = json.load(fh)
     except FileNotFoundError:
         return normalise_config(cfg)
@@ -1819,9 +1867,15 @@ class Scriptorium(ctk.CTk):
         if backend == "anthropic":
             where = f"Claude · {self.cfg.get('anthropic_model')}"
             privacy = "text is sent to Anthropic"
-        else:
+        elif backend == "ollama":
             where = f"Ollama · {self.cfg.get('ollama_model')} (local)"
             privacy = "stays on this machine"
+        else:
+            # normalise_config() deliberately leaves an unrecognised backend
+            # string alone rather than clamping it to a guess -- reflect
+            # that honestly instead of defaulting this label to "local".
+            where = f"unrecognised backend {backend!r}"
+            privacy = "Process will refuse until this is fixed in Settings"
         original = self.original_box.get("1.0", "end-1c")
         chars = len(original)
         words = len(original.split()) if original.strip() else 0
@@ -2405,14 +2459,28 @@ class Scriptorium(ctk.CTk):
 
         Runs on a daemon thread; the actual window operations happen back on
         the Tk thread via _post_to_ui(), same as every other worker-thread
-        callback in this app.
+        callback in this app. A failed CreateEventW is logged and the
+        watcher is not started at all: a NULL handle passed to
+        WaitForSingleObject returns immediately with WAIT_FAILED rather than
+        blocking, which would otherwise spin this thread at 100% CPU and
+        flood the Tk queue with _bring_to_front callbacks forever.
         """
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        self._restore_event = kernel32.CreateEventW(None, True, False, _RESTORE_EVENT_NAME)
+        kernel32 = _kernel32()
+        handle = kernel32.CreateEventW(None, True, False, _RESTORE_EVENT_NAME)
+        if not handle:
+            print("[warning] could not create the restore event; a second "
+                  "launch will not bring this window to the front")
+            self._restore_event = None
+            return
+        self._restore_event = handle
 
         def _watch():
             while True:
-                kernel32.WaitForSingleObject(self._restore_event, _INFINITE)
+                rc = kernel32.WaitForSingleObject(self._restore_event, _INFINITE)
+                if rc != _WAIT_OBJECT_0:
+                    # WAIT_FAILED (or any other unexpected result) -- stop
+                    # rather than spin a tight loop on a broken handle.
+                    break
                 kernel32.ResetEvent(self._restore_event)
                 try:
                     self._post_to_ui(self._bring_to_front)
@@ -2504,8 +2572,20 @@ class Scriptorium(ctk.CTk):
                     continue
         if image is None:
             # Fail safe: keep the window open rather than vanish with no
-            # visible icon and no way back.
-            print("[warning] could not load a tray icon from icon/ directory")
+            # visible icon and no way back. print() is invisible in the
+            # packaged .exe (scriptorium.spec sets console=False), so tell
+            # the user directly instead of leaving them wondering why
+            # minimise did nothing.
+            try:
+                if self.winfo_exists():
+                    messagebox.showwarning(
+                        "Could not minimise to the tray",
+                        "Scriptorium could not load a tray icon from the "
+                        "icon folder, so the window will stay on the "
+                        "taskbar instead.",
+                        parent=self)
+            except (tk.TclError, RuntimeError):
+                pass
             return
         menu = pystray.Menu(
             pystray.MenuItem("Show Scriptorium", self._tray_restore, default=True),
