@@ -243,8 +243,13 @@ deserves extra scrutiny at review time, and that it's worth re-testing
 against Claude once its key/workspace issue is resolved — a flagship
 model may hold the bounded instruction more reliably than this local one.
 
-**Ollama is still running** (started this session, not stopped) —
-`D:\Ollama\App\ollama.exe serve`, hidden window, PID varies per launch.
+**Ollama stopped** — Mark asked for it to be shut down after testing
+(`taskkill` on the `ollama.exe` PID started earlier this session); confirmed
+gone from `tasklist`. Re-launched the live GUI afterwards to confirm
+Scriptorium still starts cleanly with Ollama not running (correct title,
+empty stderr) — the app only talks to it when Ollama is the selected
+backend and Process is actually clicked, so this was expected but checked
+rather than assumed.
 
 ---
 
