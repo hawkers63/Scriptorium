@@ -578,13 +578,26 @@ note, which v2.6 already covered as bug fixes.
 - Recent-revisions history panel (notes_003/005/006) — sound idea, but
   every subsequent review has consistently prioritised the items above it;
   revisit after v2.6 if it's still wanted.
-- `anthropic-workspace-id` header support — discovered 2026-09-01 while
-  hand-testing v2.4: `call_anthropic()` has never sent this header, and an
-  identity-linked API key now needs one (`HTTP 400`). Not fixed because
-  Anthropic's console showed no Workspace ID value to use for Mark's key
-  (Workspace "Default") — revisit once a usable ID is available, or if
-  Mark switches to a non identity-linked key instead (no header needed
-  either way). Pre-existing, unrelated to v2.4 — would affect a v2.3
+- `anthropic-workspace-id` header — **resolved 2026-09-01, no code change.**
+  Discovered while hand-testing v2.4: `call_anthropic()` never sent this
+  header, and Mark's identity-linked (personal, unscoped/"multi-workspace")
+  API key needs one (`HTTP 400`). Confirmed for real this session, against
+  the live API with the actual configured key: the error is genuine —
+  `"anthropic-workspace-id is required when authenticating with an
+  identity-linked API key"` — and `call_anthropic()` already sends the
+  correct three standard headers (`x-api-key`, `anthropic-version`,
+  `content-type`); nothing was missing on Scriptorium's side beyond this one
+  optional header. Per Anthropic's current docs
+  (`manage-claude/authentication`, `manage-claude/workspaces`), the Console
+  deliberately never lists the Default Workspace's own ID in Settings →
+  Workspaces — which is why a prior session found no usable value there —
+  but a **workspace-scoped key never needs the header at all**. Mark chose
+  that fix over adding header-sending code: create a new Console API key
+  scoped to a specific workspace (Settings → API keys → Create key → set
+  Linked account to yourself → choose a workspace instead of leaving it
+  unscoped) and swap it into Scriptorium's Settings. No `scriptorium.py`
+  change needed; this is an account-configuration action, not a code defect.
+  Was pre-existing and unrelated to v2.4 — would have affected a v2.3
   single-tone request identically.
 - **Explorer drag-and-drop onto the Original pane** (notes_014 §3.1,
   notes_015 Feature 3) — not implemented. Both notes' own snippets stop at
