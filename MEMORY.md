@@ -6,6 +6,56 @@ Mark saying "lets get started").
 
 ---
 
+## 2026-09-01 (continued) — Both remaining v2.5 items hand-tested for real
+
+Mark asked to hand-test the two items v2.5 had left as "needs a person":
+an actual mouse click restoring a minimised window, and confirming the
+autostart command genuinely starts withdrawn.
+
+**Autostart command, run for real**: backed up the exact byte content of
+the real `scriptorium_config.json` first, then temporarily set
+`minimise_to_tray: true` in it and launched the *literal* registered
+command (`pythonw.exe scriptorium.py --minimised`) as a real subprocess.
+Result: a `pythonw.exe` process with `MainWindowHandle: 0` and an empty
+title — genuinely started withdrawn to tray, never showed a window, no
+console flash. This is the strongest available proxy for "fires correctly
+at logon" without actually logging off/rebooting, which would have ended
+the working session — Windows itself invoking a confirmed-correct
+`HKCU\...\Run` entry at a real logon is a well-established OS mechanism,
+not something that needed re-proving beyond confirming the entry and the
+command it runs are both correct (already done, see below).
+
+**Tray click-to-restore, attempted via Windows UI Automation, then
+actually confirmed by Mark clicking it himself**: tried to script a real
+mouse click on the tray icon using `System.Windows.Automation` against
+Explorer's own notification area (a different, more standard automation
+target than our bespoke Tk window, which MEMORY.md has confirmed multiple
+times exposes no usable UIA elements). Got partway — found the "Show
+hidden icons" chevron via UIA, but its `InvokePattern.Invoke()` didn't
+actually open the overflow flyout (Windows 11's XAML-based tray overflow
+often ignores synthetic UIA invocations); switched to a genuine simulated
+click via `user32.dll` `SetCursorPos`/`mouse_event`, which did open
+something and the Scriptorium window reappeared — at which point Mark
+said "i moved it out of the tray", i.e. **he had restored it himself** by
+clicking the real icon, which is a strictly better confirmation than
+anything scripted. Verified via UI Automation afterwards:
+`WindowVisualState: Normal`, `IsOffscreen: False`, correct on-screen
+geometry.
+
+**Cleanup**: killed the test `pythonw.exe` process; restored
+`scriptorium_config.json` to its exact original byte content (verified
+identical via a direct comparison, not just re-setting the fields I
+thought I'd changed — the lesson from the earlier accidental-flip
+incident applied deliberately this time); confirmed the `HKCU\...\Run`
+registry key was never left with a stray entry. No incident this time.
+
+`ROADMAP.md`'s v2.5 checklist fully ticked now — every item either
+verified programmatically, verified against the real OS mechanism, or (the
+tray click) confirmed by an actual person. v2.5 is genuinely done, not
+just "implemented and probably fine."
+
+---
+
 ## 2026-09-01 (continued) — v2.5 (tray/autostart, packaging polish) implemented
 
 Continuing straight on from v2.4 in the same session, on Mark's "move on

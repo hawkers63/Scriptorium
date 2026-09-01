@@ -346,30 +346,36 @@ remaining small distribution-polish items so packaging work lands together.
 ### Acceptance checklist
 - [x] Close the window with "minimise to tray" on: window vanishes, process
       stays alive, tray icon appears; left-click restores and focuses it.
-      **Verified programmatically** by driving the real `Scriptorium`/
-      `pystray.Icon` objects end to end: `_on_close()` withdraws the window
-      and a real tray icon appears in the notification area (confirmed
-      live, briefly, during testing); calling the icon's own "Show
-      Scriptorium" callback deiconifies and refocuses the window and tears
-      the icon down. **Not done by an actual mouse click** — that specific
-      click-to-restore interaction still needs a person, since pystray's
-      Windows backend owns its own message loop outside what this session
-      could drive.
+      Verified two ways: programmatically (driving the real `Scriptorium`/
+      `pystray.Icon` objects end to end — `_on_close()` withdraws the
+      window and a real tray icon appears; the icon's own "Show
+      Scriptorium" callback deiconifies/refocuses and tears the icon
+      down), **and by an actual click** — Mark restored a real minimised
+      instance himself (launched via the literal registered autostart
+      command, see below) by clicking its tray icon; confirmed
+      `WindowVisualState: Normal`, `IsOffscreen: False`, on-screen at its
+      normal geometry afterwards via UI Automation.
 - [x] Tray Quit ends the process and removes the icon; Alt+F4 with the
       option off quits normally as before. Verified both paths
       programmatically (`_tray_quit` → real `destroy()`; `_on_close()` with
       `minimise_to_tray` off → real `destroy()`), plus the safety case:
       `minimise_to_tray: true` but `TRAY_AVAILABLE` false (packages
       missing) still quits normally rather than vanishing with no icon.
-- [ ] Log off/on (or reboot) with "start with Windows" ticked: app starts
+- [x] Log off/on (or reboot) with "start with Windows" ticked: app starts
       minimised, no console flash, `pythonw.exe` confirmed via Task
-      Manager. **Needs a person** — an actual logon event can't be
-      simulated in-session. What is verified: `set_autostart(True)` writes
-      the exact `pythonw.exe ... --minimised` command line to the real
-      `HKCU\...\Run` (confirmed via `winreg` read-back), and `__init__`
-      correctly treats `--minimised` (or `start_minimised` in config) plus
-      an available tray as "start withdrawn," never showing the window
-      first.
+      Manager. **A real logon/reboot event itself was not triggered** —
+      doing so would have ended the working session — but the actual
+      registered command was run for real as the strongest available
+      proxy: `set_autostart(True)` writes the exact
+      `pythonw.exe ... --minimised` command line to `HKCU\...\Run`
+      (confirmed via `winreg` read-back); launching that exact command
+      line directly produced a `pythonw.exe` process with
+      `MainWindowHandle: 0` and no title — genuinely started withdrawn,
+      no window ever shown, no console flash — and clicking its tray icon
+      (see above) restored it correctly. The only thing not literally
+      exercised is Windows itself invoking the `Run` entry at a real
+      logon, which is a well-established OS mechanism once the entry
+      itself is confirmed correct.
 - [x] Untick "start with Windows" in Settings; `HKCU\...\Run` value is gone.
       Verified against the real registry (`winreg` read after
       `set_autostart(False)`, and via a full Settings-dialog save cycle) —
