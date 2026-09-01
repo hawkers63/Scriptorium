@@ -36,7 +36,7 @@ Dependencies
     Optional: install python-docx to import from and export to Word (.docx)
     files (`pip install python-docx`). Plain text and Markdown work without it.
 
-Author: built with Mark, August 2026. Version 2.5.
+Author: built with Mark, August 2026. Version 2.6.
 """
 
 import os
@@ -47,6 +47,7 @@ import secrets
 import threading
 import difflib
 import winreg
+import ctypes
 import urllib.request
 import urllib.error
 
@@ -75,7 +76,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.5"
+APP_VERSION = "2.6"
 
 def _config_dir():
     """Return the folder that holds scriptorium_config.json.
@@ -145,6 +146,35 @@ def resource_path(relative_path):
     """
     base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base, relative_path)
+
+
+_MUTEX_NAME = "Local\\ScriptoriumSingleInstance"
+_RESTORE_EVENT_NAME = "Local\\ScriptoriumRestore"
+_mutex_handle = None
+_ERROR_ALREADY_EXISTS = 183
+_INFINITE = 0xFFFFFFFF
+
+
+def _claim_single_instance():
+    """Return True if this process now owns the single-instance mutex.
+
+    False means another Scriptorium is already running. The handle is kept
+    at module level so it lives for the process lifetime rather than being
+    released early by garbage collection.
+    """
+    global _mutex_handle
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _mutex_handle = kernel32.CreateMutexW(None, False, _MUTEX_NAME)
+    return ctypes.get_last_error() != _ERROR_ALREADY_EXISTS
+
+
+def _signal_existing_instance():
+    """Ask the already-running instance to show itself."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.OpenEventW(0x0002, False, _RESTORE_EVENT_NAME)  # EVENT_MODIFY_STATE
+    if handle:
+        kernel32.SetEvent(handle)
+        kernel32.CloseHandle(handle)
 
 
 def _autostart_command():
@@ -1254,6 +1284,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self.title("Settings")
         self.geometry("520x740")
         self.resizable(False, False)
+        self.transient(master)
         self.grab_set()  # modal
 
         pad = {"padx": 16, "pady": (10, 0)}
@@ -1466,6 +1497,7 @@ class Scriptorium(ctk.CTk):
         self._result_source = ""      # the text last_result was generated from
         self.selected_tones = list(self.cfg.get("default_tones", ["Concise"]))
         self.tray_icon = None         # the live pystray.Icon, only while hidden to tray
+        self._start_restore_listener()
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
@@ -1473,6 +1505,8 @@ class Scriptorium(ctk.CTk):
         self.title(f"{APP_NAME} — British English writing assistant")
         self.geometry("1180x760")
         self.minsize(920, 600)
+        self._apply_window_icon()
+        self.after(200, self._apply_window_icon)
 
         self._build_toolbar()
         self._build_panes()
@@ -1495,6 +1529,21 @@ class Scriptorium(ctk.CTk):
             self._minimise_to_tray()
 
     # -- layout ------------------------------------------------------------- #
+
+    def _apply_window_icon(self):
+        """Set the title-bar/taskbar icon from the bundled .ico.
+
+        CustomTkinter can overwrite Tk's icon after construction, so __init__
+        calls this once immediately and once after a short delay. A missing
+        file or a Tcl error must not prevent the app from opening.
+        """
+        ico = resource_path(os.path.join("icon", "Scriptorium-256.ico"))
+        if not os.path.isfile(ico):
+            return
+        try:
+            self.iconbitmap(ico)
+        except (tk.TclError, OSError):
+            pass
 
     def _bind_shortcuts(self):
         """Register keyboard access to common editing and review actions.
@@ -1719,7 +1768,12 @@ class Scriptorium(ctk.CTk):
         if self.last_result:
             revised = self.last_result["revised"]
             r_words = len(revised.split()) if revised.strip() else 0
-            delta = r_words - words
+            # Compare against the text the revision was actually generated
+            # from, not the live buffer — Original may have been edited
+            # since Process ran, while last_result is still on display.
+            src = self._result_source if self._result_source else original
+            src_words = len(src.split()) if src.strip() else 0
+            delta = r_words - src_words
             sign = f"+{delta}" if delta >= 0 else str(delta)
             msg += f"   |   revision {r_words} words ({sign})"
         if extra:
@@ -1906,12 +1960,15 @@ class Scriptorium(ctk.CTk):
         actually delivered — it cannot stop self.after() itself from being
         called against an already-destroyed Tcl interpreter if the app is
         closed while a request is still in flight. That raises tk.TclError
-        on the worker thread, which is otherwise unhandled.
+        on the worker thread, which is otherwise unhandled. A worker thread
+        can also reach this call before __init__ has reached mainloop() (e.g.
+        the restore-listener thread firing very early); Tk raises RuntimeError
+        ("main thread is not in main loop") rather than TclError in that case.
         """
         try:
             if self.winfo_exists():
                 self.after(0, callback, *args)
-        except tk.TclError:
+        except (tk.TclError, RuntimeError):
             pass
 
     def process(self):
@@ -2091,7 +2148,9 @@ class Scriptorium(ctk.CTk):
             return
         self._remember_for_undo(self.original_box.get("1.0", "end-1c"))
         try:
+            sel_start = self.original_box.index("sel.first")
             self.original_box.delete("sel.first", "sel.last")
+            self.original_box.mark_set("insert", sel_start)
         except tk.TclError:
             pass  # no selection — insert at the caret
         self.original_box.insert("insert", incoming)
@@ -2134,17 +2193,20 @@ class Scriptorium(ctk.CTk):
                 return
         else:
             try:
-                with open(path, "r", encoding="utf-8") as fh:
+                # utf-8-sig handles both a BOM-prefixed and a plain UTF-8
+                # file, stripping the BOM either way instead of leaving a
+                # stray ﻿ in the text sent to the backend.
+                with open(path, "r", encoding="utf-8-sig") as fh:
                     content = fh.read()
             except UnicodeDecodeError:
                 try:
-                    with open(path, "r", encoding="utf-8-sig") as fh:
+                    with open(path, "r", encoding="cp1252") as fh:
                         content = fh.read()
                 except (OSError, UnicodeDecodeError) as exc:
                     messagebox.showerror(
                         "Import failed",
-                        "The file is not valid UTF-8. Save it as UTF-8 and try "
-                        f"again.\n\n({exc})")
+                        "The file encoding could not be read. Save it as "
+                        f"UTF-8 and try again.\n\n({exc})")
                     return
             except OSError as exc:
                 messagebox.showerror("Import failed", str(exc))
@@ -2203,6 +2265,43 @@ class Scriptorium(ctk.CTk):
         self._maybe_show_privacy_notice()
         self._refresh_status("settings saved")
 
+    def _start_restore_listener(self):
+        """Watch the named restore event so a second launch can wake us up.
+
+        Runs on a daemon thread; the actual window operations happen back on
+        the Tk thread via _post_to_ui(), same as every other worker-thread
+        callback in this app.
+        """
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self._restore_event = kernel32.CreateEventW(None, True, False, _RESTORE_EVENT_NAME)
+
+        def _watch():
+            while True:
+                kernel32.WaitForSingleObject(self._restore_event, _INFINITE)
+                kernel32.ResetEvent(self._restore_event)
+                try:
+                    self._post_to_ui(self._bring_to_front)
+                except Exception:
+                    # Never let an unexpected error kill this daemon thread --
+                    # that would silently disable the restore mechanism for
+                    # the rest of the process's life.
+                    pass
+
+        threading.Thread(target=_watch, daemon=True).start()
+
+    def _bring_to_front(self):
+        """Show the window whether it is visible, minimised, or in the tray."""
+        if self.tray_icon is not None:
+            try:
+                self.tray_icon.stop()
+            except Exception:
+                pass
+            self._finish_tray_restore()
+            return
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+
     def _on_close(self):
         """Minimise to tray if that's enabled and actually available.
 
@@ -2234,12 +2333,22 @@ class Scriptorium(ctk.CTk):
         """
         if self.tray_icon is not None:
             return  # already minimised
-        try:
-            image = PILImage.open(resource_path(os.path.join("icon", "icon-96.png")))
-        except OSError as exc:
+        # 96px preferred for the tray's small canvas; 256px as a fallback.
+        # Pillow reads .ico natively, so no separate .png asset is needed.
+        icon_dir = resource_path("icon")
+        image = None
+        for name in ("Scriptorium-96.ico", "Scriptorium-256.ico"):
+            candidate = os.path.join(icon_dir, name)
+            if os.path.isfile(candidate):
+                try:
+                    image = PILImage.open(candidate)
+                    break
+                except OSError:
+                    continue
+        if image is None:
             # Fail safe: keep the window open rather than vanish with no
             # visible icon and no way back.
-            print(f"[warning] could not load the tray icon image: {exc}")
+            print("[warning] could not load a tray icon from icon/ directory")
             return
         menu = pystray.Menu(
             pystray.MenuItem("Show Scriptorium", self._tray_restore, default=True),
@@ -2267,6 +2376,9 @@ class Scriptorium(ctk.CTk):
 
 
 def main():
+    if not _claim_single_instance():
+        _signal_existing_instance()
+        return
     app = Scriptorium()
     app.mainloop()
 

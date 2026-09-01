@@ -1,0 +1,715 @@
+Scriptorium Codebase Review & Enhancement Proposal -- notes_015
+================================================================================
+Author  : Antigravity (Read-Only Review & Enhancement Agent)
+Date    : 1 September 2026
+Against : C:\Scriptorium\scriptorium.py (APP_VERSION = "2.5", 2,276 lines)
+          C:\Scriptorium\scriptorium.spec
+          C:\Scriptorium\icon\
+Status  : Read-only review -- strictly no modifications to core project files
+Target  : C:\Scriptorium\notes\01_Active\notes_015.txt
+================================================================================
+
+
+1. EXECUTIVE SUMMARY & CODEBASE HEALTH ASSESSMENT
+--------------------------------------------------------------------------------
+A comprehensive, read-only static analysis was conducted across the Scriptorium
+codebase located in C:\Scriptorium\.
+
+The core application (scriptorium.py, v2.5, 2,276 lines) exhibits sound 
+architectural discipline. Standard library modules (urllib.request, json, difflib,
+secrets, winreg, ctypes) are utilised effectively to keep runtime dependencies
+exceptionally lean. CustomTkinter provides a modern Windows 11 interface, and
+optional extras (python-docx, pystray, pillow) are cleanly decoupled with robust
+feature-gating and fallback behaviour.
+
+Key Findings Summary:
+  * Asset Desynchronisation (High): The icon assets on disk (Scriptorium-256.ico
+    and Scriptorium-96.ico) do not match the filenames hard-coded in
+    scriptorium.py (icon/icon-96.png) and scriptorium.spec (icon/icon-96.ico,
+    icon/icon-96.png). In source runs, attempting to minimise to the system tray
+    fails due to a missing image file.
+  * Window Identity (Moderate): The main application window does not call
+    iconbitmap/iconphoto, leaving the generic Tk feather icon visible in the
+    title bar, Alt+Tab switcher, and taskbar when executed from source.
+  * Process Multiplicity (Moderate): Background tray execution allows duplicate
+    instances to be spawned via Scriptorium.bat or HKCU Run autostart, causing
+    duplicate tray icons and CustomTkinter DPI tracker collisions.
+  * Settings Model Retention (Moderate / Suspicion S1 Confirmed): Configuring a
+    custom Claude model ID in scriptorium_config.json results in silent
+    replacement with ANTHROPIC_MODELS[0] when saving via SettingsDialog.
+  * Caret Placement on Paste Replacement (Minor / Suspicion S2 Addressed):
+    Replacing a highlighted selection in paste_original() can leave the insertion
+    caret at the boundary of the prior selection on specific Tkinter configurations.
+  * Encoding Handling in File Import (Minor): Files with UTF-8 BOM retain the
+    byte-order mark (\ufeff) in text content, and non-UTF-8 Windows text files
+    (CP1252) fail immediately rather than attempting standard Windows fallbacks.
+
+
+================================================================================
+2. IDENTIFIED ISSUES & SEVERITY ASSESSMENTS
+================================================================================
+
+--------------------------------------------------------------------------------
+Finding 1: Tray Icon Asset Missing & PyInstaller Spec Desynchronisation
+Severity : HIGH
+Location : scriptorium.py (_minimise_to_tray, line 2238)
+           scriptorium.spec (lines 35, 85)
+--------------------------------------------------------------------------------
+Description:
+On disk in C:\Scriptorium\icon\, only Scriptorium-256.ico and Scriptorium-96.ico
+are present (icon-96.png and icon-96.ico were removed).
+In scriptorium.py:
+    image = PILImage.open(resource_path(os.path.join("icon", "icon-96.png")))
+Because Pillow natively supports opening .ico files, referencing the non-existent
+PNG causes an OSError in source runs, aborting tray minimisation. Furthermore,
+scriptorium.spec bundles icon/icon-96.png in `datas` and sets `icon="icon/icon-96.ico"`,
+which causes PyInstaller packaging to fail or omit the intended application icon.
+
+--------------------------------------------------------------------------------
+Finding 2: Application Window Title-Bar & Taskbar Brand Icon Omission
+Severity : MODERATE
+Location : scriptorium.py (Scriptorium.__init__, line 1459)
+--------------------------------------------------------------------------------
+Description:
+Scriptorium never calls self.iconbitmap() during window initialisation. Running
+via `python scriptorium.py` or `Scriptorium.bat` results in Windows displaying
+the default Tcl/Tk feather glyph in the title bar, taskbar, and Alt+Tab switcher.
+Applying the bundled .ico upon initialisation and after a brief delay (to prevent
+CustomTkinter internal DPI hooks from overriding it) provides a native, branded
+experience.
+
+--------------------------------------------------------------------------------
+Finding 3: Multiple Process Spawning & Duplicate Tray Icons
+Severity : MODERATE
+Location : scriptorium.py (main, line 2269)
+--------------------------------------------------------------------------------
+Description:
+When Scriptorium is minimised to the notification area, subsequent launches
+(via desktop shortcuts, batch files, or logon autostart) spawn independent
+processes. This generates multiple tray icons and causes CustomTkinter appearance/DPI
+state clashes. Using a named Windows mutex (Local\ScriptoriumSingleInstance) and
+event (Local\ScriptoriumRestore) via standard library `ctypes` ensures second
+launches restore the existing window and exit immediately.
+
+--------------------------------------------------------------------------------
+Finding 4: Custom Anthropic Model Overwrite on Settings Save (Suspicion S1)
+Severity : MODERATE
+Location : scriptorium.py (SettingsDialog.__init__, line 1280)
+--------------------------------------------------------------------------------
+Description:
+In SettingsDialog, `self.model_var` is bound to a CTkOptionMenu initialised with
+`values=ANTHROPIC_MODELS`. If a user specifies an alternative or newly released
+model in scriptorium_config.json (e.g. "claude-3-7-sonnet-20250219"), the menu
+omits it from the values list and CTkOptionMenu resets `model_var` to
+ANTHROPIC_MODELS[0] on save, silently discarding custom configuration.
+
+--------------------------------------------------------------------------------
+Finding 5: Caret Placement on Selected Text Replacement in paste_original()
+Severity : MINOR
+Location : scriptorium.py (paste_original, lines 2093-2098)
+--------------------------------------------------------------------------------
+Description:
+When replacing highlighted text in Original, `self.original_box.delete("sel.first",
+"sel.last")` removes the characters, but if the selection was made backwards,
+the insertion mark ("insert") can remain positioned at the trailing edge in
+some Tk versions before inserting `incoming`. Explicitly querying the selection
+range and setting the insertion mark to `sel.first` guarantees deterministic
+placement.
+
+--------------------------------------------------------------------------------
+Finding 6: UTF-8 BOM Retention and CP1252 Fallback in import_file()
+Severity : MINOR
+Location : scriptorium.py (import_file, lines 2135-2151)
+--------------------------------------------------------------------------------
+Description:
+`import_file()` opens plain text files using standard `utf-8`. If a file has a
+UTF-8 Byte Order Mark, `\ufeff` is retained in the text buffer and transmitted
+to the LLM backend. If `utf-8` decoding fails, the current except block attempts
+`utf-8-sig`, which fails with the identical UnicodeDecodeError on non-UTF-8
+files. Using `utf-8-sig` as the primary encoding automatically strips any BOM,
+and falling back to `cp1252` accommodates common legacy Windows document files.
+
+--------------------------------------------------------------------------------
+Finding 7: SettingsDialog Missing Transient Window Relationship
+Severity : MINOR
+Location : scriptorium.py (SettingsDialog.__init__, line 1254)
+--------------------------------------------------------------------------------
+Description:
+While `TonePickerDialog` sets `self.transient(master)`, `SettingsDialog` calls
+`self.grab_set()` without declaring transience. On Windows, this allows the modal
+dialogue to appear as an unlinked taskbar entity that can drop behind the parent
+window during Alt+Tab switching.
+
+--------------------------------------------------------------------------------
+Finding 8: Revision Word Count Delta Computed Against Stale Original Buffer
+Severity : MINOR
+Location : scriptorium.py (_refresh_status, lines 1720-1724)
+--------------------------------------------------------------------------------
+Description:
+In `_refresh_status()`, `delta = r_words - words` compares the revision word
+count against the current text in `self.original_box`. If the user edits or
+clears the Original pane while reviewing a revision, the displayed delta reflects
+the modified buffer rather than `self._result_source` (the source text from which
+the revision was actually generated).
+
+
+================================================================================
+3. TARGETED MODULAR FIXES & CODE SNIPPETS
+================================================================================
+
+--------------------------------------------------------------------------------
+Fix 1: Tray Icon Asset Resolution & Spec Update
+--------------------------------------------------------------------------------
+Insertion Point 1A:
+  File   : scriptorium.py
+  Class  : Scriptorium
+  Method : _minimise_to_tray (replace lines 2237-2244)
+
+```python
+        # Resolve icon from existing .ico files (96px preferred for tray, 256px fallback)
+        icon_dir = resource_path("icon")
+        image = None
+        for name in ("Scriptorium-96.ico", "Scriptorium-256.ico"):
+            candidate = os.path.join(icon_dir, name)
+            if os.path.isfile(candidate):
+                try:
+                    image = PILImage.open(candidate)
+                    break
+                except OSError:
+                    continue
+
+        if image is None:
+            print("[warning] could not load tray icon from icon/ directory")
+            return
+```
+
+Insertion Point 1B:
+  File   : scriptorium.spec
+  Context: Lines 35 and 85-86
+
+```python
+datas += [
+    ("icon/Scriptorium-256.ico", "icon"),
+    ("icon/Scriptorium-96.ico", "icon"),
+]
+```
+and
+```python
+    icon="icon/Scriptorium-256.ico",
+    version="version_info.txt",
+```
+
+--------------------------------------------------------------------------------
+Fix 2: Window Title-Bar & Taskbar Icon Initialisation
+--------------------------------------------------------------------------------
+Insertion Point 2A:
+  File   : scriptorium.py
+  Class  : Scriptorium
+  Method : __init__ (insert immediately after line 1475: self.minsize(920, 600))
+
+```python
+        self._apply_window_icon()
+        self.after(200, self._apply_window_icon)
+```
+
+Insertion Point 2B:
+  File   : scriptorium.py
+  Class  : Scriptorium
+  Method : Helper method (insert immediately before _bind_shortcuts, line 1499)
+
+```python
+    def _apply_window_icon(self):
+        """Set the window title-bar and taskbar icon from the bundled .ico asset.
+
+        Called immediately in __init__ and scheduled once via self.after() to
+        ensure CustomTkinter's internal scaling hooks do not override the icon.
+        Fails silently if the file is missing or on non-Windows platforms.
+        """
+        for name in ("Scriptorium-256.ico", "Scriptorium-96.ico"):
+            ico = resource_path(os.path.join("icon", name))
+            if os.path.isfile(ico):
+                try:
+                    self.iconbitmap(ico)
+                    break
+                except (tk.TclError, OSError):
+                    pass
+```
+
+--------------------------------------------------------------------------------
+Fix 3: Single-Instance Mutex and Activation Event
+--------------------------------------------------------------------------------
+Insertion Point 3A:
+  File   : scriptorium.py
+  Context: Module level, insert after resource_path() (line 148), before _autostart_command()
+
+```python
+import ctypes
+
+_MUTEX_NAME = "Local\\ScriptoriumSingleInstance"
+_RESTORE_EVENT_NAME = "Local\\ScriptoriumRestore"
+_mutex_handle = None
+_ERROR_ALREADY_EXISTS = 183
+_INFINITE = 0xFFFFFFFF
+
+
+def _claim_single_instance():
+    """Return True if this process successfully claimed the single-instance mutex.
+
+    Returns False if another instance of Scriptorium is already active.
+    The mutex handle is retained at module level to prevent garbage collection.
+    """
+    global _mutex_handle
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _mutex_handle = kernel32.CreateMutexW(None, False, _MUTEX_NAME)
+    return ctypes.get_last_error() != _ERROR_ALREADY_EXISTS
+
+
+def _signal_existing_instance():
+    """Signal the active Scriptorium instance to restore its main window."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.OpenEventW(0x00100002, False, _RESTORE_EVENT_NAME)  # EVENT_MODIFY_STATE
+    if handle:
+        kernel32.SetEvent(handle)
+        kernel32.CloseHandle(handle)
+```
+
+Insertion Point 3B:
+  File   : scriptorium.py
+  Class  : Scriptorium
+  Method : __init__ (insert after self.tray_icon = None, line 1468)
+
+```python
+        self._start_restore_listener()
+```
+
+Insertion Point 3C:
+  File   : scriptorium.py
+  Class  : Scriptorium
+  Context: Insert before _on_close() (line 2206)
+
+```python
+    def _start_restore_listener(self):
+        """Start a background daemon thread to listen for single-instance restore signals."""
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self._restore_event = kernel32.CreateEventW(None, True, False, _RESTORE_EVENT_NAME)
+
+        def _listener():
+            while True:
+                kernel32.WaitForSingleObject(self._restore_event, _INFINITE)
+                kernel32.ResetEvent(self._restore_event)
+                self._post_to_ui(self._bring_to_front)
+
+        threading.Thread(target=_listener, daemon=True).start()
+
+    def _bring_to_front(self):
+        """Restore and raise the main application window whether hidden or minimised."""
+        if self.tray_icon is not None:
+            try:
+                self.tray_icon.stop()
+            except Exception:
+                pass
+            self._finish_tray_restore()
+            return
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+```
+
+Insertion Point 3D:
+  File   : scriptorium.py
+  Function: main() (replace lines 2269-2272)
+
+```python
+def main():
+    if not _claim_single_instance():
+        _signal_existing_instance()
+        return
+    app = Scriptorium()
+    app.mainloop()
+```
+
+--------------------------------------------------------------------------------
+Fix 4: Preserve Custom Anthropic Models in Settings
+--------------------------------------------------------------------------------
+Insertion Point 4:
+  File   : scriptorium.py
+  Class  : SettingsDialog
+  Method : __init__ (replace lines 1280-1284)
+
+```python
+        ctk.CTkLabel(self, text="Claude model").pack(anchor="w", **pad)
+        current_model = cfg.get("anthropic_model", DEFAULT_ANTHROPIC_MODEL)
+        model_options = (
+            ANTHROPIC_MODELS if current_model in ANTHROPIC_MODELS
+            else [current_model] + ANTHROPIC_MODELS
+        )
+        self.model_var = ctk.StringVar(value=current_model)
+        ctk.CTkOptionMenu(
+            self, values=model_options, variable=self.model_var
+        ).pack(fill="x", padx=16, pady=(2, 0))
+```
+
+--------------------------------------------------------------------------------
+Fix 5: Deterministic Caret Positioning on Selection Replacement
+--------------------------------------------------------------------------------
+Insertion Point 5:
+  File   : scriptorium.py
+  Class  : Scriptorium
+  Method : paste_original (replace lines 2092-2098)
+
+```python
+        self._remember_for_undo(self.original_box.get("1.0", "end-1c"))
+        try:
+            if self.original_box.tag_ranges("sel"):
+                sel_start = self.original_box.index("sel.first")
+                self.original_box.delete("sel.first", "sel.last")
+                self.original_box.mark_set("insert", sel_start)
+        except tk.TclError:
+            pass  # no active selection -- insert at current caret
+        self.original_box.insert("insert", incoming)
+        self._refresh_status("pasted from clipboard")
+```
+
+--------------------------------------------------------------------------------
+Fix 6: Robust BOM & CP1252 Encoding Handling in import_file()
+--------------------------------------------------------------------------------
+Insertion Point 6:
+  File   : scriptorium.py
+  Class  : Scriptorium
+  Method : import_file (replace lines 2135-2151)
+
+```python
+        else:
+            try:
+                # utf-8-sig seamlessly handles both UTF-8 with BOM and standard UTF-8
+                with open(path, "r", encoding="utf-8-sig") as fh:
+                    content = fh.read()
+            except UnicodeDecodeError:
+                try:
+                    # Fallback for Windows ANSI / CP1252 text files
+                    with open(path, "r", encoding="cp1252") as fh:
+                        content = fh.read()
+                except (OSError, UnicodeDecodeError) as exc:
+                    messagebox.showerror(
+                        "Import failed",
+                        "The file encoding could not be read. Please save it "
+                        f"as UTF-8 and try again.\n\n({exc})")
+                    return
+            except OSError as exc:
+                messagebox.showerror("Import failed", str(exc))
+                return
+```
+
+--------------------------------------------------------------------------------
+Fix 7: Modal Transience in SettingsDialog
+--------------------------------------------------------------------------------
+Insertion Point 7:
+  File   : scriptorium.py
+  Class  : SettingsDialog
+  Method : __init__ (insert immediately after line 1257: self.grab_set())
+
+```python
+        self.transient(master)
+```
+
+--------------------------------------------------------------------------------
+Fix 8: Accurate Revision Delta Calculation Against Original Source
+--------------------------------------------------------------------------------
+Insertion Point 8:
+  File   : scriptorium.py
+  Class  : Scriptorium
+  Method : _refresh_status (replace lines 1719-1724)
+
+```python
+        if self.last_result:
+            revised = self.last_result["revised"]
+            r_words = len(revised.split()) if revised.strip() else 0
+            # Compare revision against the specific text it was generated from
+            src = self._result_source if self._result_source else original
+            src_words = len(src.split()) if src.strip() else 0
+            delta = r_words - src_words
+            sign = f"+{delta}" if delta >= 0 else str(delta)
+            msg += f"   |   revision {r_words} words ({sign})"
+```
+
+
+================================================================================
+4. PROPOSED NEW FEATURES (USABILITY & UI ENHANCEMENT)
+================================================================================
+
+--------------------------------------------------------------------------------
+Feature 1: Copyable Change Summary
+--------------------------------------------------------------------------------
+Usability Rationale:
+When editing formal letters, technical documentation, or client replies, authors
+frequently need to provide a concise statement of modifications (e.g. for a
+covering note, commit summary, or audit log). Scriptorium already leverages
+`difflib.SequenceMatcher` for diff rendering; this feature computes a one-line
+British English summary of word-level adjustments and enables one-click copying
+to the clipboard.
+
+Implementation:
+1. Helper function `summarise_diff()`:
+   File   : scriptorium.py
+   Context: Module level, insert immediately after render_diff() (line 1011)
+
+```python
+def summarise_diff(original, revised):
+    """Return a concise, one-line British English summary of text modifications.
+
+    Analyses word-level inserts, deletions, and replacements using the same
+    tokenisation as render_diff. Example outputs:
+      '12 words inserted, 4 deleted, 3 replaced'
+      'no wording changes'
+    """
+    a, b = _tokenise(original), _tokenise(revised)
+    matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    inserted = deleted = replaced = 0
+    word_re = re.compile(r"\w", re.UNICODE)
+
+    def count_words(tokens):
+        return sum(1 for tok in tokens if word_re.search(tok))
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "insert":
+            inserted += count_words(b[j1:j2])
+        elif tag == "delete":
+            deleted += count_words(a[i1:i2])
+        elif tag == "replace":
+            replaced += count_words(b[j1:j2])
+
+    clauses = []
+    if inserted:
+        clauses.append(f"{inserted} word{'s' if inserted != 1 else ''} inserted")
+    if deleted:
+        clauses.append(f"{deleted} deleted")
+    if replaced:
+        clauses.append(f"{replaced} replaced")
+
+    return ", ".join(clauses) if clauses else "no wording changes"
+```
+
+2. Action bar button & copy handler:
+   File   : scriptorium.py
+   Class  : Scriptorium
+   Method : _build_actionbar (insert beside "Copy revision", line 1672)
+
+```python
+        ctk.CTkButton(bar, text="Copy summary", width=110, fg_color="gray30",
+                      command=self.copy_change_summary).pack(side="left", padx=4)
+```
+
+   Method : copy_change_summary (insert beside copy_revision, line 2066)
+
+```python
+    def copy_change_summary(self):
+        """Copy a one-line diff summary of the active revision to the clipboard."""
+        if not self.last_result:
+            self._refresh_status("no revision to summarise")
+            return
+        summary = summarise_diff(self._result_source, self.last_result["revised"])
+        self.clipboard_clear()
+        self.clipboard_append(summary)
+        self._refresh_status(f"summary copied: \"{summary}\"")
+```
+
+3. Shortcut binding:
+   File   : scriptorium.py
+   Class  : Scriptorium
+   Method : _bind_shortcuts (add to bindings dict, line 1515)
+
+```python
+            "<Control-Shift-M>": self.copy_change_summary,
+```
+
+
+--------------------------------------------------------------------------------
+Feature 2: "Always on Top" Window Pinning Toggle
+--------------------------------------------------------------------------------
+Usability Rationale:
+Scriptorium operates as a focused desktop companion alongside Word, Outlook, or
+browsers. Writers frequently lose sight of the assistant when referencing or
+copying from adjacent applications. An "Always on Top" toggle lets users pin
+Scriptorium above other windows while drafting, backed by Tkinter's native
+`attributes("-topmost", ...)`.
+
+Implementation:
+1. Configuration default:
+   File   : scriptorium.py
+   Dict   : DEFAULT_CONFIG (insert line 443)
+
+```python
+    "always_on_top": False,          # pin window above other applications
+```
+
+2. Settings dialogue control:
+   File   : scriptorium.py
+   Class  : SettingsDialog
+   Method : __init__ (insert under "Startup & window behaviour", line 1346)
+
+```python
+        self.topmost_var = tk.BooleanVar(
+            value=cfg.get("always_on_top", False))
+        ctk.CTkCheckBox(
+            self, variable=self.topmost_var,
+            text="Keep Scriptorium on top of other windows"
+        ).pack(anchor="w", padx=16, pady=(10, 0))
+```
+   Adjust SettingsDialog geometry from "520x740" to "520x780" to accommodate
+   the additional setting cleanly without vertical compression.
+
+   Method : _save (include in candidate dict, line 1429)
+
+```python
+            "always_on_top": bool(self.topmost_var.get()),
+```
+
+3. Application state hook:
+   File   : scriptorium.py
+   Class  : Scriptorium
+   Method : __init__ (after self._apply_window_icon())
+
+```python
+        self.attributes("-topmost", bool(self.cfg.get("always_on_top", False)))
+```
+   Method : _after_settings (line 2203)
+
+```python
+        self.attributes("-topmost", bool(self.cfg.get("always_on_top", False)))
+```
+
+
+--------------------------------------------------------------------------------
+Feature 3: Explorer File Drag-and-Drop Loader for Original Pane
+--------------------------------------------------------------------------------
+Usability Rationale:
+Opening file dialogues interrupts drafting workflow. Enabling direct drag-and-drop
+of `.txt`, `.md`, and `.docx` files onto the Original pane from Windows Explorer
+streamlines ingestion while preserving Scriptorium's zero-third-party-HTTP and
+lightweight desktop profile.
+
+Implementation:
+1. Modular file loading pipeline:
+   File   : scriptorium.py
+   Class  : Scriptorium
+   Refactor import_file() into `_load_file_path()` and `import_file()`:
+
+```python
+    def _load_file_path(self, path):
+        """Load document text into Original from a resolved file path (.txt, .md, .docx)."""
+        if not path or not os.path.isfile(path):
+            return
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in (".txt", ".md", ".docx"):
+            self._refresh_status(f"unsupported file format: {ext}")
+            return
+
+        if ext == ".docx":
+            try:
+                content = read_docx(path)
+            except ImportError:
+                messagebox.showerror(
+                    "Import failed",
+                    "Reading Word files needs the python-docx package.\n\n"
+                    "Install it with:  pip install python-docx")
+                return
+            except Exception as exc:
+                messagebox.showerror("Import failed", f"Could not read Word file.\n\n{exc}")
+                return
+        else:
+            try:
+                with open(path, "r", encoding="utf-8-sig") as fh:
+                    content = fh.read()
+            except UnicodeDecodeError:
+                try:
+                    with open(path, "r", encoding="cp1252") as fh:
+                        content = fh.read()
+                except (OSError, UnicodeDecodeError) as exc:
+                    messagebox.showerror(
+                        "Import failed",
+                        "The file encoding could not be read. Please save it "
+                        f"as UTF-8 and try again.\n\n({exc})")
+                    return
+            except OSError as exc:
+                messagebox.showerror("Import failed", str(exc))
+                return
+
+        self._remember_for_undo(self.original_box.get("1.0", "end-1c"))
+        self.reject()
+        self.original_box.delete("1.0", "end")
+        self.original_box.insert("1.0", content)
+        self._refresh_status(f"imported {os.path.basename(path)}")
+
+    def import_file(self):
+        """Open a standard file dialogue and load the selected document."""
+        path = filedialog.askopenfilename(
+            title="Import text",
+            filetypes=[("Text, Markdown and Word", "*.txt *.md *.docx"),
+                       ("All files", "*.*")])
+        if path:
+            self._load_file_path(path)
+```
+
+2. Native Drag-and-Drop initialisation:
+   File   : scriptorium.py
+   Class  : Scriptorium
+   Method : __init__ (schedule drop registration, insert after _bind_shortcuts)
+
+```python
+        self.after(300, self._enable_file_drops)
+```
+
+   Method : _enable_file_drops (insert beside import_file)
+
+```python
+    def _enable_file_drops(self):
+        """Register the main application window to accept Explorer file drops."""
+        try:
+            hwnd = int(self.wm_frame(), 16)
+            ctypes.windll.shell32.DragAcceptFiles(hwnd, True)
+        except (ValueError, tk.TclError, AttributeError, OSError):
+            pass
+```
+
+
+================================================================================
+5. SUGGESTED INTEGRATION & VERIFICATION ROADMAP
+================================================================================
+
+Recommended Execution Sequence:
+  1. Asset & Specification Alignment: Update scriptorium.spec and _minimise_to_tray
+     to reference Scriptorium-256.ico / Scriptorium-96.ico.
+  2. Window Brand Icon: Integrate _apply_window_icon() into Scriptorium.__init__.
+  3. Single-Instance Mutex: Implement ctypes single-instance claim and restore event.
+  4. Settings & Encoding Robustness: Apply custom model dropdown retention,
+     transient modal flag, and utf-8-sig/cp1252 file import fallbacks.
+  5. Feature Integration:
+     a. Always on Top toggle (Settings + Scriptorium window attributes).
+     b. Copyable Change Summary (summarise_diff helper, button, and shortcut).
+     c. Modular file loader refactor (_load_file_path).
+
+Verification Checklist:
+  - [ ] Source execution (`python scriptorium.py`): verify Scriptorium-256.ico
+        appears in title bar and Alt+Tab switcher.
+  - [ ] Notification Area: Minimise window to tray; confirm Scriptorium-96.ico
+        renders cleanly in the Windows notification area.
+  - [ ] Single Instance: Launch second instance while first is minimised; confirm
+        first instance restores to front and no duplicate process remains.
+  - [ ] Custom Model: Hand-edit scriptorium_config.json with custom model tag;
+        open Settings and save; verify custom model tag is preserved.
+  - [ ] File Import: Import a UTF-8 file with BOM and a CP1252 ANSI text file;
+        confirm both load clean paragraph text without errors or stray glyphs.
+  - [ ] Change Summary: Process a sample text; verify "Copy summary" copies a
+        grammatical British English change sentence to clipboard.
+  - [ ] Always on Top: Toggle option in Settings; verify window remains pinned
+        above active browser and Word windows.
+
+
+================================================================================
+6. GUARDRAILS & READ-ONLY COMPLIANCE
+================================================================================
+In accordance with execution constraints, zero core source files, configurations,
+or specifications have been altered, moved, or deleted during this review.
+All proposed snippets are self-contained, strict British English compliant, and
+ready for incremental integration upon user authorisation.
+================================================================================

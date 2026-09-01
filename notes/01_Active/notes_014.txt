@@ -1,0 +1,406 @@
+Scriptorium enhancement proposal -- notes_014
+========================================================
+Author  : Gale (Enhancement & Refactoring Agent)
+Date    : 1 September 2026
+Against : C:\Scriptorium\scriptorium.py  (APP_VERSION = "2.5", 2,277 lines)
+Status  : ideation only -- no core files modified
+
+This is the first note under the current protocol path:
+  C:\Scriptorium\notes\00_Drafts\scriptorium_notes_[N].txt
+
+notes_001.txt to notes_013.txt remain in notes\01_Active\. Do not re-apply
+those snippets. Named presets, live word counts, request ids, multi-tone,
+tray/autostart and packaging polish are already in v2.5.
+
+
+0. What I reviewed
+------------------
+v2.5 is a single 2,277-line CustomTkinter app. Closing with "minimise to
+tray" withdraws the window and starts a pystray.Icon on a daemon thread
+(_minimise_to_tray, line 2226). There is no mutex, lock file, or
+FindWindow check, so a second launch (Scriptorium.bat, the .exe, or the
+HKCU Run autostart command while an instance is already sitting in the
+tray) creates a second process and a second tray icon.
+
+The window never calls iconbitmap / iconphoto. Title bar, Alt+Tab and the
+taskbar therefore show the default Tk feather. The packaged .exe is a
+separate path: scriptorium.spec sets icon="icon/icon-96.ico", which is
+not the file on disk.
+
+On disk today, C:\Scriptorium\icon\ holds only:
+
+  Scriptorium-128.ico   (67,646 bytes)   -- the one Mark wants top-left
+  Scriptorium-96.ico    (38,078 bytes)
+
+There is no icon-96.png and no icon-96.ico. _minimise_to_tray still
+opens resource_path("icon/icon-96.png") (line 2238). From source that
+open fails and the method returns without withdrawing -- so a source
+run cannot actually reach the tray. A packaged .exe that still bundles
+the old PNG can, which is how multiple tray icons appear in practice.
+
+Do not re-propose: writing roles, placeholders, Clean/Inline diff,
+letter-convention advisory, WRITING_PRESETS, live <<Modified>> counts,
+_request_id, Softer/Stronger, pystray+Pillow itself, python-docx,
+Credential Manager, a module split, or "three alternatives".
+
+
+1. Window icon (requested)
+--------------------------
+Why
+    Mark's 128-pixel .ico should be the top-left title-bar glyph (and the
+    taskbar / Alt+Tab image while running from source). iconbitmap is the
+    native Tk call for a Windows .ico. CustomTkinter often stamps its own
+    icon on after __init__, so apply it twice: immediately, then once the
+    window has mapped.
+
+Do not add a second copy of the logo as a toolbar CTkLabel. The request
+is the window chrome, not extra toolbar clutter.
+
+1a. Apply the icon
+    File   : scriptorium.py
+    Class  : Scriptorium
+    Method : __init__  (line 1459)
+    After  : self.title(...) / self.geometry(...) / self.minsize(...)
+             (currently lines 1473-1475)
+
+Surrounding context (before):
+        self.title(f"{APP_NAME} -- British English writing assistant")
+        self.geometry("1180x760")
+        self.minsize(920, 600)
+
+Surrounding context (after):
+        self._build_toolbar()
+
+Snippet:
+
+        self._apply_window_icon()
+        self.after(200, self._apply_window_icon)
+
+1b. Helper -- same class, insert just above _bind_shortcuts (line 1501)
+
+    def _apply_window_icon(self):
+        """Set the title-bar / taskbar icon from the bundled .ico.
+
+        CustomTkinter can overwrite Tk's icon after construction, so
+        __init__ calls this once immediately and once after a short delay.
+        Missing file or a Tcl error must not prevent the app from opening.
+        """
+        ico = resource_path(os.path.join("icon", "Scriptorium-256.ico"))
+        if not os.path.isfile(ico):
+            return
+        try:
+            self.iconbitmap(ico)
+        except tk.TclError:
+            pass
+
+1c. Point the tray and the spec at the files that actually exist
+
+    File   : scriptorium.py
+    Class  : Scriptorium
+    Method : _minimise_to_tray  (line 2226)
+    Replace the PILImage.open line (currently line 2238):
+
+            image = PILImage.open(resource_path(os.path.join("icon", "icon-96.png")))
+
+    with a 96-pixel .ico first, 256 as fallback (Pillow reads .ico):
+
+            icon_dir = resource_path("icon")
+            for name in ("Scriptorium-96.ico", "Scriptorium-256.ico"):
+                candidate = os.path.join(icon_dir, name)
+                if os.path.isfile(candidate):
+                    image = PILImage.open(candidate)
+                    break
+            else:
+                raise OSError("no Scriptorium .ico found in icon/")
+
+    File   : scriptorium.spec
+    Change icon="icon/icon-96.ico" to icon="icon/Scriptorium-256.ico"
+    Change datas += [("icon/icon-96.png", "icon")] to:
+
+        datas += [
+            ("icon/Scriptorium-256.ico", "icon"),
+            ("icon/Scriptorium-96.ico", "icon"),
+        ]
+
+    Rebuild the .exe after this, otherwise Explorer will keep showing the
+    old 96-pixel resource.
+
+
+2. One instance, one tray icon (requested)
+------------------------------------------
+Why
+    Each process owns its own pystray.Icon. Autostart with --minimised
+    plus a later double-click of Scriptorium.bat is the everyday way to
+    get two icons. A named mutex is the usual Windows answer and needs
+    no new package (ctypes is stdlib).
+
+Behaviour
+    * First instance creates mutex Local\ScriptoriumSingleInstance and
+      keeps the handle alive for the process lifetime.
+    * First instance also creates event Local\ScriptoriumRestore and a
+      daemon thread that waits on it, then posts _bring_to_front to Tk.
+    * Second instance sees ERROR_ALREADY_EXISTS, pulses the restore
+      event, and exits without constructing a window (so no second tray
+      icon, and no CustomTkinter DPI clash).
+    * _bring_to_front restores from tray if hidden, otherwise deiconify
+      + lift + focus_force -- the same as the existing tray "Show" path.
+
+2a. ctypes helpers -- scriptorium.py, after resource_path (line 137)
+
+Insert before _autostart_command (line 152). Keep the mutex handle at
+module level so Windows does not release it on GC.
+
+Surrounding context (before): the end of resource_path.
+Surrounding context (after): def _autostart_command():
+
+Snippet:
+
+import ctypes
+
+_MUTEX_NAME = "Local\\ScriptoriumSingleInstance"
+_RESTORE_EVENT_NAME = "Local\\ScriptoriumRestore"
+_mutex_handle = None
+ERROR_ALREADY_EXISTS = 183
+INFINITE = 0xFFFFFFFF
+
+def _claim_single_instance():
+    """Return True if this process now owns the single-instance mutex.
+
+    False means another Scriptorium is already running. The mutex handle
+    is stored at module level so it lives until process exit.
+    """
+    global _mutex_handle
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _mutex_handle = kernel32.CreateMutexW(None, False, _MUTEX_NAME)
+    return ctypes.get_last_error() != ERROR_ALREADY_EXISTS
+
+def _signal_existing_instance():
+    """Ask the running instance to show itself, then this process can exit."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.OpenEventW(0x00100002, False, _RESTORE_EVENT_NAME)  # EVENT_MODIFY_STATE
+    if handle:
+        kernel32.SetEvent(handle)
+        kernel32.CloseHandle(handle)
+
+2b. Listen for that pulse -- Scriptorium.__init__, after tray_icon = None (line 1470)
+
+        self._start_restore_listener()
+
+Helper, insert just above _on_close (line 2206):
+
+    def _start_restore_listener(self):
+        """Watch the named restore event so a second launch can wake us."""
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        # CreateEventW(security, manual_reset, initial_state, name)
+        self._restore_event = kernel32.CreateEventW(
+            None, True, False, _RESTORE_EVENT_NAME)
+
+        def _watch():
+            while True:
+                kernel32.WaitForSingleObject(self._restore_event, INFINITE)
+                kernel32.ResetEvent(self._restore_event)
+                self._post_to_ui(self._bring_to_front)
+
+        threading.Thread(target=_watch, daemon=True).start()
+
+    def _bring_to_front(self):
+        """Show the window whether it is visible, minimised, or in the tray."""
+        if self.tray_icon is not None:
+            try:
+                self.tray_icon.stop()
+            except Exception:
+                pass
+            self._finish_tray_restore()
+            return
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+
+2c. Gate main() -- scriptorium.py, replace main() at line 2269
+
+Surrounding context (before): _tray_quit
+Surrounding context (after): if __name__ == "__main__":
+
+    def main():
+        if not _claim_single_instance():
+            _signal_existing_instance()
+            return
+        app = Scriptorium()
+        app.mainloop()
+
+Do not construct Scriptorium() in the second process. Creating two CTk
+apps in overlapping processes is what v2.5 testing already hit with the
+DPI tracker.
+
+Verify by hand:
+  1. Launch, minimise to tray, launch again: still one tray icon, window
+     restores.
+  2. Launch with the window visible, launch again: existing window lifts,
+     no second process in Task Manager.
+  3. Autostart --minimised while already running: same as (1).
+  4. Tray Quit still ends the process and the mutex.
+
+
+3. Three further improvements
+-----------------------------
+These are new, small, and not already in v2.5. They are independent of
+each other; any one can ship without the others.
+
+3.1 Drag-and-drop onto Original
+    Why: Import already understands .txt / .md / .docx (import_file,
+    line 2115). The missing piece is dropping a letter onto the pane
+    instead of walking a file dialog. Stay on stdlib: WM_DROPFILES via
+    ctypes, no tkinterdnd2.
+
+    File   : scriptorium.py
+    Class  : Scriptorium
+    Method : __init__, after _bind_shortcuts() (line 1484)
+
+        self.after(300, self._enable_file_drops)
+
+    New methods, insert just above import_file (line 2115). Reuse the
+    same read path by splitting import_file so both the dialog and a
+    drop call _load_path(path):
+
+    def _enable_file_drops(self):
+        """Accept Explorer file drops on the main window (Windows only)."""
+        try:
+            hwnd = int(self.wm_frame(), 16)
+        except (ValueError, tk.TclError):
+            return
+        ctypes.windll.shell32.DragAcceptFiles(hwnd, True)
+        # Subclassing the WndProc is the usual follow-up; keep it in the
+        # implementation rather than expanding this note into a full
+        # Win32 tutorial. WM_DROPFILES = 0x0233. Query the first dropped
+        # path with DragQueryFileW, then self._load_path(path) on the Tk
+        # thread via _post_to_ui.
+
+    Then change import_file to:
+
+        path = filedialog.askopenfilename(...)
+        if not path:
+            return
+        self._load_path(path)
+
+    Move the current body from "if path.lower().endswith('.docx'):" down
+    to the insert into a new _load_path(self, path) sitting beside it.
+    A drop of several files should load only the first and say so in the
+    status bar.
+
+    Accept .txt, .md, .docx only -- ignore .exe / .ico drops with a
+    short status message, not a dialog.
+
+3.2 Copyable change summary
+    Why: the status bar already shows "revision N words (+/-)" in
+    _refresh_status (line 1706). It does not say how much was actually
+    rewritten, and there is no way to copy that line into a covering
+    email. SequenceMatcher is already paid for in render_diff (line 982).
+
+    File   : scriptorium.py
+    After  : render_diff  (ends ~line 1012)
+
+    def summarise_diff(original, revised):
+        """Return a one-line British English change summary.
+
+        Counts word-level inserts, deletes and replacements using the
+        same tokenisation as render_diff. Example:
+        '12 words inserted, 4 deleted, 3 replaced'
+        """
+        a, b = _tokenise(original), _tokenise(revised)
+        matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
+        inserted = deleted = replaced = 0
+        word = re.compile(r"\w", re.UNICODE)
+        def n_words(tokens):
+            return sum(1 for tok in tokens if word.search(tok))
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag == "insert":
+                inserted += n_words(b[j1:j2])
+            elif tag == "delete":
+                deleted += n_words(a[i1:i2])
+            elif tag == "replace":
+                replaced += n_words(b[j1:j2])
+        parts = []
+        if inserted:
+            parts.append(f"{inserted} word{'s' if inserted != 1 else ''} inserted")
+        if deleted:
+            parts.append(f"{deleted} deleted")
+        if replaced:
+            parts.append(f"{replaced} replaced")
+        return ", ".join(parts) if parts else "no wording changes"
+
+    In _refresh_status, when self.last_result is set, append
+    summarise_diff(self._result_source, self.last_result["revised"])
+    to the existing revision clause.
+
+    On the action bar (_build_actionbar), add a compact button
+    "Copy summary" next to "Copy revision". Handler:
+
+    def copy_change_summary(self):
+        if not self.last_result:
+            return
+        summary = summarise_diff(self._result_source, self.last_result["revised"])
+        self.clipboard_clear()
+        self.clipboard_append(summary)
+        self._refresh_status("change summary copied")
+
+    Bind it in _bind_shortcuts as <Control-Shift-M> (mnemonic: suMmary),
+    so it does not steal Ctrl+C inside Original.
+
+3.3 Always-on-top toggle
+    Why: the letter-writing loop is Scriptorium beside Outlook or Word.
+    A Settings checkbox is one attributes('-topmost', ...) call and fits
+    the existing "Startup & window behaviour" block.
+
+    a. DEFAULT_CONFIG (line 435) -- add:
+           "always_on_top": False,
+
+    b. SettingsDialog.__init__ (line 1249)
+       After the "Start minimised to tray" checkbox (line 1346), before
+       btn_row (line 1349):
+
+        self.topmost_var = tk.BooleanVar(value=cfg.get("always_on_top", False))
+        ctk.CTkCheckBox(
+            self, variable=self.topmost_var,
+            text="Keep Scriptorium on top of other windows"
+        ).pack(anchor="w", padx=16, pady=(10, 0))
+
+       Bump self.geometry from "520x740" (line 1257) to "520x780" so the
+       Save/Cancel row is not clipped.
+
+       In SettingsDialog._save, fold always_on_top into the candidate
+       dict next to the other window-behaviour keys.
+
+    c. Scriptorium.__init__, after the icon call:
+           self.attributes("-topmost", bool(self.cfg.get("always_on_top")))
+
+    d. Scriptorium._after_settings (line 2202):
+           self.attributes("-topmost", bool(self.cfg.get("always_on_top")))
+           (keep the existing privacy-notice / status refresh)
+
+    Off by default. Does not interact with the tray: a topmost window
+    that is then withdrawn is still withdrawn.
+
+
+4. Suggested order
+------------------
+  1. Window icon + spec/tray path fix (visible immediately, unblocks tray
+     from source).
+  2. Single-instance mutex (stops the duplicate tray icons).
+  3. Always-on-top (smallest of the three extras).
+  4. Change summary.
+  5. Drag-and-drop (most Win32 surface area; do last).
+
+Do not bump APP_VERSION until the patches have been tried in the UI.
+Suggested version when the icon + single-instance land: 2.6 is already
+reserved in ROADMAP.md as a diagnosis session, so these belong in v2.7
+unless Mark folds the two requested items into that pass.
+
+Commit to main only after Mark authorises implementation. This note is
+not that authorisation.
+
+
+5. Files this note does not touch
+---------------------------------
+scriptorium.py, scriptorium.spec, scriptorium_config.json, README.md,
+ROADMAP.md, AGENTS.md, the .ico files, and every other core file remain
+unmodified. 

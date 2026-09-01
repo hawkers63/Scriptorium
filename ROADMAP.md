@@ -4,9 +4,10 @@
 When Mark says "lets get started", that is the cue to open these three files
 before doing anything else.
 
-Current shipped version: **2.5** (multi-tone composition, expanded roles,
-tray/autostart, packaging polish). This roadmap has one release left
-unimplemented: **v2.6**, the dedicated bug-diagnosis session.
+Current shipped version: **2.6** (bug-diagnosis session — icon/tray asset
+fixes, single-instance guard, revision-delta/encoding/transience fixes, S1/S2
+resolved). This roadmap has one release left unimplemented: **v2.7**, two
+small discretionary features (always-on-top, copyable change summary).
 
 Scope through v2.3 was drawn from twelve accumulated review notes
 (`notes/01_Active/notes_001.txt` – `notes_012.txt`), written independently by
@@ -414,45 +415,149 @@ a temp file.
 
 ---
 
-## v2.6 — Bug Diagnosis & Resolution Session
+## v2.6 — Bug Diagnosis & Resolution Session ✅ shipped 2026-09-01
 
-**Goal:** this release is deliberately **not** pre-scoped with a fixed
-feature/fix list, per Mark's designation — it is a dedicated diagnosis
-session against whatever state v2.1–v2.5 actually left the app in,
-including anything those releases introduced.
+**Goal:** this release was deliberately **not** pre-scoped with a fixed
+feature/fix list, per Mark's designation — a dedicated diagnosis session
+against whatever state v2.1–v2.5 actually left the app in. In practice it
+was triggered by two new independent review notes (`notes_014`, Gale;
+`notes_015`, Antigravity) landing the same day v2.5 shipped, both rediscovering
+real defects in v2.5's own new tray/icon code — see "Source notes reference"
+below.
 
-Run this as a structured pass, in order:
+**Step 1 (regression-verify v2.1–v2.5)** was *not* redone item-by-item — those
+checklists were verified the same day with concrete, itemised evidence
+(memory: `project_v24_status`). Instead this session spot-checked only what
+its own changes touched: the packaged `.exe` icon/version metadata and the
+tray minimise/restore path (both rewritten below), plus the new
+single-instance behaviour.
 
-1. **Regression-verify every acceptance checklist item from v2.1–v2.5**
-   against the real app (source run *and* the packaged `.exe` — several
-   confirmed defects in this backlog, e.g. the post-close crash dialog,
-   only manifest in the windowed build, not `python scriptorium.py`).
-2. **Fresh static review pass** — re-read `scriptorium.py` end to end
-   against its then-current line count and cross-check the two deferred,
-   never-confirmed suspicions sitting in the backlog since notes_010/011:
-   - S1: a custom `anthropic_model` not present in `ANTHROPIC_MODELS` may
-     be silently replaced by the first `CTkOptionMenu` value on Settings
-     Save.
-   - S2: `paste_original()`'s `sel.first`/`sel.last` selection-replace may
-     not work on some CustomTkinter/Tk builds and could silently fall back
-     to "always insert at caret".
-   Confirm or dismiss both against the real running GUI — the roadmap has
-   deliberately left them unconfirmed because they need actual Tk
-   interaction, not static reading.
-3. **Live GUI walkthrough** of both editing modes' full lifecycle: Process
-   → Accept/Reject/Undo/Copy/Export, for each of Claude and Ollama
-   backends, deliberately racing the state-consistency scenarios this
-   backlog has repeatedly found (edit-during-processing, Reject/Clear/
-   Import/Undo while busy, Settings Save mid-request).
-4. **Triage and fix** whatever the above turns up, smallest-safe-change
-   style, consistent with every prior note's philosophy in this project.
-5. **Update this roadmap** with a v2.7+ scope once the diagnosis is
-   complete — do not pre-write it now; that defeats the purpose of a
-   dedicated diagnosis session.
+**Step 2 (S1/S2)** — both notes_010/011's suspicions, and notes_015's own
+"Confirmed"/"Addressed" verdicts on them, were re-tested directly against the
+running widget/Tk code rather than taken on faith:
+- **S1 dismissed.** Built the real `SettingsDialog` with a synthetic
+  out-of-list `anthropic_model`, called the real `_save()`, inspected the
+  resulting cfg. The custom value survived untouched end-to-end.
+  `CTkOptionMenu` only calls `variable.set()` from its own dropdown-click
+  callback or an explicit `.set()` — never from construction or `.get()` —
+  and `normalise_config()` never touches `anthropic_model`. notes_015's
+  "Confirmed" verdict (its Finding 4) does not hold up against the running
+  code. No fix applied.
+- **S2 not reproducible on this Tk build.** A throwaway `tk.Text` with a
+  selection, caret deliberately moved away from `sel.first`, then the exact
+  `delete("sel.first","sel.last")` call `paste_original()` uses: the `insert`
+  mark correctly collapsed to the deletion start every time (documented Tk
+  mark semantics). Hardened defensively anyway (explicit `sel.first` capture +
+  `mark_set`) since it's a free two-line change protecting other Tk/platform
+  builds — not claimed as a bug fix.
+
+**Step 3/4 (triage and fix)** — confirmed-real bugs fixed, all hand-tested
+against the live running code (not just read), each in its own isolated
+process per this project's CTk multi-instance-interference gotcha:
+
+1. **Icon assets desynced from disk** (both notes, HIGH). Mark had renamed
+   `icon/icon-96.ico`/`icon-96.png` to `icon/Scriptorium-256.ico` +
+   `Scriptorium-96.ico` outside git; `_minimise_to_tray()` and
+   `scriptorium.spec` still pointed at the old filenames, so tray-minimise
+   from source threw `OSError` and silently aborted. Fixed: new
+   `_apply_window_icon()` sets the real title-bar/taskbar icon (verified via
+   `WM_GETICON`/`GetClassLongPtrW` returning non-null handles, both from
+   source and on the rebuilt packaged `.exe`); `_minimise_to_tray()` now tries
+   `Scriptorium-96.ico` then `-256.ico`; `scriptorium.spec` updated to match
+   and rebuilt clean (`ProductVersion 2.6.0.0`, icon resource present).
+2. **No single-instance guard** (both notes, MODERATE). Added the
+   `ctypes`-based named mutex (`Local\ScriptoriumSingleInstance`) +
+   restore-event (`Local\ScriptoriumRestore`) design both notes proposed.
+   **Found a real bug while testing this, not in either note**: the restore
+   listener's daemon thread can receive the event before `Scriptorium.__init__`
+   has actually reached `mainloop()`; `_post_to_ui`'s unguarded
+   `winfo_exists()` then raises `RuntimeError: main thread is not in main
+   loop` (not `TclError`) — uncaught, which killed the daemon thread
+   permanently, silently disabling the restore mechanism for the rest of that
+   process's life. Fixed by widening `_post_to_ui`'s except clause to include
+   `RuntimeError`, and wrapping `_watch()`'s per-iteration body so no
+   transient error can kill the listener thread. Verified with two genuinely
+   separate processes: a second launch while the first is up correctly
+   detects the mutex, signals, and exits without constructing a `Scriptorium`;
+   the first instance restores correctly once its signal arrives after
+   `mainloop()` is running, and — critically — no longer crashes if the
+   signal arrives during the first instance's own startup window.
+3. **Revision word-count delta computed against the live buffer**
+   (notes_015 Finding 8). `_refresh_status()` now diffs against
+   `self._result_source` (the text the revision was actually generated from,
+   already used correctly by `_revision_is_stale()`) instead of the
+   possibly-since-edited `original_box` contents. Verified: process a source,
+   edit Original afterwards, confirm the delta still reflects the original
+   request.
+4. **Import encoding fallback** (notes_015 Finding 6). `import_file()`'s
+   plain-text branch now tries `utf-8-sig` first (handles both BOM and plain
+   UTF-8, stripping the BOM either way) and falls back to `cp1252` instead of
+   retrying `utf-8-sig` after `utf-8` (which failed identically). Verified
+   against a real BOM-prefixed UTF-8 file and a real CP1252 file with a curly
+   apostrophe — both load clean text.
+5. **`SettingsDialog` missing `transient()`** (notes_015 Finding 7). Added
+   `self.transient(master)`; verified the dialog's `wm transient` now points
+   at the main window.
+
+### Acceptance checklist
+- [x] Source run shows `Scriptorium-256.ico` in the title bar/taskbar (Win32
+      `WM_GETICON`/class icon handles all non-null; verified live).
+- [x] Minimise to tray from source succeeds (no `OSError`), real `pystray.Icon`
+      created, window withdrawn; restore tears the icon down and un-withdraws.
+- [x] Packaged `.exe` rebuilt from the updated spec: `FileDescription`/
+      `ProductVersion`/`CompanyName` correct (`2.6.0.0`), icon resource
+      extracts successfully, real window (found by title, not
+      `Get-Process`'s unreliable `MainWindowHandle` — same automation gap as
+      documented for this Tk app) has a non-null icon handle.
+- [x] Second launch while one is running: existing instance restores via the
+      real named-event signal, second process exits without constructing a
+      `Scriptorium`, no second tray icon. The early-startup race found during
+      testing (see above) no longer crashes the listener thread.
+- [x] Process text, edit Original before acting on the revision: status bar's
+      delta still reflects the original source text, not the edited buffer.
+- [x] Import a UTF-8-BOM `.txt` and a CP1252 `.txt`: both load clean text.
+- [x] Settings dialog's `wm transient` points at the main window.
+- [x] S1 and S2 resolved (dismissed, with evidence, above) — no longer open
+      suspicions.
+
+**Incident during this session**: a stray `Scriptorium.exe` (both bootloader
+and real process) was already running before the packaged-`.exe` rebuild step
+and held a lock on `dist\`. It predated this session and its provenance was
+unknown, so Mark was asked before it was closed (confirmed no unsaved work at
+risk, since nothing in this app persists except via Export) — closed cleanly,
+then the rebuild proceeded.
 
 ---
 
-## Deferred / explicitly out of scope for v2.1–v2.6
+## v2.7 — Always-on-top & Copyable Change Summary
+
+**Goal:** the two small, genuinely discretionary features both notes_014 and
+notes_015 independently converged on. Deliberately excludes notes_014's
+drag-and-drop proposal (see "Deferred" below) and everything else in either
+note, which v2.6 already covered as bug fixes.
+
+1. **Always-on-top toggle** (both notes). `DEFAULT_CONFIG["always_on_top"]`;
+   a `SettingsDialog` checkbox under "Startup & window behaviour"; applied via
+   `self.attributes("-topmost", ...)` in `__init__` and `_after_settings()`.
+   Off by default; does not interact with tray minimise (a topmost window
+   that's withdrawn stays withdrawn).
+2. **Copyable change summary** (both notes). `summarise_diff()` reuses the
+   `_tokenise`/`difflib.SequenceMatcher` machinery `render_diff()` already
+   pays for — a one-line British-English word-level inserted/deleted/replaced
+   summary. "Copy summary" button beside "Copy revision"; `Ctrl+Shift+M`
+   shortcut.
+
+### Acceptance checklist
+- [ ] Toggle "Keep Scriptorium on top" in Settings; window pins/releases
+      immediately; setting persists across restart; a topmost window that's
+      minimised to tray still withdraws normally.
+- [ ] Process a real edit; "Copy summary" and Ctrl+Shift+M both copy a
+      correct one-line summary; an unprocessed pane shows a
+      "nothing to summarise" status instead of copying garbage.
+
+---
+
+## Deferred / explicitly out of scope for v2.1–v2.7
 
 - Migrating the API key to Windows Credential Manager (`keyring`) — real
   architectural change, correctly flagged as out-of-scope by every note
@@ -475,6 +580,16 @@ Run this as a structured pass, in order:
   Mark switches to a non identity-linked key instead (no header needed
   either way). Pre-existing, unrelated to v2.4 — would affect a v2.3
   single-tone request identically.
+- **Explorer drag-and-drop onto the Original pane** (notes_014 §3.1,
+  notes_015 Feature 3) — not implemented. Both notes' own snippets stop at
+  `DragAcceptFiles(hwnd, True)` and explicitly defer the actual
+  `WM_DROPFILES` handling to "the usual follow-up". `DragAcceptFiles` alone
+  does not deliver drops to a Tk app — without a `WndProc` subclass to
+  intercept `WM_DROPFILES` and read the dropped path via `DragQueryFileW`,
+  it would be dead code that looks like a feature but does nothing when a
+  file is actually dropped. Revisit as its own properly-scoped session
+  (real Win32 message-loop subclassing, needs hand-testing) rather than
+  guessing at it inside v2.7.
 
 ---
 
@@ -488,10 +603,17 @@ Run this as a structured pass, in order:
 | notes_006–007 | 27 Aug | Grok | v1.5 | Closed by v1.7–v2.0 |
 | notes_008 | 28 Aug | Mark & Grok | v1.7 | Partially closed (tray deferred → v2.5) |
 | notes_009 | 29 Aug | ChatGPT / Codex | v1.9 | Partially closed by v2.0; remainder → v2.1–v2.3 |
-| notes_010 | 29 Aug | Grok | v2.0 | **Open — basis for v2.1–v2.3** |
-| notes_011 | 31 Aug | ChatGPT / Codex | v2.0 | **Open — basis for v2.1–v2.3, v2.5** |
-| notes_012 | 31 Aug | Lynne | v2.0 (delta) | **Open — basis for v2.2–v2.3, v2.5** |
-| notes_013 | 31 Aug | Mark / Codex | v2.3 | **Open — basis for v2.4** |
+| notes_010 | 29 Aug | Grok | v2.0 | Closed by v2.1–v2.3; S1/S2 suspicions resolved (dismissed) in v2.6 |
+| notes_011 | 31 Aug | ChatGPT / Codex | v2.0 | Closed by v2.1–v2.3, v2.5; S1/S2 resolved in v2.6 |
+| notes_012 | 31 Aug | Lynne | v2.0 (delta) | Closed by v2.2–v2.3, v2.5 |
+| notes_013 | 31 Aug | Mark / Codex | v2.3 | Closed by v2.4 |
+| notes_014 | 1 Sep | Gale | v2.5 (delta) | Closed by v2.6 (icon/single-instance) and v2.7 (always-on-top, change summary); drag-and-drop deferred (see "Deferred") |
+| notes_015 | 1 Sep | Antigravity | v2.5 (delta) | Closed by v2.6; its S1 "Confirmed" and S2 "Addressed" verdicts did not hold up against live re-testing — see v2.6 write-up |
+
+A duplicate of notes_014's content also landed at
+`notes/00_Drafts/scriptorium_notes_001.txt` under `AGENTS.md`'s newer
+draft-path convention — same author/date, not reprocessed separately, left
+in place rather than deleted unasked.
 
 All confirmed still-open as of 2026-08-31 by direct inspection of
 `scriptorium.py` (v2.0, 1,297 lines): no `normalise_config`, no
