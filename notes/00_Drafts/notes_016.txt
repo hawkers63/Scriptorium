@@ -1,0 +1,1780 @@
+Scriptorium v2.8 enhancement architecture — notes_016
+Review date: 1 September 2026
+Scope: read-only design against C:\Scriptorium\scriptorium.py (2,544 lines)
+
+===============================================================================
+1. EXECUTIVE SUMMARY
+===============================================================================
+
+Scriptorium already has the right foundations for these enhancements: atomic JSON
+configuration writes, canonical Mode/Strength/Role/Tone tables, a three-tone
+validation ceiling, worker-thread backend calls, reusable difflib tokenisation,
+and optional Word I/O behind a feature gate. The proposals below extend those
+foundations rather than introducing a second framework or breaking the single-file
+desktop identity.
+
+The recommended v2.9 enhancement slice is:
+
+1. Complete native Explorer drag-and-drop onto Original. The earlier proposal in
+   notes_015 only called DragAcceptFiles(); that registers interest but does not
+   retrieve a path. The complete implementation must also subclass the Tk top-level
+   window procedure, process WM_DROPFILES, query every Unicode path, call
+   DragFinish(), and restore the original procedure before Tk destroys the window.
+
+2. Add persisted user presets as a validated "user_presets" object inside the
+   existing scriptorium_config.json. Built-in presets remain immutable. A compact
+   manager saves the current Mode/Strength/Role/Tone combination or deletes a user
+   preset; applying a preset still performs a one-off copy into independently
+   editable toolbar controls.
+
+3. Expose the already-supported third tone and make the prompt hierarchy explicit:
+   dominant, supporting, then light accent. Pairwise conflict validation remains the
+   single boundary, with Neutral/Persuasive added to the two existing genuinely
+   contradictory pairs. If any residual tension remains, meaning preservation wins
+   and the lowest-priority tone is omitted.
+
+4. Add export and clipboard utilities without changing the accepted revision model:
+   a fenced unified Markdown diff, an HTML clipboard format with a plain-text
+   fallback, and consistent word/character/reading-time metrics. Rich diff copying
+   is useful in Word and Outlook while ordinary Ctrl+C remains untouched.
+
+5. Put a small, shared urllib transport seam beneath Claude and Ollama. It retries
+   only transient connection failures and selected HTTP statuses with bounded
+   exponential backoff, honours Retry-After, reports progress through the existing
+   Tk-safe callback path, and leaves response parsing backend-specific. This seam is
+   also the correct preparation point for later SSE/NDJSON streaming.
+
+UX rationale
+------------
+
+The five changes remove repeated friction: a document can arrive directly from
+Explorer; recurring editorial combinations become one click; three carefully
+ordered tones cover more nuanced briefs; revisions can leave the application in a
+reviewable format; and short-lived service congestion no longer destroys a user's
+workflow. None of them changes Scriptorium's central promise: one original, one
+suggested revision, explicit review, no silent acceptance.
+
+Recommended delivery order
+--------------------------
+
+Phase A: shared file loader plus drag-and-drop lifecycle.
+Phase B: preset schema normalisation, persistence, then manager UI.
+Phase C: three-tone UI and prompt calibration tests.
+Phase D: metrics, Markdown diff and rich clipboard helpers.
+Phase E: retry transport, progress callback and fault-injection tests.
+
+The phases should be separate commits. Tone/prompt calibration should not be mixed
+with UI polish or transport changes.
+
+
+===============================================================================
+2. DETAILED ARCHITECTURAL PROPOSALS
+===============================================================================
+
+-------------------------------------------------------------------------------
+2.1 Explorer drag-and-drop integration
+-------------------------------------------------------------------------------
+
+Design
+~~~~~~
+
+Register the realised Tk top-level wrapper returned by wm_frame(). Subclass that
+same HWND with SetWindowLongPtrW(GWLP_WNDPROC), retain both the Python callback and
+the old procedure on self, and forward every unhandled message through
+CallWindowProcW. On WM_DROPFILES:
+
+* use DragQueryPoint() and ClientToScreen() to hit-test the actual Tk widget under
+  the pointer;
+* accept the operation only when that widget is self.original_box or one of its
+  CustomTkinter/Tk descendants;
+* call DragQueryFileW(HDROP, 0xFFFFFFFF, ...) for the count, then query Unicode
+  paths using correctly sized buffers;
+* copy paths before returning from the window procedure, always call DragFinish()
+  in a finally block, then schedule ordinary Tk work with after_idle();
+* accept one file at a time and only .txt, .md or .docx; reject directories,
+  shortcuts and unsupported suffixes;
+* route both file-dialogue import and dropped files through one _load_file_path()
+  method, preserving the current undo, stale-result invalidation and encoding
+  behaviour;
+* call DragAcceptFiles(hwnd, False), restore the old WNDPROC and release Python
+  callback references before self.destroy().
+
+The callback must never be a local temporary: Windows retains its address. If
+Python garbage-collects it while the subclass is live, the next window message can
+crash the process. Storing _drop_wndproc on the application instance is therefore a
+correctness requirement, not cosmetic state.
+
+Performance and safety
+~~~~~~~~~~~~~~~~~~~~~~
+
+WM_DROPFILES handling performs only path extraction and hit-testing. File reading
+runs after the callback returns, avoiding re-entrant Tk work inside a Win32 window
+procedure. Existing text files are read as UTF-8 with BOM handling and CP1252
+fallback; .docx remains feature-gated through read_docx(). A later hardening pass
+may reject exceptionally large files before reading them, but that policy should
+apply equally to Import and drag-and-drop.
+
+Do not enable ChangeWindowMessageFilterEx by default. Dragging from unelevated
+Explorer into an elevated Scriptorium instance is blocked by Windows integrity
+isolation; Scriptorium should normally run unelevated rather than widening the
+accepted cross-integrity message surface.
+
+State impact
+~~~~~~~~~~~~
+
+New transient instance fields only:
+
+    self._drop_hwnd
+    self._drop_old_wndproc
+    self._drop_wndproc
+
+No configuration key is needed. Failure to install the hook is non-fatal and is
+reported in the status bar; Import continues to work.
+
+
+-------------------------------------------------------------------------------
+2.2 User preset management and persistence
+-------------------------------------------------------------------------------
+
+Configuration schema
+~~~~~~~~~~~~~~~~~~~~
+
+Add one backwards-compatible top-level key:
+
+    "user_presets": {
+      "Board update": {
+        "mode": "Clarify",
+        "strength": "Standard",
+        "role": "Project Manager",
+        "tones": ["Concise", "Confident", "Diplomatic"]
+      }
+    }
+
+Missing, malformed or non-object values normalise to {}. Every preset is rebuilt
+from canonical MODES, STRENGTHS, ROLES and validate_tones(); unknown entries and
+conflicting tone combinations are dropped. Names are stripped, limited to 48
+characters, capped at 30 user presets, and compared case-insensitively. The names
+"(none)", "Manage presets..." and all built-in preset names are reserved.
+
+Built-in WRITING_PRESETS remains code-owned. User presets never overwrite it in
+memory or on disk. A combined view is created only when populating or resolving the
+toolbar menu. This preserves reliable defaults while allowing personal additions.
+
+Manager interaction
+~~~~~~~~~~~~~~~~~~~
+
+The existing Preset option menu gains a final "Manage presets..." item. Choosing it
+opens a small modal dialogue which:
+
+* shows the current Mode/Strength/Role/Tone combination;
+* saves that current combination under a supplied name;
+* asks before replacing an existing user preset;
+* lists only user presets for deletion, with a confirmation;
+* keeps the dialogue open and leaves self.cfg unchanged if atomic persistence fails.
+
+After a successful save/delete, configure(values=...) refreshes the existing option
+menu; no toolbar rebuild is required. Applying a preset remains deliberately
+non-sticky: changing a control afterwards does not mutate the stored preset.
+
+Persistence behaviour
+~~~~~~~~~~~~~~~~~~~~~
+
+Use a candidate copy, normalise it, call save_config(candidate, force=True), then
+replace self.cfg only after success. This follows SettingsDialog._save() and avoids
+an in-memory/disk split. User-initiated recovery from malformed JSON is explicit,
+which is why force=True is appropriate here.
+
+
+-------------------------------------------------------------------------------
+2.3 Three-tone pipeline and prompt evolution
+-------------------------------------------------------------------------------
+
+Validation
+~~~~~~~~~~
+
+MAX_SELECTED_TONES is already 3; TONE_PICKER_LIMIT is the only active UI cap. Set
+the picker limit equal to MAX_SELECTED_TONES and retain validate_tones() as the sole
+normalisation boundary. Pairwise validation is sufficient because the conflicts
+represent contradictory axes, not ordering preferences:
+
+* Formal versus Casual (register);
+* Concise versus Detailed (amount of retained detail);
+* Neutral versus Persuasive (impartiality versus advocacy).
+
+Friendly/Formal, Direct/Diplomatic and Confident/Empathetic should remain legal:
+they can be blended through hierarchy and are commonly useful editorial briefs.
+Blocking them would discard useful combinations rather than resolve true conflict.
+
+Prompt hierarchy
+~~~~~~~~~~~~~~~~
+
+For three tones, describe the first as dominant, the second as supporting and the
+third as a light accent. Add an explicit precedence ladder:
+
+    factual fidelity and meaning
+        > mode restrictions
+        > dominant tone
+        > supporting tone
+        > accent tone
+
+The lowest-priority tone is weakened or omitted if it cannot be applied without
+changing content. Reinforce preservation of modality, attribution, negation,
+quantifiers, comparisons and uncertainty. These are the common paths by which a
+"confident" or "persuasive" rewrite accidentally changes a claim without inventing
+an obviously new sentence.
+
+Calibration matrix
+~~~~~~~~~~~~~~~~~~
+
+Before release, run a fixed corpus through both backends with:
+
+* Formal + Concise + Diplomatic on a tense client email;
+* Confident + Direct + Friendly on a project update containing uncertainty;
+* Neutral + Detailed + Constructive on a technical incident summary;
+* each prohibited pair, both alone and embedded in a three-item list;
+* names, numbers, quotations, negations, hedges, ranges and placeholders.
+
+Pass criteria: every source proposition remains semantically equivalent; no new
+recommendation, attribution, adjective, cause or certainty appears; all protected
+tokens survive; the dominant tone is recognisable; the accent is allowed to
+disappear when it would compromise fidelity.
+
+
+-------------------------------------------------------------------------------
+2.4 Export formatting, rich clipboard and metrics
+-------------------------------------------------------------------------------
+
+Markdown diff
+~~~~~~~~~~~~~
+
+Keep Export... as the clean-revision path. Add Export diff... as an explicitly
+review-oriented operation. It creates a .md document containing a heading and a
+unified diff inside a dynamically sized backtick fence. Dynamic fencing prevents a
+source line containing ``` from terminating the block. The diff uses the exact
+_result_source snapshot, not the possibly edited live Original pane.
+
+Rich clipboard
+~~~~~~~~~~~~~~
+
+Add Copy rich diff on the second action row. Its plain-text clipboard representation
+is always the clean revised text; its registered Windows "HTML Format"
+representation displays removed spans as red strikethrough and additions as green
+bold text. Plain-text editors therefore receive safe clean prose, while Word,
+Outlook and compatible editors can receive review formatting.
+
+The CF_HTML header offsets are byte offsets, not character offsets. Build the
+payload as UTF-8, use fixed-width decimal fields, include literal
+<!--StartFragment--> markers, allocate moveable global memory, and transfer
+ownership to Windows only after SetClipboardData succeeds. Publish both HTML Format
+and CF_UNICODETEXT in the same OpenClipboard/CloseClipboard transaction.
+
+Metrics
+~~~~~~~
+
+Centralise the existing split()-based counts in text_metrics(). Use a conservative
+225 words per minute, show "under 1 minute" for short non-empty passages, and expose
+characters both with and without whitespace to future UI consumers. The status bar
+should stay compact:
+
+    312 words, 1,982 characters, about 2 minutes to read
+
+The revision word delta continues to compare against _result_source.
+
+
+-------------------------------------------------------------------------------
+2.5 Backend resilience and streaming preparation
+-------------------------------------------------------------------------------
+
+Retry policy
+~~~~~~~~~~~~
+
+Introduce _request_json_with_retries() beneath call_anthropic() and call_ollama().
+Use three total attempts (two retries), a 0.75-second exponential base, up to 250 ms
+of jitter, a 10-second generated-delay ceiling, and a 30-second Retry-After ceiling.
+Run all sleeps on the existing worker thread; the Tk thread remains responsive.
+
+Retry only:
+
+* urllib URLError, TimeoutError, ConnectionError and http.client.HTTPException;
+* HTTP 429, 500, 502, 503, 504 and 529 for Claude;
+* HTTP 429, 500, 502, 503 and 504 for Ollama.
+
+Do not retry authentication, permission, malformed request, missing model, invalid
+JSON or response-schema errors. HTTPError must remain before URLError because it is
+a subclass. Honour Retry-After when present. Include Anthropic's request-id in the
+terminal error so support cases are traceable.
+
+There is an unavoidable caveat with retrying POST after a dropped connection: the
+service may have processed the first attempt even though Scriptorium did not receive
+its response. Keep retries bounded and mention possible duplicate cloud usage in
+developer documentation; do not claim exactly-once delivery.
+
+Progress and future streaming
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Add an optional on_retry callback through run_backend(). The worker posts messages
+through _post_to_ui(), and _on_retry_progress() checks request_id before touching
+the status bar. A rejected or superseded request can continue sleeping harmlessly,
+but its updates and result are ignored by the existing generation counter.
+
+The helper owns transport, retry and byte decoding; backend functions still own
+payload construction and response interpretation. A later streaming implementation
+can replace only the response reader:
+
+* Claude: parse server-sent event frames and accumulate content-block deltas;
+* Ollama: parse application/x-ndjson objects and detect an in-stream error object.
+
+Do not stream partial model text into revised_box until the final JSON object has
+been validated. Doing so would expose invalid, incomplete or un-restored placeholder
+content and would complicate stale-result safety.
+
+
+===============================================================================
+3. MODULAR CODE SNIPPETS
+===============================================================================
+
+These are proposed drop-in implementations, not edits already applied. Line numbers
+refer to the current v2.8 file and will move once earlier snippets are integrated.
+
+-------------------------------------------------------------------------------
+3.1 Imports required by the combined proposal
+-------------------------------------------------------------------------------
+
+Insert with the standard-library imports at scriptorium.py lines 42-55. Keep the
+third-party CustomTkinter import separated below them.
+
+```python
+import html
+import http.client
+import time
+from ctypes import wintypes
+from datetime import timezone
+from email.utils import parsedate_to_datetime
+```
+
+
+-------------------------------------------------------------------------------
+3.2 Native WM_DROPFILES bridge
+-------------------------------------------------------------------------------
+
+Insert this module-level block below set_autostart() (after current line 222) and
+before model/backend constants.
+
+```python
+WM_DROPFILES = 0x0233
+GWLP_WNDPROC = -4
+DROP_FILE_COUNT = 0xFFFFFFFF
+
+# LRESULT is pointer-sized. ctypes.wintypes does not expose it consistently,
+# so c_ssize_t is the correct signed representation on 32-bit and 64-bit Python.
+WNDPROC = ctypes.WINFUNCTYPE(
+    ctypes.c_ssize_t,
+    wintypes.HWND,
+    wintypes.UINT,
+    wintypes.WPARAM,
+    wintypes.LPARAM,
+)
+
+_user32 = ctypes.WinDLL("user32", use_last_error=True)
+_shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+
+# The exported function name differs on 32-bit Windows, where the C macro
+# SetWindowLongPtr maps to SetWindowLong.
+if ctypes.sizeof(ctypes.c_void_p) == 8:
+    _set_window_proc = _user32.SetWindowLongPtrW
+else:
+    _set_window_proc = _user32.SetWindowLongW
+
+_set_window_proc.argtypes = (
+    wintypes.HWND,
+    ctypes.c_int,
+    ctypes.c_void_p,
+)
+_set_window_proc.restype = ctypes.c_void_p
+
+_call_window_proc = _user32.CallWindowProcW
+_call_window_proc.argtypes = (
+    ctypes.c_void_p,
+    wintypes.HWND,
+    wintypes.UINT,
+    wintypes.WPARAM,
+    wintypes.LPARAM,
+)
+_call_window_proc.restype = ctypes.c_ssize_t
+
+_user32.ClientToScreen.argtypes = (
+    wintypes.HWND,
+    ctypes.POINTER(wintypes.POINT),
+)
+_user32.ClientToScreen.restype = wintypes.BOOL
+
+_shell32.DragAcceptFiles.argtypes = (wintypes.HWND, wintypes.BOOL)
+_shell32.DragAcceptFiles.restype = None
+_shell32.DragQueryPoint.argtypes = (
+    wintypes.HANDLE,
+    ctypes.POINTER(wintypes.POINT),
+)
+_shell32.DragQueryPoint.restype = wintypes.BOOL
+_shell32.DragQueryFileW.argtypes = (
+    wintypes.HANDLE,
+    wintypes.UINT,
+    wintypes.LPWSTR,
+    wintypes.UINT,
+)
+_shell32.DragQueryFileW.restype = wintypes.UINT
+_shell32.DragFinish.argtypes = (wintypes.HANDLE,)
+_shell32.DragFinish.restype = None
+```
+
+In Scriptorium.__init__(), initialise the retained references immediately after
+self.tray_icon (current line 1539), then schedule installation after the widgets
+exist (after _build_statusbar(), current line 1555).
+
+```python
+        self._drop_hwnd = None
+        self._drop_old_wndproc = None
+        self._drop_wndproc = None
+
+        # wm_frame() is reliable only after Tk has realised the top-level.
+        self.after_idle(self._enable_file_drops)
+```
+
+Insert the following Scriptorium methods immediately before import_file() (current
+line 2308).
+
+```python
+    def _enable_file_drops(self):
+        """Accept Explorer files and intercept WM_DROPFILES safely."""
+        if self._drop_wndproc is not None:
+            return
+
+        try:
+            self.update_idletasks()
+            hwnd = int(str(self.wm_frame()), 0)
+        except (TypeError, ValueError, tk.TclError) as exc:
+            self._refresh_status(f"drag-and-drop unavailable: {exc}")
+            return
+
+        @WNDPROC
+        def window_proc(message_hwnd, message, wparam, lparam):
+            if message == WM_DROPFILES:
+                try:
+                    self._capture_file_drop(message_hwnd, wparam)
+                except Exception as exc:  # Never unwind through a Win32 callback.
+                    self.after_idle(self._show_drop_error, str(exc))
+                return 0
+            return _call_window_proc(
+                self._drop_old_wndproc,
+                message_hwnd,
+                message,
+                wparam,
+                lparam,
+            )
+
+        # Store the Python callback before exposing its address to Windows.
+        self._drop_hwnd = hwnd
+        self._drop_wndproc = window_proc
+        ctypes.set_last_error(0)
+        old_proc = _set_window_proc(
+            hwnd,
+            GWLP_WNDPROC,
+            ctypes.cast(window_proc, ctypes.c_void_p),
+        )
+        if not old_proc and ctypes.get_last_error():
+            error = ctypes.WinError(ctypes.get_last_error())
+            self._drop_hwnd = None
+            self._drop_wndproc = None
+            self._refresh_status(f"drag-and-drop unavailable: {error}")
+            return
+
+        self._drop_old_wndproc = old_proc
+        _shell32.DragAcceptFiles(hwnd, True)
+
+    def _capture_file_drop(self, hwnd, drop_handle):
+        """Copy paths out of HDROP, then defer all Tk/file work."""
+        paths = []
+        over_original = False
+        point = wintypes.POINT()
+        try:
+            if _shell32.DragQueryPoint(drop_handle, ctypes.byref(point)):
+                if _user32.ClientToScreen(hwnd, ctypes.byref(point)):
+                    over_original = self._point_is_over_original(
+                        point.x,
+                        point.y,
+                    )
+
+            if over_original:
+                count = _shell32.DragQueryFileW(
+                    drop_handle,
+                    DROP_FILE_COUNT,
+                    None,
+                    0,
+                )
+                for index in range(count):
+                    length = _shell32.DragQueryFileW(
+                        drop_handle,
+                        index,
+                        None,
+                        0,
+                    )
+                    buffer = ctypes.create_unicode_buffer(length + 1)
+                    _shell32.DragQueryFileW(
+                        drop_handle,
+                        index,
+                        buffer,
+                        len(buffer),
+                    )
+                    paths.append(buffer.value)
+        finally:
+            # Windows owns HDROP; every processed message must release it.
+            _shell32.DragFinish(drop_handle)
+
+        if over_original:
+            self.after_idle(self._handle_dropped_paths, paths)
+        else:
+            self.after_idle(
+                self._refresh_status,
+                "drop files onto the Original pane",
+            )
+
+    def _show_drop_error(self, detail):
+        """Report a native drop failure after the window procedure returns."""
+        messagebox.showerror(
+            "Import failed",
+            f"Could not receive the dropped file.\n\n{detail}",
+            parent=self,
+        )
+
+    def _point_is_over_original(self, root_x, root_y):
+        """Return True for Original or any Tk/CustomTkinter child inside it."""
+        try:
+            widget = self.winfo_containing(root_x, root_y)
+        except tk.TclError:
+            return False
+
+        while widget is not None:
+            if widget is self.original_box:
+                return True
+            widget = getattr(widget, "master", None)
+        return False
+
+    def _handle_dropped_paths(self, paths):
+        """Validate a completed Explorer drop on Tk's event thread."""
+        if not paths:
+            self._refresh_status("no file was supplied")
+            return
+        if len(paths) != 1:
+            messagebox.showinfo(
+                "Drop one file",
+                "Scriptorium opens one document at a time. Drop a single "
+                ".txt, .md or .docx file onto Original.",
+                parent=self,
+            )
+            return
+        self._load_file_path(paths[0])
+
+    def _disable_file_drops(self):
+        """Remove the subclass before Tk destroys the native window."""
+        if self._drop_hwnd is None or self._drop_old_wndproc is None:
+            return
+
+        _shell32.DragAcceptFiles(self._drop_hwnd, False)
+        _set_window_proc(
+            self._drop_hwnd,
+            GWLP_WNDPROC,
+            self._drop_old_wndproc,
+        )
+        self._drop_hwnd = None
+        self._drop_old_wndproc = None
+        self._drop_wndproc = None
+```
+
+Replace import_file() at current lines 2308-2352 with the shared loader below.
+
+```python
+    def _read_document_path(self, path):
+        """Return supported document text without changing application state."""
+        suffix = os.path.splitext(path)[1].lower()
+        if suffix not in (".txt", ".md", ".docx"):
+            raise ValueError("Choose a .txt, .md or .docx file.")
+        if not os.path.isfile(path):
+            raise OSError("The dropped item is not a readable file.")
+
+        if suffix == ".docx":
+            return read_docx(path)
+
+        try:
+            with open(path, "r", encoding="utf-8-sig") as file_handle:
+                return file_handle.read()
+        except UnicodeDecodeError:
+            # CP1252 covers common Windows "ANSI" documents.
+            with open(path, "r", encoding="cp1252") as file_handle:
+                return file_handle.read()
+
+    def _load_file_path(self, path):
+        """Load one path into Original through the normal undo/state boundary."""
+        try:
+            content = self._read_document_path(path)
+        except ImportError:
+            messagebox.showerror(
+                "Import failed",
+                "Reading Word files needs the python-docx package.\n\n"
+                "Install it with:  pip install python-docx",
+                parent=self,
+            )
+            return
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            messagebox.showerror("Import failed", str(exc), parent=self)
+            return
+        except Exception as exc:  # Corrupt or locked .docx.
+            messagebox.showerror(
+                "Import failed",
+                f"Could not read the Word file.\n\n{exc}",
+                parent=self,
+            )
+            return
+
+        self._remember_for_undo(self.original_box.get("1.0", "end-1c"))
+        self.reject()
+        self.original_box.delete("1.0", "end")
+        self.original_box.insert("1.0", content)
+        self._refresh_status(f"imported {os.path.basename(path)}")
+
+    def import_file(self):
+        """Choose and load one supported document."""
+        path = filedialog.askopenfilename(
+            title="Import text",
+            filetypes=[
+                ("Text, Markdown and Word", "*.txt *.md *.docx"),
+                ("All files", "*.*"),
+            ],
+        )
+        if path:
+            self._load_file_path(path)
+```
+
+In _quit_app(), immediately before self.destroy() (current line 2480), add:
+
+```python
+        self._disable_file_drops()
+```
+
+
+-------------------------------------------------------------------------------
+3.3 Preset schema, persistence and manager
+-------------------------------------------------------------------------------
+
+Insert below WRITING_PRESETS (after current line 460).
+
+```python
+PRESET_MANAGER_LABEL = "Manage presets..."
+MAX_USER_PRESETS = 30
+MAX_PRESET_NAME_LENGTH = 48
+
+
+def normalise_preset(preset):
+    """Return one canonical preset, or None for malformed input."""
+    if not isinstance(preset, dict):
+        return None
+
+    mode = preset.get("mode")
+    strength = preset.get("strength")
+    role = preset.get("role")
+    tones = preset.get("tones", [])
+    if mode not in MODES or strength not in STRENGTHS or role not in ROLES:
+        return None
+    if isinstance(tones, str):
+        tones = [tones]
+    if not isinstance(tones, list):
+        return None
+
+    try:
+        tones = validate_tones(tones)
+    except ValueError:
+        return None
+    return {
+        "mode": mode,
+        "strength": strength,
+        "role": role,
+        "tones": tones,
+    }
+
+
+def normalise_user_presets(value):
+    """Validate stored user presets and protect built-in names."""
+    if not isinstance(value, dict):
+        return {}
+
+    reserved = {name.casefold() for name in WRITING_PRESETS}
+    reserved.add(PRESET_MANAGER_LABEL.casefold())
+    clean = {}
+    used_names = set(reserved)
+    for raw_name, raw_preset in value.items():
+        if len(clean) >= MAX_USER_PRESETS:
+            break
+        if not isinstance(raw_name, str):
+            continue
+
+        name = raw_name.strip()
+        folded = name.casefold()
+        if (
+            not name
+            or len(name) > MAX_PRESET_NAME_LENGTH
+            or folded in used_names
+        ):
+            continue
+
+        preset = normalise_preset(raw_preset)
+        if preset is None:
+            continue
+        clean[name] = preset
+        used_names.add(folded)
+    return clean
+
+
+def preset_menu_names(cfg):
+    """Return stable built-in/user preset names plus the manager command."""
+    built_in = list(WRITING_PRESETS)
+    user_names = list(cfg.get("user_presets", {}))
+    return built_in + user_names + [PRESET_MANAGER_LABEL]
+
+
+def resolve_preset(cfg, name):
+    """Resolve built-in presets first, then the validated user collection."""
+    if name in WRITING_PRESETS:
+        return WRITING_PRESETS[name]
+    return cfg.get("user_presets", {}).get(name)
+```
+
+Inside DEFAULT_CONFIG (current lines 463-481), add:
+
+```python
+    "user_presets": {},              # validated personal toolbar combinations
+```
+
+At the end of normalise_config(), immediately before return clean (current line
+556), add:
+
+```python
+    clean["user_presets"] = normalise_user_presets(
+        clean.get("user_presets", {})
+    )
+```
+
+Insert this dialogue after TonePickerDialog and before SettingsDialog (current line
+1307). It deliberately saves the current toolbar state rather than duplicating four
+editors inside the dialogue.
+
+```python
+class PresetManagerDialog(ctk.CTkToplevel):
+    """Save the current toolbar combination or delete a user preset."""
+
+    def __init__(self, master, summary, user_names, on_save, on_delete):
+        super().__init__(master)
+        self.on_save = on_save
+        self.on_delete = on_delete
+
+        self.title("Manage presets")
+        self.geometry("460x310")
+        self.resizable(False, False)
+        self.transient(master)
+        self.grab_set()
+
+        ctk.CTkLabel(
+            self,
+            text="Save the current writing controls",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).pack(anchor="w", padx=18, pady=(18, 4))
+        ctk.CTkLabel(
+            self,
+            text=summary,
+            wraplength=420,
+            justify="left",
+            text_color="gray65",
+        ).pack(anchor="w", padx=18, pady=(0, 10))
+
+        self.name_entry = ctk.CTkEntry(
+            self,
+            placeholder_text="Preset name",
+            width=420,
+        )
+        self.name_entry.pack(padx=18, pady=(0, 8))
+        ctk.CTkButton(
+            self,
+            text="Save current controls",
+            command=self._save,
+        ).pack(fill="x", padx=18)
+
+        ctk.CTkLabel(
+            self,
+            text="Delete a user preset",
+            font=ctk.CTkFont(weight="bold"),
+        ).pack(anchor="w", padx=18, pady=(18, 4))
+        choices = user_names or ["(no user presets)"]
+        self.delete_var = ctk.StringVar(value=choices[0])
+        self.delete_menu = ctk.CTkOptionMenu(
+            self,
+            values=choices,
+            variable=self.delete_var,
+            state="normal" if user_names else "disabled",
+        )
+        self.delete_menu.pack(side="left", padx=(18, 8), pady=4)
+        ctk.CTkButton(
+            self,
+            text="Delete",
+            width=100,
+            fg_color="#8b3a3a",
+            state="normal" if user_names else "disabled",
+            command=self._delete,
+        ).pack(side="left", pady=4)
+
+    def _save(self):
+        """Validate and delegate persistence to the application."""
+        name = self.name_entry.get().strip()
+        if self.on_save(name):
+            self.destroy()
+
+    def _delete(self):
+        """Confirm destructive preset deletion; source text is unaffected."""
+        name = self.delete_var.get()
+        if not messagebox.askyesno(
+            "Delete preset?",
+            f"Delete the user preset '{name}'?",
+            parent=self,
+        ):
+            return
+        if self.on_delete(name):
+            self.destroy()
+```
+
+In _build_toolbar(), retain the option menu as self.preset_menu and populate it via
+preset_menu_names(self.cfg), replacing current lines 1642-1645.
+
+```python
+        self.preset_menu = ctk.CTkOptionMenu(
+            bar,
+            values=preset_menu_names(self.cfg),
+            variable=self.preset_var,
+            width=145,
+            command=self._apply_writing_preset,
+        )
+        self.preset_menu.grid(row=0, column=9, padx=4)
+```
+
+Replace _apply_writing_preset() and insert the supporting methods immediately below
+it (current lines 1651-1664).
+
+```python
+    def _apply_writing_preset(self, name):
+        """Copy a resolved preset into independently editable controls."""
+        if name == PRESET_MANAGER_LABEL:
+            self.preset_var.set("(none)")
+            self._open_preset_manager()
+            return
+
+        preset = resolve_preset(self.cfg, name)
+        if not preset:
+            return
+        self.mode_var.set(preset["mode"])
+        self.strength_var.set(preset["strength"])
+        self.role_var.set(preset["role"])
+        self._set_selected_tones(preset.get("tones", []))
+        self._refresh_status(f"preset applied: {name}")
+
+    def _open_preset_manager(self):
+        """Describe the live controls and open the compact manager."""
+        tones = " + ".join(self.selected_tones) or "keep original"
+        summary = (
+            f"{self.mode_var.get()} · {self.strength_var.get()} · "
+            f"{self.role_var.get()} · {tones}"
+        )
+        PresetManagerDialog(
+            self,
+            summary=summary,
+            user_names=list(self.cfg.get("user_presets", {})),
+            on_save=self._save_current_preset,
+            on_delete=self._delete_user_preset,
+        )
+
+    def _write_user_presets(self, presets):
+        """Persist a candidate collection before changing live state."""
+        candidate = dict(self.cfg)
+        candidate["user_presets"] = presets
+        candidate = normalise_config(candidate)
+        if not save_config(candidate, force=True):
+            messagebox.showerror(
+                "Presets not saved",
+                "Scriptorium could not write its configuration file. "
+                "No preset changes have been applied.",
+                parent=self,
+            )
+            return False
+
+        self.cfg.clear()
+        self.cfg.update(candidate)
+        self.preset_menu.configure(values=preset_menu_names(self.cfg))
+        self.preset_var.set("(none)")
+        return True
+
+    def _save_current_preset(self, name):
+        """Save the current controls under a validated user-owned name."""
+        if not name:
+            messagebox.showwarning(
+                "Preset name required",
+                "Enter a name for this preset.",
+                parent=self,
+            )
+            return False
+        if len(name) > MAX_PRESET_NAME_LENGTH:
+            messagebox.showwarning(
+                "Preset name too long",
+                f"Use no more than {MAX_PRESET_NAME_LENGTH} characters.",
+                parent=self,
+            )
+            return False
+
+        reserved = {item.casefold() for item in WRITING_PRESETS}
+        reserved.add(PRESET_MANAGER_LABEL.casefold())
+        if name.casefold() in reserved:
+            messagebox.showwarning(
+                "Reserved preset name",
+                "Choose a name that is not used by a built-in command.",
+                parent=self,
+            )
+            return False
+
+        presets = dict(self.cfg.get("user_presets", {}))
+        existing_name = next(
+            (item for item in presets if item.casefold() == name.casefold()),
+            None,
+        )
+        if existing_name and not messagebox.askyesno(
+            "Replace preset?",
+            f"Replace the existing preset '{existing_name}'?",
+            parent=self,
+        ):
+            return False
+        if existing_name:
+            name = existing_name
+        elif len(presets) >= MAX_USER_PRESETS:
+            messagebox.showwarning(
+                "Preset limit reached",
+                f"Delete a preset before adding more than {MAX_USER_PRESETS}.",
+                parent=self,
+            )
+            return False
+
+        presets[name] = {
+            "mode": self.mode_var.get(),
+            "strength": self.strength_var.get(),
+            "role": self.role_var.get(),
+            "tones": list(self.selected_tones),
+        }
+        if not self._write_user_presets(presets):
+            return False
+        self._refresh_status(f"preset saved: {name}")
+        return True
+
+    def _delete_user_preset(self, name):
+        """Delete one exact user preset and persist the new collection."""
+        presets = dict(self.cfg.get("user_presets", {}))
+        if name not in presets:
+            return False
+        del presets[name]
+        if not self._write_user_presets(presets):
+            return False
+        self._refresh_status(f"preset deleted: {name}")
+        return True
+```
+
+
+-------------------------------------------------------------------------------
+3.4 Three-tone validation and prompt
+-------------------------------------------------------------------------------
+
+At current lines 317-329, replace the picker cap and conflict table with:
+
+```python
+MAX_SELECTED_TONES = 3
+TONE_PICKER_LIMIT = MAX_SELECTED_TONES
+
+TONE_CONFLICTS = {
+    frozenset({"Concise", "Detailed"}): (
+        "'Concise' and 'Detailed' pull the revision in opposite directions. "
+        "Choose the one that best reflects the intended result."
+    ),
+    frozenset({"Casual", "Formal"}): (
+        "'Casual' and 'Formal' are opposite registers. Choose the one that "
+        "best reflects the intended result."
+    ),
+    frozenset({"Neutral", "Persuasive"}): (
+        "'Neutral' requires impartial wording, while 'Persuasive' advocates "
+        "the source's position. Choose one of these aims."
+    ),
+}
+```
+
+Replace build_tone_instruction() at current lines 653-683 with:
+
+```python
+def build_tone_instruction(tones):
+    """Build an ordered tone brief whose lowest priority may be omitted."""
+    tones = validate_tones(tones)
+    if not tones:
+        return ""
+
+    descriptions = [
+        f"  - {tone}: {TONE_INSTRUCTIONS[tone]}."
+        for tone in tones
+    ]
+    if len(tones) == 1:
+        relationship = f"Use {tones[0]} as the target tone."
+    elif len(tones) == 2:
+        relationship = (
+            f"Use {tones[0]} as the dominant tone and {tones[1]} as a "
+            "supporting characteristic."
+        )
+    else:
+        relationship = (
+            f"Use {tones[0]} as the dominant tone, {tones[1]} as a supporting "
+            f"characteristic, and {tones[2]} only as a light accent."
+        )
+
+    return (
+        "\n- Tone guidance:\n"
+        f"  {relationship}\n"
+        + "\n".join(descriptions)
+        + "\n  Apply priorities in this order: factual fidelity and meaning; "
+        "the selected editing mode; dominant tone; supporting tone; accent "
+        "tone. If a lower-priority tone would change content, certainty or "
+        "scope, weaken or omit that tone. Tone may affect wording, rhythm and "
+        "presentation only. Preserve attribution, negation, modality, "
+        "quantifiers, comparisons and uncertainty exactly in meaning. Do not "
+        "invent facts, causes, examples, feelings, recommendations, "
+        "commitments, corroboration, evaluative adjectives or promotional "
+        "language absent from the source."
+    )
+```
+
+In TonePickerDialog.__init__(), replace current lines 1233-1238 with:
+
+```python
+        ctk.CTkLabel(
+            self,
+            text=(
+                "Selection order matters: the first tone is dominant, the "
+                "second supports it, and the third is a light accent."
+            ),
+            wraplength=380,
+            justify="left",
+            text_color="gray65",
+        ).pack(anchor="w", padx=18, pady=(0, 10))
+```
+
+
+-------------------------------------------------------------------------------
+3.5 Markdown diff, HTML clipboard and reading metrics
+-------------------------------------------------------------------------------
+
+Insert after summarise_diff() (after current line 1073).
+
+```python
+READING_WORDS_PER_MINUTE = 225
+
+
+def text_metrics(text):
+    """Return consistent word, character and reading-time measurements."""
+    words = re.findall(r"\b[\w’'-]+\b", text, flags=re.UNICODE)
+    word_count = len(words)
+    seconds = round((word_count / READING_WORDS_PER_MINUTE) * 60)
+    if word_count == 0:
+        reading_label = "0 minutes to read"
+    elif seconds < 60:
+        reading_label = "under 1 minute to read"
+    else:
+        minutes = max(1, round(seconds / 60))
+        reading_label = (
+            f"about {minutes} minute{'s' if minutes != 1 else ''} to read"
+        )
+    return {
+        "words": word_count,
+        "characters": len(text),
+        "characters_without_whitespace": sum(
+            not character.isspace() for character in text
+        ),
+        "reading_seconds": seconds,
+        "reading_label": reading_label,
+    }
+
+
+def _safe_markdown_fence(body):
+    """Return a backtick fence longer than any run inside body."""
+    longest = max((len(run) for run in re.findall(r"`+", body)), default=0)
+    return "`" * max(3, longest + 1)
+
+
+def build_markdown_diff(original, revised):
+    """Return a portable Markdown document containing a unified text diff."""
+    diff_lines = difflib.unified_diff(
+        original.splitlines(),
+        revised.splitlines(),
+        fromfile="Original",
+        tofile="Suggested revision",
+        lineterm="",
+    )
+    body = "\n".join(diff_lines) or "(no wording changes)"
+    fence = _safe_markdown_fence(body)
+    return (
+        "# Scriptorium revision diff\n\n"
+        f"{fence}diff\n{body}\n{fence}\n"
+    )
+
+
+def build_html_diff(original, revised):
+    """Return one valid HTML fragment with review-style insert/delete spans."""
+    original_tokens = _tokenise(original)
+    revised_tokens = _tokenise(revised)
+    matcher = difflib.SequenceMatcher(
+        None,
+        original_tokens,
+        revised_tokens,
+        autojunk=False,
+    )
+    output = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        old_text = html.escape("".join(original_tokens[i1:i2]))
+        new_text = html.escape("".join(revised_tokens[j1:j2]))
+        if tag == "equal":
+            output.append(new_text)
+        elif tag == "delete":
+            output.append(
+                '<del style="color:#a61b1b;text-decoration:line-through">'
+                f"{old_text}</del>"
+            )
+        elif tag == "insert":
+            output.append(
+                '<strong style="color:#176b3a">'
+                f"{new_text}</strong>"
+            )
+        else:
+            output.append(
+                '<del style="color:#a61b1b;text-decoration:line-through">'
+                f"{old_text}</del>"
+                '<strong style="color:#176b3a">'
+                f"{new_text}</strong>"
+            )
+    return (
+        '<div style="font-family:Segoe UI,Arial,sans-serif;'
+        'white-space:pre-wrap">'
+        + "".join(output)
+        + "</div>"
+    )
+
+
+def _build_cf_html(fragment):
+    """Build the UTF-8 Windows HTML Format payload with byte offsets."""
+    start_marker = b"<!--StartFragment-->"
+    end_marker = b"<!--EndFragment-->"
+    document = (
+        b"<html><body>"
+        + start_marker
+        + fragment.encode("utf-8")
+        + end_marker
+        + b"</body></html>"
+    )
+    template = (
+        "Version:1.0\r\n"
+        "StartHTML:{:010d}\r\n"
+        "EndHTML:{:010d}\r\n"
+        "StartFragment:{:010d}\r\n"
+        "EndFragment:{:010d}\r\n"
+    )
+    provisional = template.format(0, 0, 0, 0).encode("ascii")
+    start_html = len(provisional)
+    end_html = start_html + len(document)
+    start_fragment = (
+        start_html + document.index(start_marker) + len(start_marker)
+    )
+    end_fragment = start_html + document.index(end_marker)
+    header = template.format(
+        start_html,
+        end_html,
+        start_fragment,
+        end_fragment,
+    ).encode("ascii")
+    return header + document + b"\x00"
+
+
+def _global_clipboard_memory(data):
+    """Allocate and fill moveable global memory for SetClipboardData."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    global_alloc = kernel32.GlobalAlloc
+    global_lock = kernel32.GlobalLock
+    global_unlock = kernel32.GlobalUnlock
+    global_free = kernel32.GlobalFree
+    global_alloc.argtypes = (wintypes.UINT, ctypes.c_size_t)
+    global_alloc.restype = wintypes.HGLOBAL
+    global_lock.argtypes = (wintypes.HGLOBAL,)
+    global_lock.restype = ctypes.c_void_p
+    global_unlock.argtypes = (wintypes.HGLOBAL,)
+    global_unlock.restype = wintypes.BOOL
+    global_free.argtypes = (wintypes.HGLOBAL,)
+    global_free.restype = wintypes.HGLOBAL
+
+    handle = global_alloc(0x0002, len(data))  # GMEM_MOVEABLE
+    if not handle:
+        raise ctypes.WinError()
+    pointer = global_lock(handle)
+    if not pointer:
+        global_free(handle)
+        raise ctypes.WinError()
+    try:
+        ctypes.memmove(pointer, data, len(data))
+    finally:
+        global_unlock(handle)
+    return handle
+
+
+def set_html_clipboard(owner_hwnd, plain_text, html_fragment):
+    """Publish rich HTML first and clean Unicode text as a fallback."""
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    user32.RegisterClipboardFormatW.argtypes = (wintypes.LPCWSTR,)
+    user32.RegisterClipboardFormatW.restype = wintypes.UINT
+    user32.OpenClipboard.argtypes = (wintypes.HWND,)
+    user32.OpenClipboard.restype = wintypes.BOOL
+    user32.EmptyClipboard.argtypes = ()
+    user32.EmptyClipboard.restype = wintypes.BOOL
+    user32.SetClipboardData.argtypes = (wintypes.UINT, wintypes.HANDLE)
+    user32.SetClipboardData.restype = wintypes.HANDLE
+    user32.CloseClipboard.argtypes = ()
+    user32.CloseClipboard.restype = wintypes.BOOL
+    kernel32.GlobalFree.argtypes = (wintypes.HGLOBAL,)
+    kernel32.GlobalFree.restype = wintypes.HGLOBAL
+
+    html_format = user32.RegisterClipboardFormatW("HTML Format")
+    if not html_format:
+        raise ctypes.WinError()
+
+    html_handle = _global_clipboard_memory(_build_cf_html(html_fragment))
+    text_handle = _global_clipboard_memory(
+        (plain_text + "\x00").encode("utf-16-le")
+    )
+    html_transferred = False
+    text_transferred = False
+    try:
+        if not user32.OpenClipboard(owner_hwnd):
+            raise ctypes.WinError()
+        try:
+            if not user32.EmptyClipboard():
+                raise ctypes.WinError()
+            if not user32.SetClipboardData(html_format, html_handle):
+                raise ctypes.WinError()
+            html_transferred = True
+            if not user32.SetClipboardData(13, text_handle):  # CF_UNICODETEXT
+                raise ctypes.WinError()
+            text_transferred = True
+        finally:
+            user32.CloseClipboard()
+    finally:
+        # A successful SetClipboardData transfers ownership to Windows.
+        if not html_transferred:
+            kernel32.GlobalFree(html_handle)
+        if not text_transferred:
+            kernel32.GlobalFree(text_handle)
+```
+
+In _refresh_status(), replace current lines 1825-1829 with:
+
+```python
+        original = self.original_box.get("1.0", "end-1c")
+        metrics = text_metrics(original)
+        msg = (
+            f"Backend: {where}  —  {privacy}   |   "
+            f"{metrics['words']} words, {metrics['characters']} characters, "
+            f"{metrics['reading_label']}"
+        )
+```
+
+In _build_actionbar() row 2, insert beside Copy (after current line 1789):
+
+```python
+        ctk.CTkButton(
+            bar2,
+            text="Copy rich diff",
+            width=115,
+            fg_color="gray30",
+            command=self.copy_rich_diff,
+        ).pack(side="left", padx=4)
+
+        ctk.CTkButton(
+            bar2,
+            text="Export diff...",
+            width=105,
+            fg_color="gray30",
+            command=self.export_diff_file,
+        ).pack(side="right", padx=4)
+```
+
+Insert copy_rich_diff() beside copy_change_summary() (after current line 2194).
+
+```python
+    def copy_rich_diff(self):
+        """Copy an HTML review diff with the clean revision as plain text."""
+        if not self.last_result:
+            self._refresh_status("nothing to copy as a rich diff")
+            return
+        if self._revision_is_stale() and not messagebox.askyesno(
+            "Revision may be out of date",
+            "The original text changed after this revision was generated. "
+            "Copy the rich diff anyway?",
+            parent=self,
+        ):
+            return
+
+        revised = self.last_result["revised"]
+        fragment = build_html_diff(self._result_source, revised)
+        try:
+            set_html_clipboard(int(str(self.wm_frame()), 0), revised, fragment)
+        except OSError as exc:
+            messagebox.showerror(
+                "Clipboard unavailable",
+                f"Could not copy the rich diff.\n\n{exc}",
+                parent=self,
+            )
+            return
+        self._refresh_status("rich diff copied to clipboard")
+```
+
+Insert export_diff_file() immediately before export_file() (current line 2354).
+
+```python
+    def export_diff_file(self):
+        """Export the active revision as a fenced unified Markdown diff."""
+        if not self.last_result:
+            self._refresh_status("nothing to export as a diff")
+            return
+        if self._revision_is_stale() and not messagebox.askyesno(
+            "Revision may be out of date",
+            "The original text changed after this revision was generated. "
+            "Export the diff anyway?",
+            parent=self,
+        ):
+            return
+
+        path = filedialog.asksaveasfilename(
+            title="Export revision diff",
+            defaultextension=".md",
+            filetypes=[("Markdown", "*.md")],
+        )
+        if not path:
+            return
+        document = build_markdown_diff(
+            self._result_source,
+            self.last_result["revised"],
+        )
+        try:
+            with open(path, "w", encoding="utf-8", newline="\n") as file_handle:
+                file_handle.write(document)
+        except OSError as exc:
+            messagebox.showerror("Export failed", str(exc), parent=self)
+            return
+        self._refresh_status(f"exported {os.path.basename(path)}")
+```
+
+
+-------------------------------------------------------------------------------
+3.6 Shared retry transport and progress hook
+-------------------------------------------------------------------------------
+
+Insert below BackendError and before _payload_object() (current line 746).
+
+```python
+MAX_REQUEST_ATTEMPTS = 3
+BASE_RETRY_DELAY = 0.75
+MAX_RETRY_DELAY = 10.0
+MAX_RETRY_AFTER = 30.0
+
+
+def _retry_after_seconds(headers):
+    """Return a bounded Retry-After delay, or None when unusable."""
+    value = headers.get("Retry-After") if headers else None
+    if not value:
+        return None
+    try:
+        delay = float(value)
+    except (TypeError, ValueError):
+        try:
+            retry_at = parsedate_to_datetime(value)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            delay = retry_at.timestamp() - time.time()
+        except (TypeError, ValueError, OverflowError):
+            return None
+    return max(0.0, min(delay, MAX_RETRY_AFTER))
+
+
+def _retry_delay(failure_index, headers=None):
+    """Return Retry-After or bounded exponential backoff with light jitter."""
+    retry_after = _retry_after_seconds(headers)
+    if retry_after is not None:
+        return retry_after
+    exponential = BASE_RETRY_DELAY * (2 ** failure_index)
+    jitter = secrets.randbelow(251) / 1000
+    return min(exponential + jitter, MAX_RETRY_DELAY)
+
+
+def _request_json_with_retries(
+        request_factory, *, timeout, label, transient_statuses,
+        unavailable_hint="", on_retry=None):
+    """Open a fresh urllib request per attempt and return decoded JSON.
+
+    request_factory is intentionally a callable: a new Request object is built
+    for every attempt, and a future streaming reader can reuse this transport
+    boundary without changing backend payload construction.
+    """
+    last_network_error = None
+    for attempt in range(MAX_REQUEST_ATTEMPTS):
+        try:
+            request = request_factory()
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                raw_body = response.read()
+            try:
+                return json.loads(raw_body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise BackendError(
+                    f"{label} returned a non-JSON response.\n\n"
+                    f"(Parser detail: {exc})"
+                ) from exc
+        except urllib.error.HTTPError as exc:
+            can_retry = (
+                exc.code in transient_statuses
+                and attempt < MAX_REQUEST_ATTEMPTS - 1
+            )
+            if not can_retry:
+                try:
+                    detail = exc.read().decode("utf-8", "replace")[:400]
+                except OSError:
+                    detail = "No error detail was returned."
+                request_id = exc.headers.get("request-id", "")
+                trace = f"\nRequest ID: {request_id}" if request_id else ""
+                raise BackendError(
+                    f"{label} returned HTTP {exc.code}.\n\n{detail}{trace}"
+                ) from exc
+
+            delay = _retry_delay(attempt, exc.headers)
+            exc.close()
+            if on_retry:
+                on_retry(
+                    f"{label} is temporarily unavailable; retrying in "
+                    f"{delay:.1f} seconds ({attempt + 2}/"
+                    f"{MAX_REQUEST_ATTEMPTS})..."
+                )
+            time.sleep(delay)
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            ConnectionError,
+            http.client.HTTPException,
+        ) as exc:
+            last_network_error = exc
+            if attempt >= MAX_REQUEST_ATTEMPTS - 1:
+                reason = getattr(exc, "reason", exc)
+                hint = f"\n\n{unavailable_hint}" if unavailable_hint else ""
+                raise BackendError(
+                    f"Could not reach {label}: {reason}{hint}"
+                ) from exc
+
+            delay = _retry_delay(attempt)
+            if on_retry:
+                on_retry(
+                    f"Connection to {label} was interrupted; retrying in "
+                    f"{delay:.1f} seconds ({attempt + 2}/"
+                    f"{MAX_REQUEST_ATTEMPTS})..."
+                )
+            time.sleep(delay)
+
+    # The loop always returns or raises; this is defensive for future edits.
+    raise BackendError(f"Could not reach {label}: {last_network_error}")
+```
+
+Refactor call_anthropic() at current lines 817-877 so its request construction is a
+factory and replace its existing try/except transport block with:
+
+```python
+    def request_factory():
+        return urllib.request.Request(
+            ANTHROPIC_URL,
+            data=body,
+            method="POST",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": ANTHROPIC_VERSION,
+                "content-type": "application/json",
+            },
+        )
+
+    payload = _request_json_with_retries(
+        request_factory,
+        timeout=120,
+        label="the Claude API",
+        transient_statuses={429, 500, 502, 503, 504, 529},
+        unavailable_hint="Check the network connection and try again.",
+        on_retry=on_retry,
+    )
+```
+
+Change its signature to:
+
+```python
+def call_anthropic(system_prompt, user_text, cfg, on_retry=None):
+```
+
+Refactor call_ollama() at current lines 880-924 in the same way:
+
+```python
+def call_ollama(system_prompt, user_text, cfg, on_retry=None):
+    # Keep the existing body construction immediately above this factory.
+    def request_factory():
+        return urllib.request.Request(
+            OLLAMA_URL,
+            data=body,
+            method="POST",
+            headers={"content-type": "application/json"},
+        )
+
+    payload = _request_json_with_retries(
+        request_factory,
+        timeout=300,
+        label="Ollama",
+        transient_statuses={429, 500, 502, 503, 504},
+        unavailable_hint=(
+            "Is Ollama running at localhost:11434? Start it with "
+            "'ollama serve' and pull a model first."
+        ),
+        on_retry=on_retry,
+    )
+
+    # Retain the existing _payload_object(), message/content validation and
+    # _extract_json() code below this point unchanged.
+```
+
+Change run_backend() at current lines 927-942 to accept and forward the callback:
+
+```python
+def run_backend(system_prompt, user_text, cfg, on_retry=None):
+    """Dispatch to the configured backend without a cloud fail-open."""
+    backend = cfg.get("backend")
+    if backend == "ollama":
+        return call_ollama(
+            system_prompt,
+            user_text,
+            cfg,
+            on_retry=on_retry,
+        )
+    if backend == "anthropic":
+        return call_anthropic(
+            system_prompt,
+            user_text,
+            cfg,
+            on_retry=on_retry,
+        )
+    raise BackendError(
+        f"Unrecognised backend {backend!r}. Open Settings and choose "
+        "Claude or Ollama."
+    )
+```
+
+Insert this Scriptorium method beside _on_error() (current line 2127):
+
+```python
+    def _on_retry_progress(self, request_id, message):
+        """Show retry state only while the originating request still owns UI."""
+        if request_id == self._request_id and self.busy:
+            self._refresh_status(message)
+```
+
+Finally, replace the run_backend() line inside process()'s worker (current line
+2079) with:
+
+```python
+                result = run_backend(
+                    system_prompt,
+                    masked,
+                    cfg_snapshot,
+                    on_retry=lambda message: self._post_to_ui(
+                        self._on_retry_progress,
+                        request_id,
+                        message,
+                    ),
+                )
+```
+
+
+===============================================================================
+4. INSERTION MAP
+===============================================================================
+
+All locations refer to C:\Scriptorium\scriptorium.py v2.8 before integration.
+
+ID   Feature                    Class/function                Current context
+---  -------------------------  ----------------------------  -----------------
+A1   New stdlib imports         module imports                lines 42-55
+A2   Win32 declarations         module level                  after line 222
+A3   Drop callback state        Scriptorium.__init__          lines 1539, 1555
+A4   Drop lifecycle methods     Scriptorium                   before line 2308
+A5   Shared file loader         Scriptorium.import_file       replace 2308-2352
+A6   Drop teardown              Scriptorium._quit_app         before line 2480
+
+B1   Preset schema helpers      module level                  after line 460
+B2   user_presets default       DEFAULT_CONFIG                lines 463-481
+B3   preset normalisation       normalise_config              before line 556
+B4   Preset manager dialogue    module level                  before line 1311
+B5   Retained preset menu       Scriptorium._build_toolbar    replace 1642-1645
+B6   Preset actions             Scriptorium                   replace 1651-1664
+
+C1   Three-tone UI/conflicts    module constants              replace 317-329
+C2   Prompt composition         build_tone_instruction        replace 653-683
+C3   Picker explanation         TonePickerDialog.__init__     replace 1233-1238
+
+D1   Diff/metrics/clipboard     module level                  after line 1073
+D2   Live reading metrics       Scriptorium._refresh_status   replace 1825-1829
+D3   New action buttons         Scriptorium._build_actionbar  after line 1789
+D4   Rich copy action           Scriptorium                   after line 2194
+D5   Markdown diff export       Scriptorium                   before line 2354
+
+E1   Retry helper               module level                  after line 743
+E2   Claude transport           call_anthropic                refactor 817-877
+E3   Ollama transport           call_ollama                   refactor 880-924
+E4   Backend forwarding         run_backend                   replace 927-942
+E5   Retry status callback      Scriptorium                   beside line 2127
+E6   Worker callback wiring     Scriptorium.process           replace line 2079
+
+Companion files for a later authorised implementation pass:
+
+* scriptorium_config.example.json: add "user_presets": {}.
+* README.md: document one-file drops, personal presets, three-tone ordering,
+  Export diff..., Copy rich diff and bounded retries.
+* version_info.txt and APP_VERSION: bump only when the complete tested slice ships.
+
+
+===============================================================================
+5. VERIFICATION MATRIX AND REMAINING RISKS
+===============================================================================
+
+Drag-and-drop
+-------------
+
+[ ] Drop one UTF-8 .txt, UTF-8-with-BOM .md and CP1252 .txt onto Original.
+[ ] Drop a .docx with and without python-docx installed.
+[ ] Drop onto Suggested revision, toolbar and empty window chrome: no import.
+[ ] Drop two files: one clear warning, no partial import.
+[ ] Drop a directory, .lnk and unsupported suffix: no state replacement.
+[ ] Confirm Undo restores the prior Original text and pending results invalidate.
+[ ] Repeatedly open/close the app under 64-bit Python; no late callback crash.
+[ ] Test a 32-bit build if Scriptorium still intends to support 32-bit Python.
+
+Presets
+-------
+
+[ ] Load no key, {}, a list, malformed entries and unknown enum values.
+[ ] Save, overwrite (case-insensitive match), delete and restart.
+[ ] Confirm built-in names cannot be overwritten or deleted.
+[ ] Confirm 31st preset and a 49-character name are rejected.
+[ ] Simulate save failure: dialogue stays open and self.cfg remains unchanged.
+[ ] Confirm source-to-frozen config migration brings user presets across.
+
+Three tones
+-----------
+
+[ ] Picker permits exactly three and shows deterministic selection order.
+[ ] All three prohibited pairs fail regardless of order or third tone.
+[ ] Preset/config/picker/prompt paths all use validate_tones().
+[ ] Run the calibration corpus described in section 2.3 on Claude and Ollama.
+[ ] Compare two-tone outputs before/after to identify prompt regressions.
+
+Exports and clipboard
+---------------------
+
+[ ] Markdown diff renders in GitHub/VS Code with source containing ``` fences.
+[ ] Rich diff pastes formatted into Word and Outlook; Notepad receives clean text.
+[ ] Verify Unicode, emoji, curly quotation marks and British punctuation survive.
+[ ] Verify CF_HTML byte offsets against the encoded byte array, not Python indexes.
+[ ] Lock the clipboard temporarily: show a friendly error without losing app state.
+[ ] Status metrics update on typing, Paste, Undo, Accept, Clear and Import.
+
+Retries
+-------
+
+[ ] Fault-inject 429 with numeric and HTTP-date Retry-After headers.
+[ ] Fault-inject Claude 500/504/529 and Ollama 429/502/503.
+[ ] Verify 400/401/403/404 fail immediately and retain response detail.
+[ ] Simulate DNS failure, connection reset, timeout and truncated response.
+[ ] Reject during backoff: no stale progress or result reaches the UI.
+[ ] Confirm exactly three total attempts and bounded sleep durations.
+[ ] Confirm a 200 non-JSON response is not retried.
+[ ] Confirm request-id appears in final Claude HTTP errors.
+
+Remaining risks
+---------------
+
+1. Tk/Win32 subclassing is inherently platform-specific. The hook must be exercised
+   in both source and PyInstaller builds, and teardown ordering must not be changed.
+
+2. Rich clipboard ownership rules are unforgiving. Every pre-transfer HGLOBAL must
+   be freed on failure; every successfully transferred handle must be left to
+   Windows. Functional tests in Word/Outlook are required in addition to syntax.
+
+3. Three-tone quality is calibration-sensitive. The code change is small, but the
+   release gate is semantic output review, not merely unit tests.
+
+4. Retrying an ambiguous cloud POST may duplicate billable processing. Bounded
+   retries improve resilience but cannot create exactly-once semantics.
+
+5. Streaming is prepared, not implemented. The application must continue displaying
+   only a complete validated revision until placeholder restoration, schema checks
+   and stale-request handling have a coherent streaming design.
+
+
+===============================================================================
+6. PRIMARY TECHNICAL REFERENCES
+===============================================================================
+
+Microsoft WM_DROPFILES:
+https://learn.microsoft.com/en-us/windows/win32/shell/wm-dropfiles
+
+Microsoft DragAcceptFiles / DragQueryFileW / DragQueryPoint / DragFinish:
+https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-dragacceptfiles
+https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-dragqueryfilew
+https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-dragquerypoint
+https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-dragfinish
+
+Microsoft SetWindowLongPtrW and CallWindowProcW subclassing contract:
+https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowlongptrw
+https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-callwindowprocw
+
+Microsoft HTML Clipboard Format and multiple clipboard formats:
+https://learn.microsoft.com/en-us/windows/win32/dataxchg/html-clipboard-format
+https://learn.microsoft.com/en-us/windows/win32/dataxchg/clipboard-formats
+
+Python urllib exception hierarchy and HTTPError handling:
+https://docs.python.org/3/howto/urllib2.html#handling-exceptions
+
+Claude API transient errors, Retry-After and streaming guidance:
+https://platform.claude.com/docs/en/api/errors
+
+Ollama API errors and 503 queue-overload behaviour:
+https://docs.ollama.com/api/errors
+https://docs.ollama.com/faq#how-do-i-manage-the-maximum-number-of-requests-the-server-can-queue
+
+
+===============================================================================
+7. READ-ONLY COMPLIANCE
+===============================================================================
+
+This review creates only C:\Scriptorium\notes\00_Drafts\notes_016.txt. It does not
+modify scriptorium.py, configuration, tests, dependencies, assets or packaging.
+Every code block is a proposal for a later explicitly authorised implementation
+pass. The implementation pass should apply the phases independently, run the
+verification matrix, update documentation and version metadata, then commit only
+after tests pass.

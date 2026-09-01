@@ -1,0 +1,442 @@
+================================================================================
+ SCRIPTORIUM UI/UX & VISUAL DESIGN REVIEW — v2.8
+================================================================================
+ Author:  Lynne (Lead UI/UX)
+ Date:    1 September 2026
+ Target:  C:\Scriptorium\scriptorium.py
+          APP_VERSION = "2.8" (module docstring still says 2.7)
+          2,544 lines; SHA-256 5f355de458bf7322e7f0a3072592d651208c16b5cd41889e5df67724ee77d1fa
+ Scope:   Read-only visual audit of the dual-pane layout, diff highlighting,
+          toolbar / two-row action bar, Working… state, ambiguity banner,
+          SettingsDialog and TonePickerDialog. Contrast ratios computed
+          against #1d1e1e. No project files other than this note were written.
+ Writes:  C:\Scriptorium\notes\00_Drafts\notes_001.txt
+================================================================================
+
+
+1. UI/UX AUDIT & VISUAL HIERARCHY
+--------------------------------------------------------------------------------
+
+1.1 Overall
+The shell is already a credible Windows 11 dark app: CTk dark/blue, 1180x760
+default, 920x600 minimum, dual panes with uniform column weights. The two-row
+action bar (comment at ~1748) correctly fixed the 13-button overlap. Live
+word counts, presets, Softer/Stronger, Copy/Paste, and the tone picker are
+in place.
+
+What still reads as "utility" rather than "Win11 writing surface" is
+inconsistent type, chrome that does not match between the two panes, a
+toolbar that cannot wrap at 920px, a Working… state that only changes a
+label, and a warning strip with no dismiss control.
+
+1.2 Dual-pane typography (highest visual defect)
+  Original  CTkTextbox, CTkFont(size=14), theme background (typically
+            ~#2b2b2b), implicit CTk padding and inner scrollbar.
+  Revised   tk.Text, ("Segoe UI", 12), background #1d1e1e, padx/pady 10,
+            external CTkScrollbar, no spacing1/spacing3.
+
+  Result: the right pane looks smaller, greyer, and more "code editor"
+  than the left. Headers are CTkFont(weight="bold") with no size, so they
+  follow the default 13px while body type disagrees. No line-height is
+  set on either widget (spacing1/spacing3 unused). Horizontal rhythm is
+  close (uniform="col", padx 6 gutter) but the inner padding of CTkTextbox
+  vs tk.Text(padx=10) is not matched, so the first glyphs do not line up.
+
+1.3 Diff highlighting & contrast
+  Tokenisation is word / punctuation / whitespace (_tokenise). That is the
+  right grain for copy-editing. Character-level diffs would spray colour
+  across every letter of a British spelling change (organise/organize) and
+  should stay off.
+
+  Against pane background #1d1e1e (WCAG 2.x relative luminance):
+
+    Body text  #dce4ee    13.03:1   AAA
+    Changed    #4ec9b0     8.20:1   AAA (normal text)
+    Deleted    #e06c75     5.23:1   AA  (only 0.73 above 4.5)
+
+  Both colours pass AA as foreground-only. They still fail as *scan*
+  colours: Clean view tints insertions with no fill, so a light paraphrase
+  is easy to miss; Inline strikethrough is a 1px overstrike that thins out
+  at 150–200% DPI. Deleted red is the tightest AA pair and will look muddy
+  on a dim laptop panel.
+
+  The amber banner #3a2f1a is not a text colour (1.27:1 vs pane bg — it is
+  a fill). Body #dce4ee on #3a2f1a is 10.23:1, so legibility is fine; the
+  problem is chrome (looks like a dirty slab, no heading weight, no close).
+
+1.4 Toolbar & action bar
+  Toolbar is a single grid row: Mode, Strength, Role, Tone button (150px),
+  Preset (145px), Settings. Labels use padx=(20, 4) between groups. At
+  1180px this is comfortable. At 920px the row cannot wrap (no row 1, no
+  grid_columnconfigure on the control cells) so the Preset/Settings pair
+  is clipped or stacked over Role/Tone. Settings sits in column 11 with a
+  spacer in column 10 — good — but the left cluster has no shrink policy.
+
+  Action bar row 1 (review): Process 100, − Softer 80, + Stronger 90,
+  Accept 110, Reject 90, Copy revision 120, Copy summary 110, Undo 80.
+  Sum of widths = 780px plus ~40px padx ≈ 820px. Tight at 920px but should
+  fit. Row 2 (clipboard/file) is sparse and left/right packed — the empty
+  middle is fine, but the two rows do not share a visual baseline (row 1
+  pady (8,4), row 2 pady (0,8), no separator).
+
+  Accept green #2f7d4f / hover #276a43 is the only filled accent besides
+  Process blue. Softer uses a Unicode minus "−" which is good; the rest of
+  the bar is gray30, so review actions other than Accept/Process compete
+  equally with Undo.
+
+1.5 Interactive states
+  _set_busy (~1952) sets Process to "Working…" and disables Process,
+  Accept, Softer, Stronger. No pulse, no progress bar, no animated
+  ellipsis, no status-bar throbber. The status line gets a static
+  "contacting the model…" string. On a 30-second Ollama call the UI looks
+  frozen aside from that label.
+
+  No CTk tooltips anywhere (scan: zero "tooltip" hits). Keyboard: Ctrl+Enter
+  Process, Ctrl+I Import, Ctrl+S Export. No Escape on dialogs. No visible
+  shortcut on Process any more (the old "Process  (Ctrl+Enter)" label was
+  shortened to "Process").
+
+1.6 Ambiguity banner
+  CTkTextbox height=64, fg_color="#3a2f1a", packed before the status bar,
+  state=disabled. Always titled "⚠ Ambiguities flagged…" even when the
+  list is placeholder or letter-convention notices. No dismiss control;
+  pack_forget only when the next result has an empty list. Disabled
+  textbox blocks selection on some CTk versions, so users cannot copy a
+  flagged line.
+
+1.7 Dialogs
+  TonePickerDialog 420x540, not resizable, transient+grab_set, scrollable
+  checkbox list. No Escape, no WM_DELETE_WINDOW protocol (title-bar X
+  still works via default destroy). No after_idle positioning — Tk places
+  it on the current screen, which on a multi-monitor setup can open on
+  the primary while Scriptorium sits on the secondary. Limit feedback uses
+  a blocking messagebox.showinfo rather than the status_label already on
+  the dialog.
+
+  SettingsDialog 520x780, not resizable. 780px is taller than the app
+  minimum height (600) and will clip on a 1080p laptop at 150% DPI
+  (effective ~720px). Content is packed, not in a CTkScrollableFrame, so
+  there is no overflow. Checkboxes wrap long British copy and misalign
+  the tick column. No Escape. Save/Cancel are in a bottom pack(side=
+  "bottom") row which can overlap the last checkbox if the window manager
+  shrinks the dialog. Detect is already off-thread (good).
+
+  British English in chrome is generally sound (minimise, colour in copy).
+  Backend segmented values are still "anthropic" / "ollama" (internal ids
+  shown to the user). Prefer "Claude" / "Ollama".
+
+
+2. PROPOSED VISUAL IMPROVEMENTS
+--------------------------------------------------------------------------------
+A small token block at module level keeps hex and type in one place.
+Do not introduce a theme engine.
+
+2.1 Design tokens (insert near APP_VERSION)
+
+  PANE_BG        #1e1e1e     Win11 dark flyout
+  PANE_FG        #e6e6e6
+  PANE_GUTTER    8
+  PANE_PAD       12
+  TYPE_FACE      Segoe UI
+  TYPE_SIZE      13          both panes (was 14 vs 12)
+  TYPE_HEADER    13 bold
+  LINE_SPACE     spacing1=4, spacing3=6
+  DIFF_INS_FG    #5ee0c8     9.4:1 vs #1e1e1e (keep teal family)
+  DIFF_INS_BG    #16352f     fill, not just ink
+  DIFF_DEL_FG    #ffa0a8     ~7:1, safer than #e06c75 at 5.23
+  DIFF_DEL_BG    #3a1f24
+  AMBER_BG       #43361f
+  AMBER_FG       #f5d589
+  AMBER_RULE     #c9a227
+  ACCEPT_BG      #2d8a58
+  ACCEPT_HOVER   #24734a
+  BUSY_BG        #1f6aa5     CTk blue, pulsed 80% opacity via after()
+
+2.2 Panes
+  Force both editors onto TYPE_FACE 13, PANE_BG/PANE_FG, PANE_PAD.
+  For original_box: configure inner tk widget if exposed, else
+  CTkTextbox(fg_color=PANE_BG, text_color=PANE_FG, font=CTkFont(family=
+  "Segoe UI", size=13)).
+  For revised_box: font=("Segoe UI", 13), padx=PANE_PAD, pady=PANE_PAD,
+  spacing1=4, spacing3=6, background=PANE_BG.
+  Put a matching CTkScrollbar on Original (or hide both inner bars and
+  use one CTkScrollbar each) so the chrome matches.
+  Header row: both labels CTkFont(size=13, weight="bold"), same padx=4,
+  and a 1px #3d3d3d separator under the header for Win11 list-section feel.
+
+2.3 Diff tags
+  Keep word-level opcodes. Add background fills and a slightly thicker
+  strikethrough via font overstrike + tag spacing.
+
+    changed: foreground DIFF_INS_FG, background DIFF_INS_BG
+    deleted: foreground DIFF_DEL_FG, background DIFF_DEL_BG, overstrike=1
+
+  Optional third tag "replaced_old" vs "replaced_new" is unnecessary if
+  Inline already stacks deleted then changed.
+
+2.4 Toolbar at 920px
+  Split into two grid rows when width < 1100, or always use two rows:
+    Row 0: Mode | Strength | Role | Tone
+    Row 1: Preset | spacer | Settings
+  That is more Win11 (command bar + overflow) than shrinking fonts.
+  Tone button: fg_color="transparent", border_width=1, anchor="w", so it
+  reads as a combo rather than a second Settings.
+
+2.5 Action bar
+  Keep two rows. Add a 1px #2a2a2a rule between them.
+  Visual grouping on row 1:
+    [Process | Softer | Stronger]  gap  [Accept | Reject]
+    gap  [Copy revision | Copy summary | Undo]
+  Give Process width=120 and restore a status-bar hint "Ctrl+Enter"
+  rather than stuffing the shortcut into the button.
+  Accept stays filled green with the new ACCEPT_BG.
+
+2.6 Working… micro-feedback
+  CTkProgressBar(mode="indeterminate") packed under the action bar,
+  shown only while busy. Pulse Process fg_color between #1f6aa5 and
+  #144870 on a 400ms after() loop, cancelled in _set_busy(False).
+  Status text already exists; prefix with a middle-dot animation
+  ("Working" / "Working." / "Working.." / "Working…") on the same timer.
+
+2.7 Ambiguity banner
+  Replace the disabled textbox with a CTkFrame:
+    left  4px AMBER_RULE stripe
+    body  CTkLabel wraplength, AMBER_FG on AMBER_BG, anchor w
+    right CTkButton "Dismiss" width=80, fg_color="gray30"
+  Title from content: "Notices" if no model ambiguities, else
+  "Ambiguities flagged". Dismiss calls pack_forget but keeps last_result.
+  Allow copy: use a selectable CTkTextbox only for the list, height
+  computed from line count (min 48, max 120).
+
+2.8 Dialogs
+  Both: bind <Escape> to destroy; protocol WM_DELETE_WINDOW; after_idle
+  centre on master (see snippet). Settings: wrap body in
+  CTkScrollableFrame, geometry "520x640", resizable(False, True),
+  minsize 480x420 so 150% DPI still reaches Save.
+  Tone picker: drop the blocking "Tone limit" messagebox; flash
+  status_label instead (already there).
+  Backend segmented button values displayed as "Claude" / "Ollama"
+  mapped back to anthropic/ollama ids.
+
+
+3. CUSTOMTKINTER CODE SNIPPETS
+--------------------------------------------------------------------------------
+British English throughout. Pure CTk / Tk.
+
+### 3.1 Tokens — insert after APP_VERSION (~79)
+
+PANE_BG = "#1e1e1e"
+PANE_FG = "#e6e6e6"
+DIFF_INS_FG = "#5ee0c8"
+DIFF_INS_BG = "#16352f"
+DIFF_DEL_FG = "#ffa0a8"
+DIFF_DEL_BG = "#3a1f24"
+AMBER_BG = "#43361f"
+AMBER_FG = "#f5d589"
+AMBER_RULE = "#c9a227"
+ACCEPT_BG = "#2d8a58"
+ACCEPT_HOVER = "#24734a"
+PANE_FONT = ("Segoe UI", 13)
+UI_HEADER = lambda: ctk.CTkFont(family="Segoe UI", size=13, weight="bold")
+
+
+### 3.2 Centre a dialog on its parent
+Insert as a module-level helper above TonePickerDialog (~1213).
+
+def position_over_parent(window, master, width, height):
+    """Place a modal on the same monitor as its parent, centred.
+
+    Uses the parent's current geometry so a secondary-display session
+    does not open Settings on the primary screen.
+    """
+    window.update_idletasks()
+    try:
+        px = master.winfo_rootx()
+        py = master.winfo_rooty()
+        pw = master.winfo_width()
+        ph = master.winfo_height()
+    except tk.TclError:
+        return
+    x = px + max(0, (pw - width) // 2)
+    y = py + max(0, (ph - height) // 2)
+    window.geometry(f"{width}x{height}+{x}+{y}")
+
+
+def bind_dialog_chrome(window, on_close):
+    """Escape and the title-bar close box both run on_close."""
+    window.bind("<Escape>", lambda _e: on_close())
+    window.protocol("WM_DELETE_WINDOW", on_close)
+
+
+### 3.3 Revised pane + diff tags
+Replace the tk.Text constructor and tag_config in _build_panes (~1726–1736).
+
+        self.revised_box = tk.Text(
+            revised_frame, wrap="word", bd=0, padx=12, pady=12,
+            font=PANE_FONT, background=PANE_BG, foreground=PANE_FG,
+            insertbackground=PANE_FG, relief="flat", state="disabled",
+            highlightthickness=0, spacing1=4, spacing3=6)
+        self.revised_box.tag_config(
+            "changed", foreground=DIFF_INS_FG, background=DIFF_INS_BG)
+        self.revised_box.tag_config(
+            "deleted", foreground=DIFF_DEL_FG, background=DIFF_DEL_BG,
+            overstrike=1)
+
+And original_box (~1707):
+
+        self.original_box = ctk.CTkTextbox(
+            panes, wrap="word", fg_color=PANE_BG, text_color=PANE_FG,
+            font=ctk.CTkFont(family="Segoe UI", size=13))
+
+
+### 3.4 Working… pulse + indeterminate bar
+Insert on Scriptorium, next to _set_busy (~1952). Requires a progress bar
+created in _build_actionbar.
+
+    def _set_busy(self, flag):
+        """Disable destructive actions and show determinate-looking motion."""
+        self.busy = flag
+        self.process_btn.configure(
+            text="Working…" if flag else "Process",
+            state="disabled" if flag else "normal")
+        for btn in (self.accept_btn, self.softer_btn, self.stronger_btn):
+            btn.configure(state="disabled" if flag else "normal")
+        if flag:
+            self.progress.pack(fill="x", padx=12, pady=(0, 4),
+                               before=self.status)
+            self.progress.start()
+            self._pulse_job = self.after(400, self._pulse_process)
+        else:
+            if getattr(self, "_pulse_job", None):
+                self.after_cancel(self._pulse_job)
+                self._pulse_job = None
+            self.process_btn.configure(fg_color=["#3a7ebf", "#1f6aa5"])
+            self.progress.stop()
+            self.progress.pack_forget()
+
+    def _pulse_process(self):
+        """Alternate Process blue so a long Ollama call still feels alive."""
+        if not self.busy or not self.winfo_exists():
+            return
+        current = self.process_btn.cget("fg_color")
+        # CTk may return a string or a (light, dark) pair.
+        dark = current[1] if isinstance(current, (list, tuple)) else current
+        nxt = "#144870" if dark != "#144870" else "#1f6aa5"
+        self.process_btn.configure(fg_color=nxt)
+        self._pulse_job = self.after(400, self._pulse_process)
+
+In _build_actionbar, after bar2 is packed (~1796):
+
+        self.progress = ctk.CTkProgressBar(self, mode="indeterminate",
+                                           height=4)
+        # packed on demand from _set_busy()
+
+
+### 3.5 Dismissible notice banner
+Replace _show_ambiguities (~1937) and the CTkTextbox construction
+(~1742). Build a frame once in _build_panes:
+
+        self.notice_frame = ctk.CTkFrame(self, fg_color=AMBER_BG, height=64,
+                                         corner_radius=6)
+        rule = ctk.CTkFrame(self.notice_frame, width=4, fg_color=AMBER_RULE,
+                            corner_radius=0)
+        rule.pack(side="left", fill="y")
+        self.notice_label = ctk.CTkLabel(
+            self.notice_frame, text="", justify="left", anchor="w",
+            text_color=AMBER_FG, font=ctk.CTkFont(size=12),
+            wraplength=900)
+        self.notice_label.pack(side="left", fill="x", expand=True,
+                               padx=10, pady=8)
+        ctk.CTkButton(
+            self.notice_frame, text="Dismiss", width=80, fg_color="gray30",
+            command=lambda: self.notice_frame.pack_forget()
+        ).pack(side="right", padx=8, pady=8)
+
+    def _show_ambiguities(self, items):
+        """Show model ambiguities and local notices in a dismissible banner."""
+        if not items:
+            self.notice_frame.pack_forget()
+            return
+        title = "Ambiguities flagged (not silently changed)"
+        body = "\n".join(f"• {a}" for a in items)
+        self.notice_label.configure(text=f"{title}\n{body}")
+        if not self.notice_frame.winfo_ismapped():
+            self.notice_frame.pack(fill="x", padx=12, pady=(0, 4),
+                                   before=self.status)
+
+
+### 3.6 Dialog Escape + position
+At the end of TonePickerDialog.__init__ (~1264) and SettingsDialog.__init__
+(~1424):
+
+        bind_dialog_chrome(self, self.destroy)
+        self.after_idle(lambda: position_over_parent(self, master, 420, 540))
+
+Use 520, 640 for Settings, and wrap the packed body (everything except
+btn_row) in:
+
+        body = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=0, pady=0)
+        # re-parent existing widgets onto `body` instead of `self`
+
+
+### 3.7 Two-row toolbar (graceful 920px)
+Replace the single-row grid in _build_toolbar (~1611) with:
+
+        # Row 0 — editing knobs
+        ... Mode, Strength, Role, Tone as now, pady=8 ...
+        # Row 1 — session + Settings
+        ctk.CTkLabel(bar, text="Preset").grid(row=1, column=0, padx=(14, 4),
+                                              pady=(0, 10))
+        self.preset_var = ctk.StringVar(value="(none)")
+        ctk.CTkOptionMenu(...).grid(row=1, column=1, padx=4, pady=(0, 10),
+                                    sticky="w")
+        ctk.CTkButton(bar, text="⚙ Settings", width=100, fg_color="gray30",
+                      command=self.open_settings).grid(
+            row=1, column=11, padx=(20, 14), pady=(0, 10), sticky="e")
+        bar.grid_columnconfigure(10, weight=1)
+
+
+4. INSERTION MATRIX
+--------------------------------------------------------------------------------
+  What                         Class / symbol              Where
+  ---------------------------- --------------------------- ----------------------
+  Colour & type tokens         module constants            After APP_VERSION ~79
+  position_over_parent         module function             Before TonePickerDialog
+                               bind_dialog_chrome          ~1213
+  Pane fonts, padding, tags    Scriptorium._build_panes    ~1706–1736
+  Two-row toolbar              Scriptorium._build_toolbar  ~1611–1649
+  Tone button chrome           Scriptorium._build_toolbar  ~1633–1637
+  Progress bar widget          Scriptorium._build_actionbar after bar2 ~1796
+  Pulse / busy                 Scriptorium._set_busy       replace ~1952–1967
+                               Scriptorium._pulse_process  new, after _set_busy
+  Notice banner widgets        Scriptorium._build_panes    replace ambiguity_box
+                               Scriptorium._show_ambiguities replace ~1937
+  Dialog Escape + position     TonePickerDialog.__init__   end, ~1264
+                               SettingsDialog.__init__     end, ~1424
+  Settings scroll body         SettingsDialog.__init__     wrap ~1325–1415
+  Settings geometry            SettingsDialog.__init__     ~1318  520x640
+  Accept colours               Scriptorium._build_actionbar ~1770–1772
+  Backend labels Claude/Ollama SettingsDialog.__init__     ~1328–1330
+
+Do not restyle Process/Accept while a request is in flight without going
+through _set_busy — it already owns those widgets.
+
+
+5. PRIORITY
+--------------------------------------------------------------------------------
+  1. Match pane type and padding (1.2 / snippet 3.3) — biggest "not Win11"
+     tell, ten lines.
+  2. Diff tag fills + slightly brighter deleted red (2.3).
+  3. Dismissible notice banner (3.5).
+  4. Working… progress bar + pulse (3.4).
+  5. Two-row toolbar and Settings scroll/Escape (3.7 / 3.6).
+
+Character-level diffs: not recommended. Word-level opcodes already match
+how a British copy-editor scans a letter.
+
+Implementation needs an explicit go-ahead. This note is the only write.
+
+================================================================================
+ END OF REVIEW
+================================================================================

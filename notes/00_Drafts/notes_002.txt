@@ -1,0 +1,705 @@
+================================================================================
+ SCRIPTORIUM v2.8 — READ-ONLY STATIC BUG HUNT
+================================================================================
+ Author:    Grok Bug-Hunter (read-only static analysis)
+ Date:      Tuesday 1 September 2026 (Europe/London)
+ Target:    C:\Scriptorium\scriptorium.py (APP_VERSION = "2.8", 2,544 lines)
+            git HEAD 6790b09 "v2.8: action bar layout, minimise/close
+            lifecycle, right-click clipboard, onefile temp-dir fix"
+            (2026-09-01). Working tree of scriptorium.py matches HEAD
+            (git diff --stat HEAD -- scriptorium.py is empty).
+ Scope:     Fresh pass. Concurrency and thread-boundary safety; busy /
+            _request_id state machine; placeholder nonce restoration;
+            import/export encoding; Win32 single-instance mutex and restore
+            event; config normalisation and atomic save. Re-verification of
+            still-open notes_010 (v2.0) items. No copying of prior notes.
+ Method:    git show HEAD:scriptorium.py; git show HEAD:scriptorium.spec;
+            Get-Content of version_info.txt and
+            scriptorium_config.example.json; live scriptorium_config.json
+            inspected for key names and JSON types only (no values of
+            secret fields were copied). notes_010.txt was read solely to
+            re-verify the listed still-open items.
+ Writes:    this file only. No application code was executed, modified,
+            moved or deleted. The GUI was not launched and no tests were
+            run. No API key, token or secret from the live config is
+            quoted below.
+================================================================================
+
+
+1. EXECUTIVE HEALTH SUMMARY
+--------------------------------------------------------------------------------
+Files analysed (6)
+
+  * C:\Scriptorium\scriptorium.py                      (v2.8, sole app module)
+  * C:\Scriptorium\scriptorium.spec                    (onefile PyInstaller)
+  * C:\Scriptorium\version_info.txt                    (2.8.0.0 resource)
+  * C:\Scriptorium\scriptorium_config.example.json     (structure / keys)
+  * C:\Scriptorium\scriptorium_config.json             (key names and types
+                                                       only; no secret values)
+  * C:\Scriptorium\notes\01_Active\notes_010.txt       (re-verify only)
+
+Stability
+
+  Version 2.8 is in sound condition for a compact single-module desktop
+  application. The dangerous asynchronous-state defects from the August
+  hunts remain closed. last_result is paired with _result_source; every
+  Process call stamps a monotonic _request_id; Reject, Undo, Clear, Import
+  and _quit_app all call _invalidate_inflight(); Accept / Copy revision /
+  Export still warn when the original pane has moved on. Accept is disabled
+  for the life of a backend call, so the notes_010 "Accept-while-busy
+  cancels via reject()" hole is closed. Worker callbacks are marshalled
+  through _post_to_ui(), which swallows tk.TclError and RuntimeError if the
+  interpreter is already gone or mainloop has not yet started. undo_stack
+  is capped at 50 with adjacent-snapshot deduplication. Placeholder
+  sentinels carry a per-call nonce (⟦PHxxxxxx_N⟧). Config load refuses to
+  clobber an unreadable file; save_config still writes via a sibling .tmp,
+  fsync, and os.replace().
+
+Concurrency model
+
+  Backend work, Ollama Detect, the named restore-event watcher, and
+  pystray.Icon.run each run on daemon threads. Every path that touches Tk
+  from those threads goes through after(0) (Scriptorium._post_to_ui, or
+  the equivalent try/except around SettingsDialog.after). Cross-thread GUI
+  updates are therefore guarded. Two residual hazards remain, both on the
+  Win32 side rather than Tk: CreateMutexW / CreateEventW return values are
+  not checked, and a failed create-event handle would busy-spin the restore
+  listener and flood the Tk queue with _bring_to_front callbacks.
+
+Data integrity
+
+  utf-8-sig then cp1252 import, python-docx ValueError caught on export,
+  and restore_placeholders() warnings for dropped or duplicated sentinels
+  are all in place. The remaining data-integrity gap is narrow:
+  always_on_top is the one DEFAULT_CONFIG boolean that normalise_config()
+  does not coerce, so a stringy JSON "false" is Python-truthy at
+  attributes("-topmost", ...). The live config on this machine does not
+  currently store that key (the in-code default False applies).
+
+notes_010 (v2.0) still-open items — re-verified against v2.8
+  FIXED   Detect blocking the Tk thread
+          SettingsDialog._detect_models 1426–1444 now runs
+          list_ollama_models() on a daemon thread and marshals
+          _finish_model_detection via after(0), catching TclError /
+          RuntimeError.
+  FIXED   Config values not normalised — with one leftover key
+          normalise_config() 521–556 clamps backend / default_mode /
+          default_strength / default_role / default_diff_view and seven
+          booleans. always_on_top is still omitted (new leftover, Bug 1).
+  FIXED   Untyped backend envelopes
+          _payload_object() 746–757; _extract_json() 760–814 coerces
+          revised / ambiguities / note.
+  FIXED   Worker after() after destroy
+          _post_to_ui() 2017–2034.
+  FIXED   write_docx illegal XML crashing export
+          export_file 2382–2389 catches ValueError and asks the user to
+          export as .txt. write_docx itself still does not sanitise
+          (residual UX, not a crash).
+  FIXED   TimeoutError not caught
+          call_anthropic 849–852; call_ollama 908–911.
+  FIXED   call_ollama missing JSONDecodeError
+          call_ollama 912–915.
+  FIXED   Status bar vs run_backend unknown-backend mismatch
+          run_backend 927–942 raises BackendError rather than falling
+          through to Claude; load_config runs normalise_config first.
+          Residual: an unrecognised backend string is coerced to
+          "anthropic" (cloud). See Suspicion S1.
+  FIXED   print() warnings invisible in the windowed .exe — for the
+          original load_config case. _maybe_warn_unreadable_config
+          1845–1862 shows a messagebox. Settings save and autostart
+          failures also use messagebox. Residual print() paths: tray-icon
+          load failure and refused automatic saves (Minor Bug 5).
+  FIXED   Accept-while-busy cancelling via reject()
+          _set_busy 1952–1968 disables Accept; accept() 2148–2151
+          refuses while busy.
+  FIXED   Frozen config fallback dropping the Scriptorium subfolder
+          _config_dir() 81–110 tries %LOCALAPPDATA%\Scriptorium then
+          ~\Scriptorium before the bare-home last resort.
+
+Finding totals (this pass)
+  Critical   0
+  Moderate   3
+  Minor      4
+  Suspicion  3
+
+
+2. CATEGORISED VULNERABILITIES & DEFECTS
+--------------------------------------------------------------------------------
+
+------------------------------------------------------------------------------
+ CONFIRMED FIXED since notes_010 — do not re-propose
+------------------------------------------------------------------------------
+ Detect on a worker thread; envelope typing; TimeoutError and Ollama
+ JSONDecodeError; _post_to_ui after destroy; export_file ValueError;
+ Accept disabled while busy; atomic save still in place; request_id
+ invalidation; undo cap 50; live <<Modified>> word count; placeholder
+ nonce; utf-8-sig import; frozen config directory.
+
+------------------------------------------------------------------------------
+ MODERATE - Bug 1. always_on_top is omitted from boolean normalisation
+            (leftover of notes_010 Bug 2)
+------------------------------------------------------------------------------
+ File:    scriptorium.py
+ Function / method:
+  DEFAULT_CONFIG                 line 473
+  normalise_config               lines 521–556 (boolean loop 544–546)
+  Scriptorium.__init__           line 1550
+  SettingsDialog.__init__        line 1411
+  Scriptorium._after_settings    line 2399
+
+ Root cause
+  normalise_config() was added specifically so a JSON string "false" is
+  not treated as True under bool() or fed to tk.BooleanVar. The loop at
+  544–546 names privacy_ack, protect_placeholders,
+  check_letter_conventions, import_prompt_shown, minimise_to_tray,
+  start_with_windows and start_minimised. always_on_top is in
+  DEFAULT_CONFIG (473) and is written by Settings (1499) but is not in
+  that list.
+
+ Failure trace
+  1. A hand-edited scriptorium_config.json contains
+     "always_on_top": "false".
+  2. load_config() merges the file and calls normalise_config(). The
+     string is left untouched.
+  3. __init__ line 1550: self.attributes("-topmost", bool("false")).
+     bool("false") is True in Python, so the window is pinned on top.
+  4. SettingsDialog line 1411: tk.BooleanVar(value="false"). Tcl treats
+     the string "false" as false, so the checkbox is shown unticked.
+  5. The window and the Settings checkbox now disagree.
+
+ Reproduction trigger
+  Hand-edit the live config so always_on_top is the string "false"
+  (or "0", "no" — anything truthy as a Python string and false-ish in
+  Tcl), then launch.
+
+ Impact
+  The window is always-on-top with no indication in Settings. The
+  inverse ("true" as a string) happens to agree. Other booleans from
+  notes_010 Bug 2 are fixed; this is the one that escaped.
+
+ Live config on this machine
+  The key is currently absent from scriptorium_config.json, so the
+  in-code default False applies and the bug is latent, not currently
+  firing.
+
+------------------------------------------------------------------------------
+ MODERATE - Bug 2. Win32 mutex and restore-event handles are not checked
+------------------------------------------------------------------------------
+ File:    scriptorium.py
+ Functions / methods:
+  _claim_single_instance         lines 158–168
+  _start_restore_listener        lines 2403–2425
+  _watch (inner)                 lines 2413–2423
+  main                           lines 2535–2540
+
+ Root cause
+  CreateMutexW and CreateEventW results are stored and used without
+  testing for a NULL handle, and WaitForSingleObject's return is ignored.
+
+  _claim_single_instance 167–168:
+      _mutex_handle = kernel32.CreateMutexW(None, False, _MUTEX_NAME)
+      return ctypes.get_last_error() != _ERROR_ALREADY_EXISTS
+  If CreateMutexW fails (NULL handle, last error e.g. 8
+  ERROR_NOT_ENOUGH_MEMORY or 5 ERROR_ACCESS_DENIED), last error is not
+  183, so the function returns True. main() proceeds as the unique
+  instance. Single-instance protection is silently off.
+
+  _start_restore_listener 2411, 2414–2418:
+      self._restore_event = kernel32.CreateEventW(...)
+      while True:
+          kernel32.WaitForSingleObject(self._restore_event, _INFINITE)
+          kernel32.ResetEvent(self._restore_event)
+          self._post_to_ui(self._bring_to_front)
+  If CreateEventW returns NULL, WaitForSingleObject(NULL, INFINITE)
+  returns WAIT_FAILED immediately. The loop never blocks, ResetEvent
+  fails, and _post_to_ui queues _bring_to_front on every iteration. That
+  is a daemon-thread busy-spin plus a flood of Tk callbacks (raise,
+  focus, and — if a tray icon exists — icon.stop()).
+
+ Deadlock freedom (happy path)
+  The mutex is used only as a named existence token (bInitialOwner=False,
+  never waited on). The restore event is waited on a side thread; Tk
+  never waits on it. No lock-order deadlock. Handles are process-lifetime
+  and reclaimed on exit; that is not a leak in practice.
+
+ Reproduction trigger
+  Force CreateMutexW / CreateEventW to fail (handle exhaustion, or a
+  stricter security policy on Local\ named objects). The mutex case is
+  silent dual-instance; the event case is a hot loop after first paint.
+
+ Impact
+  Rare, but the failure mode is unbounded CPU and a UI storm, or a
+  broken single-instance guarantee, not a clean degrade. ctypes also
+  leaves restype at the default c_int (see Suspicion S2).
+
+------------------------------------------------------------------------------
+ MODERATE - Bug 3. runtime_tmpdir is expanded at spec-build time, not at
+            .exe run time
+------------------------------------------------------------------------------
+ File:    C:\Scriptorium\scriptorium.spec
+          lines 29–40 (comment), 67–71 (assignment), 101 (EXE kwarg)
+
+ Root cause
+  The v2.8 onefile temp-dir fix correctly wants the bootloader to extract
+  under %LOCALAPPDATA%\Scriptorium\runtime so a generic %TEMP% sweeper
+  cannot delete base_library.zip from under a running process. The spec
+  however does:
+
+      runtime_tmpdir = os.path.join(
+          os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+          "Scriptorium", "runtime")
+
+  That Python runs when PyInstaller reads the spec, i.e. on the build
+  machine. The string baked into the bootloader is already an absolute
+  path such as C:\Users\<builder>\AppData\Local\Scriptorium\runtime.
+  PyInstaller's Windows bootloader does call ExpandEnvironmentStringsW
+  at run time, but only if the stored string still contains %VAR%
+  tokens. After os.environ.get there are none.
+
+  The PyInstaller project documents the working form as a literal
+  %LOCALAPPDATA%\... (cmd caret-escaping on the CLI) so expansion
+  happens in the bootloader, per user.
+
+ Failure trace
+  1. pyinstaller scriptorium.spec on user A's machine.
+  2. EXE(runtime_tmpdir=...) stores A's LOCALAPPDATA path.
+  3. User B runs Scriptorium.exe, or user A is renamed / the profile
+     is on a different drive.
+  4. The bootloader tries to create _MEIxxxxxx under A's profile.
+  5. Extraction fails or writes into the wrong tree; the process cannot
+     start, or a leftover runtime folder accumulates under a stale
+     profile.
+
+ Reproduction trigger
+  Rebuild the onefile .exe, then run it under a different Windows
+  account than the one that built it. Same-user same-machine use (the
+  current developer workflow) will not show it.
+
+ Impact
+  The documented intent of the v2.8 temp-dir fix is only met for the
+  account that built the binary. Portability of dist\Scriptorium.exe is
+  broken. This is a packaging logic error, not a runtime crash in the
+  .py when run from source.
+
+------------------------------------------------------------------------------
+ MINOR - Bug 4. Module docstring still says Version 2.7
+------------------------------------------------------------------------------
+ File:    scriptorium.py, lines 3–40 (module docstring), line 79
+          APP_VERSION = "2.8"
+          version_info.txt filevers / FileVersion / ProductVersion 2.8.0.0
+
+ Root cause
+  The banner comment was not bumped with APP_VERSION. version_info.txt
+  is consistent with 2.8 (LegalCopyright is U+00A9, not mojibake).
+
+ Impact
+  Anyone reading the file header, or a tool that greps the docstring,
+  reports the wrong version. No runtime effect.
+
+------------------------------------------------------------------------------
+ MINOR - Bug 5. A few diagnostics remain print()-only in the windowed .exe
+------------------------------------------------------------------------------
+ File:    scriptorium.py
+          set_autostart               line 221  (Settings also messagebox)
+          load_config                 lines 578, 582  (messagebox exists)
+          save_config                 lines 603, 615
+          _minimise_to_tray           line 2508
+ Spec:    scriptorium.spec line 102, console=False
+
+ Root cause
+  notes_010 Bug 8 is fixed for the case that mattered (unreadable
+  config): _maybe_warn_unreadable_config shows a dialogue. Two paths
+  still have no on-screen report:
+
+  * Automatic save_config() from _maybe_show_privacy_notice (1935) and
+    _maybe_offer_config_migration (1877) return False on OSError /
+    unreadable-without-force, and only print. The in-memory flag is
+    still set, so the notice/prompt will not reappear this session, but
+    the next launch repeats them. The user is not told the write failed.
+  * _minimise_to_tray 2505–2509: if neither .ico loads, it prints and
+    returns. The window stays (or stays iconic). Fail-safe is correct;
+    the user is not told why tray minimise did nothing.
+
+ Impact
+  Invisible diagnostics in dist\Scriptorium.exe. No data loss: refused
+  saves do not overwrite an unreadable file.
+
+------------------------------------------------------------------------------
+ MINOR - Bug 6. load_config opens the file as utf-8, not utf-8-sig
+------------------------------------------------------------------------------
+ File:    scriptorium.py, load_config lines 571–579
+ Contrast: import_file lines 2330–2333 (utf-8-sig, deliberately)
+
+ Root cause
+  A config saved by some Windows editors with a UTF-8 BOM makes
+  json.load raise JSONDecodeError. load_config then sets unreadable=True
+  and returns defaults. The file is not wiped (the notes_010 save
+  safeguard still holds) and the user does get the messagebox from
+  Bug 5's fix. They are told to repair JSON that is actually valid
+  aside from a BOM.
+
+ Reproduction trigger
+  Save scriptorium_config.json as "UTF-8 with BOM".
+
+ Impact
+  First-run-looking defaults, API key appears missing, until Settings
+  Save (force=True) rewrites the file. No silent clobber.
+
+------------------------------------------------------------------------------
+ MINOR - Bug 7. Example config omits always_on_top
+------------------------------------------------------------------------------
+ File:    scriptorium_config.example.json (no always_on_top key)
+          DEFAULT_CONFIG line 473 (always_on_top: False)
+
+ Root cause
+  The example is otherwise aligned with DEFAULT_CONFIG (backend,
+  models, tray, start_with_windows, start_minimised, placeholders,
+  letters, defaults). always_on_top was added to DEFAULT_CONFIG and
+  Settings but not to the example. The live file on this machine also
+  lacks the key; load_config seeds it from DEFAULT_CONFIG.
+
+ Impact
+  Documentation drift only. A user copying the example does not see the
+  key exists. Combined with Bug 1, anyone who then adds it by hand as a
+  JSON string hits the normalisation hole.
+
+------------------------------------------------------------------------------
+ SUSPICION - S1. Unrecognised backend is coerced to the cloud
+------------------------------------------------------------------------------
+ File:    scriptorium.py, normalise_config lines 533–542
+          DEFAULT_CONFIG["backend"] = "anthropic" (line 464)
+
+  A hand-edited "Ollama", "local", or "claude" is not in
+  ("anthropic", "ollama") and is replaced with "anthropic". The status
+  bar then honestly says text is sent to Anthropic, so the notes_010
+  lie is gone — but a case-typo for the local backend silently selects
+  the cloud. run_backend itself would have raised. This is the clamp
+  the v2.8 comment describes; whether "safe" should mean "cloud" or
+  "refuse / local" is a product choice. Not raised as confirmed.
+
+------------------------------------------------------------------------------
+ SUSPICION - S2. ctypes kernel32 HANDLE restype defaults to c_int
+------------------------------------------------------------------------------
+ File:    scriptorium.py, _claim_single_instance 166–167;
+          _start_restore_listener 2410–2411; _signal_existing_instance
+          173–177
+
+  On 64-bit Windows, ctypes WinDLL restype defaults to c_int (32-bit
+  signed). Kernel HANDLEs usually fit; a handle with the high bit set
+  would truncate. Not observed. Remediation is to set argtypes/restype
+  from ctypes.wintypes (HANDLE, BOOL, DWORD) at the same time as Bug 2.
+
+------------------------------------------------------------------------------
+ SUSPICION - S3. Reject does not abort the in-flight HTTP call
+------------------------------------------------------------------------------
+ File:    scriptorium.py, process.worker 2077–2089;
+          _invalidate_inflight 1997–2001
+
+  Reject bumps _request_id and re-enables Process. The daemon thread
+  remains blocked in urlopen (timeout 120 / 300 s). Rapid
+  Reject-then-Process stacks connections. The UI cannot be locked on
+  "Working…" and stale results cannot overwrite, which was the
+  requirement. Socket abort would need a different HTTP stack. Noted
+  only so it is not mistaken for a UI-state bug.
+
+Not a defect (audited and sound)
+  * Cross-thread GUI: process(), _detect_models(),
+    _start_restore_listener(), _tray_restore / _tray_quit all go through
+    after(0) with TclError/RuntimeError guards. _minimise_to_tray
+    itself runs on the Tk thread (from <Unmap> or __init__).
+  * _claim_request / accept / reject / busy: rapid Process is ignored
+    while busy; Escape/Reject cancels by id; Accept refuses while busy.
+  * undo_stack: _remember_for_undo(text, limit=50) at 2003–2015,
+    used by paste_original, _paste_at_click, clear_all, import_file,
+    accept.
+  * mask_placeholders / restore_placeholders: nonce token_hex(3);
+    drop/duplicate warnings; sentinel replace is bracket-terminated so
+    PH…_1 does not collide with PH…_10.
+  * import_file / export_file: native file dialogues, no path join of
+    unsanitised relative segments; utf-8-sig then cp1252; docx
+    ImportError and generic Exception on read; ValueError on write.
+  * save_config atomic replace; unreadable file not overwritten unless
+    force=True.
+
+
+3. REMEDIATION CODE SNIPPETS
+--------------------------------------------------------------------------------
+Self-contained, British English, intended to be dropped in as shown.
+Do not apply in this hunt — read-only.
+
+# --- Bug 1: include always_on_top in the boolean clamp -----------------
+
+def normalise_config(cfg):
+    """Return a copy of cfg with constrained settings restored to safe values.
+
+    A hand-edited or stale config file can contain an out-of-range enum (an
+    old default_mode, an unrecognised backend) or a stringy boolean
+    ("false" is truthy under bool()). Left unchecked, that either crashes the
+    worker thread with a KeyError or — for "backend" specifically — makes the
+    status bar and the actual HTTP dispatch disagree about whether text
+    leaves the machine. Free-form fields (the API key, model tags) are left
+    untouched.
+    """
+    clean = dict(cfg)
+    choices = {
+        "backend": ("anthropic", "ollama"),
+        "default_mode": tuple(MODES),
+        "default_strength": tuple(STRENGTHS),
+        "default_role": tuple(ROLES),
+        "default_diff_view": ("Clean", "Inline"),
+    }
+    for key, allowed in choices.items():
+        if clean.get(key) not in allowed:
+            clean[key] = DEFAULT_CONFIG[key]
+
+    for key in ("privacy_ack", "protect_placeholders",
+                "check_letter_conventions", "import_prompt_shown",
+                "minimise_to_tray", "start_with_windows", "start_minimised",
+                "always_on_top"):
+        value = clean.get(key, DEFAULT_CONFIG[key])
+        if isinstance(value, str):
+            clean[key] = value.strip().lower() in ("1", "true", "yes", "on")
+        elif not isinstance(value, bool):
+            clean[key] = DEFAULT_CONFIG[key]
+        else:
+            clean[key] = value
+
+    clean = normalise_tone_config(clean)
+    return clean
+
+
+# --- Bug 2: check Win32 handles; do not busy-spin on WAIT_FAILED ------
+
+from ctypes import wintypes
+
+_WAIT_OBJECT_0 = 0
+_WAIT_FAILED = 0xFFFFFFFF
+_EVENT_MODIFY_STATE = 0x0002
+
+def _kernel32():
+    """Return kernel32 with HANDLE-safe argtypes (64-bit truncation)."""
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+    k32.CreateMutexW.restype = wintypes.HANDLE
+    k32.CreateEventW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.BOOL,
+                                 wintypes.LPCWSTR]
+    k32.CreateEventW.restype = wintypes.HANDLE
+    k32.OpenEventW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+    k32.OpenEventW.restype = wintypes.HANDLE
+    k32.SetEvent.argtypes = [wintypes.HANDLE]
+    k32.SetEvent.restype = wintypes.BOOL
+    k32.ResetEvent.argtypes = [wintypes.HANDLE]
+    k32.ResetEvent.restype = wintypes.BOOL
+    k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    k32.WaitForSingleObject.restype = wintypes.DWORD
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    k32.CloseHandle.restype = wintypes.BOOL
+    return k32
+
+
+def _claim_single_instance():
+    """Return True if this process now owns the single-instance mutex.
+
+    False means another Scriptorium is already running, or the mutex could
+    not be created. A NULL handle is treated as failure (do not start a
+    second 'unique' copy with no lock), not as success.
+    """
+    global _mutex_handle
+    kernel32 = _kernel32()
+    handle = kernel32.CreateMutexW(None, False, _MUTEX_NAME)
+    if not handle:
+        return False
+    _mutex_handle = handle
+    return ctypes.get_last_error() != _ERROR_ALREADY_EXISTS
+
+
+def _start_restore_listener(self):
+    """Watch the named restore event so a second launch can wake us up.
+
+    Runs on a daemon thread; the actual window operations happen back on
+    the Tk thread via _post_to_ui(), same as every other worker-thread
+    callback in this app. A failed CreateEventW is logged and the watcher
+    is not started — a tight WaitForSingleObject(NULL) loop would otherwise
+    spin the CPU and flood Tk with _bring_to_front callbacks.
+    """
+    kernel32 = _kernel32()
+    handle = kernel32.CreateEventW(None, True, False, _RESTORE_EVENT_NAME)
+    if not handle:
+        print("[warning] could not create the restore event; a second "
+              "launch will not bring this window to the front")
+        self._restore_event = None
+        return
+    self._restore_event = handle
+
+    def _watch():
+        while True:
+            rc = kernel32.WaitForSingleObject(self._restore_event, _INFINITE)
+            if rc != _WAIT_OBJECT_0:
+                # WAIT_FAILED or a closed handle — do not busy-spin.
+                break
+            kernel32.ResetEvent(self._restore_event)
+            try:
+                self._post_to_ui(self._bring_to_front)
+            except Exception:
+                pass
+
+    threading.Thread(target=_watch, daemon=True).start()
+
+
+# --- Bug 3: keep %LOCALAPPDATA% unexpanded for the bootloader ---------
+# In scriptorium.spec, replace the os.environ.get join with a string
+# that still contains the environment-variable tokens:
+
+runtime_tmpdir = r"%LOCALAPPDATA%\Scriptorium\runtime"
+
+# Fallback if LOCALAPPDATA is unset at run time: the bootloader leaves
+# the token in place and extraction fails loudly, which is preferable to
+# writing into another user's profile. Optionally document a second
+# build flavour. Do not call os.environ.get / os.path.expanduser here;
+# those run at spec-parse (build) time.
+
+
+# --- Bug 4: bump the module docstring ---------------------------------
+
+# Line 39 of scriptorium.py, inside the module docstring:
+#     Author: built with Mark, August 2026. Version 2.7.
+# becomes:
+#     Author: built with Mark, August 2026. Version 2.8.
+
+
+# --- Bug 5: surface refused automatic saves and tray-icon failure -----
+
+def _minimise_to_tray(self):
+    """Withdraw the window and show a tray icon in its place."""
+    # ... existing icon search unchanged ...
+    if image is None:
+        # Fail safe: keep the window open rather than vanish with no
+        # visible icon and no way back. Tell the user — print() is
+        # invisible in the packaged .exe (scriptorium.spec console=False).
+        try:
+            if self.winfo_exists():
+                messagebox.showwarning(
+                    "Could not minimise to the tray",
+                    "Scriptorium could not load a tray icon from the icon "
+                    "folder, so the window will stay on the taskbar "
+                    "instead.",
+                    parent=self)
+        except (tk.TclError, RuntimeError):
+            pass
+        return
+    # ... remainder unchanged ...
+
+
+# In _maybe_show_privacy_notice / _maybe_offer_config_migration, honour
+# save_config()'s boolean rather than ignoring it:
+
+            self.cfg["privacy_ack"] = True
+            if not save_config(self.cfg):
+                # Keep the in-memory ack so this session is not nagged,
+                # but do not pretend the flag reached disk.
+                pass  # optional: a single showwarning here
+
+
+# --- Bug 6: read the config with BOM tolerance ------------------------
+
+def load_config():
+    """Load scriptorium_config.json, falling back to DEFAULT_CONFIG."""
+    load_config.unreadable = False
+    cfg = dict(DEFAULT_CONFIG)
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8-sig") as fh:
+            loaded = json.load(fh)
+    except FileNotFoundError:
+        return normalise_config(cfg)
+    except (json.JSONDecodeError, OSError) as exc:
+        load_config.unreadable = True
+        print(f"[warning] could not read config: {exc}")
+        return normalise_config(cfg)
+    # ... remainder unchanged ...
+
+
+# --- Bug 7: add always_on_top to the example --------------------------
+# In scriptorium_config.example.json, alongside start_minimised:
+
+  "always_on_top": false,
+
+
+4. PRECISE INSERTION REFERENCE
+--------------------------------------------------------------------------------
+
+Bug 1 — always_on_top normalisation
+  File:   scriptorium.py
+  Method: def normalise_config(cfg):          # line 521
+  Change: In the boolean-key tuple that today reads
+              ("privacy_ack", "protect_placeholders",
+               "check_letter_conventions", "import_prompt_shown",
+               "minimise_to_tray", "start_with_windows", "start_minimised")
+          at lines 544–546, append "always_on_top" as the eighth name.
+          No other call site needs to change: __init__ line 1550 and
+          _after_settings line 2399 already use bool(self.cfg.get(
+          "always_on_top")), which becomes correct once the value is a
+          real bool. SettingsDialog._save already writes
+          bool(self.topmost_var.get()) at line 1499.
+
+Bug 2 — mutex / restore event
+  File:   scriptorium.py
+  Helpers to add: _kernel32, _WAIT_OBJECT_0, _WAIT_FAILED
+                  (module level, near _MUTEX_NAME at line 151)
+  Replace: def _claim_single_instance():      # line 158
+  Replace: Scriptorium._start_restore_listener(self)  # line 2403
+  Optional: _signal_existing_instance (line 171) should use the same
+            _kernel32() so OpenEventW is HANDLE-safe; it already
+            CloseHandle's the event handle it opens (lines 175–177).
+  Do not CloseHandle _mutex_handle or _restore_event until process
+  exit; they are the process-lifetime tokens.
+
+Bug 3 — runtime_tmpdir
+  File:   scriptorium.spec
+  Delete: lines 69–71
+              runtime_tmpdir = os.path.join(
+                  os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+                  "Scriptorium", "runtime")
+  Insert in their place:
+              runtime_tmpdir = r"%LOCALAPPDATA%\Scriptorium\runtime"
+  Leave EXE(..., runtime_tmpdir=runtime_tmpdir, ...) at line 101.
+  Rebuild the onefile .exe before this takes effect; the running
+  source tree is unaffected.
+
+Bug 4 — docstring version
+  File:   scriptorium.py line 39
+  Replace the last sentence of the module docstring
+      "Author: built with Mark, August 2026. Version 2.7."
+  with
+      "Author: built with Mark, August 2026. Version 2.8."
+  version_info.txt is already 2.8.0.0 — do not bump it.
+
+Bug 5 — tray warning
+  File:   scriptorium.py
+  Method: def _minimise_to_tray(self):        # line 2482
+  Replace the print() at line 2508 with the messagebox snippet above,
+  still returning without withdraw() so the fail-safe is preserved.
+
+Bug 6 — config BOM
+  File:   scriptorium.py
+  Function: def load_config():                # line 559
+  Change only the open() encoding at line 572 from "utf-8" to
+  "utf-8-sig". Leave save_config writing "utf-8" (no BOM); Python's
+  json.dump output is BOM-free.
+
+Bug 7 — example JSON
+  File:   scriptorium_config.example.json
+  Insert "always_on_top": false after "start_minimised": false,
+  matching DEFAULT_CONFIG key order (start_minimised, always_on_top,
+  protect_placeholders). Do not copy keys from the live
+  scriptorium_config.json and do not touch that file.
+
+Optional (Suspicion S1, not required)
+  File:   scriptorium.py, normalise_config, backend branch ~541
+  Instead of clamping an unknown backend to DEFAULT_CONFIG["backend"]
+  (anthropic), either casefold the comparison or leave the raw value
+  so run_backend's existing BackendError at lines 940–942 fires.
+  Product decision; not applied as a confirmed defect.
+
+
+End of notes_002.txt
+================================================================================
