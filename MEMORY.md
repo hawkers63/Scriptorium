@@ -112,10 +112,91 @@ v2.11+ scoped (not started), "Current shipped version" line updated to 2.9,
 source-notes table extended for notes_016/017/018, the drag-and-drop
 "Deferred" entry marked superseded by notes_016's complete proposal.
 
-Next session: v2.10 (visual polish, low risk) or start v2.11+'s three-tone
-picker (needs live-model calibration per
-[[mark_meaning_preservation_priority]]) — whichever Mark wants to tackle
-first; both are fully scoped in `ROADMAP.md` already.
+Continued straight into v2.10 the same session — see the entry below.
+
+---
+
+## 2026-09-02 (continued) — v2.10 (notes_017 visual/UX polish) implemented
+
+Moved straight from v2.9 into v2.10 in the same session (Mark: "We will see
+how much ground we can cover in this session"). All six cherry-picked
+notes_017 items implemented and verified (full list and acceptance evidence
+in `ROADMAP.md`'s v2.10 section); the two worth expanding on here:
+
+**Testing this without any GUI automation available** (the long-standing
+gap for this Tk app) leaned harder than usual on `winfo_manager()` rather
+than `winfo_ismapped()` as the pack-state probe: constructing `Scriptorium()`
+directly (to dodge the single-instance mutex, same technique used in v2.9)
+never calls `mainloop()`, so the root itself is never actually mapped to a
+screen, and `winfo_ismapped()` reads `False` for every descendant
+regardless of real `pack()`/`pack_forget()` state — a test-harness artefact
+discovered while writing the check, not a fix to the app. `winfo_manager()`
+(`"pack"` vs. `""`) reports the packer registration directly and isn't
+fooled by the unmapped root, so it became the reliable probe for the notice
+banner and the Working… progress bar both attaching/detaching correctly.
+
+**Backend labels needed a translation layer, not just a relabel**: swapping
+`CTkSegmentedButton`'s `values=["anthropic","ollama"]` for
+`["Claude","Ollama"]` would have made `backend_var` *store* the display
+label directly — which, after v2.9's S1 fix removed the enforced
+`anthropic`/`ollama` enum-clamp from `normalise_config()`, would have sent
+a literal `"Claude"` straight to `run_backend()` and raised a spurious
+`BackendError` on every single Settings save. Added `BACKEND_LABELS`/
+`BACKEND_IDS` as an explicit two-way mapping instead: the segmented button
+shows/edits the label, `_refresh_state()` and `_save()` both translate
+through `BACKEND_IDS` back to the internal id, and the stored config
+never sees anything but `"anthropic"`/`"ollama"`. Verified end-to-end
+through a real `_save()` call against a temp config path, not just read:
+confirmed the file on disk holds `"ollama"`, not `"Ollama"`.
+
+Also implemented: pane typography/background match (`PANE_BG`/`PANE_FG`/
+`PANE_FONT` tokens shared by both `original_box` and `revised_box`); diff
+tag background fills (`DIFF_INS_BG`/`DIFF_DEL_BG`) alongside the existing
+foreground colours (`DIFF_INS_FG`/`DIFF_DEL_FG`, the deleted-red also
+brightened from the old tight-AA `#e06c75` to `#ffa0a8`); the ambiguity
+strip replaced by a proper `notice_frame`/`notice_label`/Dismiss-button
+combo (`_show_ambiguities()` rewritten around it); an indeterminate
+`CTkProgressBar` plus a Process-button colour pulse driven from `_set_busy()`
+or a long call now shows visible motion instead of only a static label;
+`bind_dialog_chrome()`/`position_over_parent()` shared helpers wired into
+both `TonePickerDialog` and `SettingsDialog` for `<Escape>` +
+`WM_DELETE_WINDOW` + same-monitor centring; `SettingsDialog` rebuilt around
+a `CTkScrollableFrame` body with the Save/Cancel row pinned outside it via
+`side="bottom"`, geometry shrunk from a fixed 780px-tall non-resizable
+dialog to 520×640 with `resizable(False, True)` and a 480×420 floor, so it
+no longer clips at 150% DPI or the app's own 600px minimum height; the tone
+picker's blocking "Tone limit" `messagebox.showinfo` replaced with a
+2-second `status_label` flash so hitting the cap no longer interrupts the
+picker with a modal for something already shown live.
+
+**Deliberately left out of v2.10**, per the note's own risk/value framing:
+the two-row-toolbar-wrap-at-920px change (marginal value at the app's
+actual 920px minimum, revisit only if Mark resizes down that far in
+practice) and character-level diff tokenisation (notes_017 itself
+recommends against it — word-level already matches how a copy-editor scans
+a British spelling change).
+
+**Verification**: `ast.parse()` clean; the full v2.9 regression/bug-fix
+suite re-run and still passing; a dedicated 28-check script built the real
+`Scriptorium`/`SettingsDialog`/`TonePickerDialog` objects and asserted
+directly against widget state (colours, fonts, tag configs, pack-manager
+state, `<Escape>` bindings, the real `_save()` round-trip) rather than
+trusting the code by inspection. Packaged `.exe` rebuilt a second time this
+session (now carrying both v2.9 and v2.10): `FileVersion`/`ProductVersion`
+confirmed `2.10.0.0`, launched for real, alive and `Responding: True` after
+an 8-second soak. Real `scriptorium_config.json` confirmed byte-identical
+(unchanged mtime) after every test in both v2.9 and v2.10 — nothing this
+session ever touched it.
+
+`ROADMAP.md`'s v2.10 section marked shipped with full acceptance evidence;
+"Current shipped version" updated to 2.10; notes_017's source-notes-table
+row marked closed.
+
+Next session: v2.11+ (notes_016's five architecture proposals — three-tone
+picker first, since it needs the live-model calibration discipline
+[[mark_meaning_preservation_priority]] requires; then user presets, retry
+transport, and the two raw-Win32 items last) whenever Mark is ready — fully
+scoped in `ROADMAP.md` already, nothing implemented yet.
 
 ---
 

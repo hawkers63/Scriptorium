@@ -36,7 +36,7 @@ Dependencies
     Optional: install python-docx to import from and export to Word (.docx)
     files (`pip install python-docx`). Plain text and Markdown work without it.
 
-Author: built with Mark, August 2026. Version 2.9.
+Author: built with Mark, August 2026. Version 2.10.
 """
 
 import os
@@ -77,7 +77,24 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.9"
+APP_VERSION = "2.10"
+
+# A small shared palette (notes_017, v2.10) so the two text panes, the diff
+# tags and the notice banner read as one surface instead of drifting
+# independently -- not a theme engine, just named constants used directly
+# where each colour/font already appears in the widget code below.
+PANE_BG = "#1e1e1e"
+PANE_FG = "#e6e6e6"
+PANE_FONT = ("Segoe UI", 13)
+DIFF_INS_FG = "#5ee0c8"    # ~9.4:1 against PANE_BG
+DIFF_INS_BG = "#16352f"    # a fill, not just foreground ink -- easier to scan
+DIFF_DEL_FG = "#ffa0a8"    # ~7:1, a safer margin than the old #e06c75 (5.23:1)
+DIFF_DEL_BG = "#3a1f24"
+AMBER_BG = "#43361f"
+AMBER_FG = "#f5d589"
+AMBER_RULE = "#c9a227"
+BUSY_BLUE = "#1f6aa5"       # matches CTk's default blue accent
+BUSY_BLUE_DARK = "#144870"  # alternate shade for the busy-pulse animation
 
 def _config_dir():
     """Return the folder that holds scriptorium_config.json.
@@ -1252,6 +1269,38 @@ def audit_letter_conventions(text):
 
 
 # --------------------------------------------------------------------------- #
+#  Shared modal-dialog chrome (notes_017 §1.7/2.8/3.6)
+# --------------------------------------------------------------------------- #
+# Neither dialog previously bound Escape or WM_DELETE_WINDOW (only the
+# title-bar X worked, via Tk's default), and Tk places a new Toplevel on
+# whichever screen currently has focus rather than the parent's -- on a
+# multi-monitor setup a dialog can open on the wrong display entirely.
+
+def bind_dialog_chrome(window, on_close):
+    """Escape and the title-bar close box both run on_close."""
+    window.bind("<Escape>", lambda _e: on_close())
+    window.protocol("WM_DELETE_WINDOW", on_close)
+
+
+def position_over_parent(window, master, width, height):
+    """Place a modal centred on its parent's current monitor.
+
+    Uses the parent's live geometry rather than Tk's own placement, so a
+    session with the main window on a secondary display doesn't have its
+    dialogs pop up on the primary one instead.
+    """
+    window.update_idletasks()
+    try:
+        px, py = master.winfo_rootx(), master.winfo_rooty()
+        pw, ph = master.winfo_width(), master.winfo_height()
+    except tk.TclError:
+        return
+    x = px + max(0, (pw - width) // 2)
+    y = py + max(0, (ph - height) // 2)
+    window.geometry(f"{width}x{height}+{x}+{y}")
+
+
+# --------------------------------------------------------------------------- #
 #  Tone picker dialog
 # --------------------------------------------------------------------------- #
 # CustomTkinter has no built-in multi-select menu, and a permanently visible
@@ -1272,6 +1321,8 @@ class TonePickerDialog(ctk.CTkToplevel):
         self.resizable(False, False)
         self.transient(master)
         self.grab_set()
+        bind_dialog_chrome(self, self.destroy)
+        self.after_idle(lambda: position_over_parent(self, master, 420, 540))
 
         ctk.CTkLabel(
             self, text=f"Choose up to {TONE_PICKER_LIMIT} tones",
@@ -1316,11 +1367,14 @@ class TonePickerDialog(ctk.CTkToplevel):
         if self.variables[tone].get():
             if tone not in self.selected_order:
                 if len(self.selected_order) >= TONE_PICKER_LIMIT:
+                    # A blocking messagebox here interrupted the picker for
+                    # something the always-visible status_label already
+                    # says (notes_017 §2.8) -- flash it instead.
                     self.variables[tone].set(False)
-                    messagebox.showinfo(
-                        "Tone limit",
-                        f"Choose no more than {TONE_PICKER_LIMIT} tones.",
-                        parent=self)
+                    self.status_label.configure(
+                        text=f"Choose no more than {TONE_PICKER_LIMIT} tones.",
+                        text_color="#e06c75")
+                    self.after(1800, self._refresh_status)
                     return
                 self.selected_order.append(tone)
         elif tone in self.selected_order:
@@ -1328,12 +1382,20 @@ class TonePickerDialog(ctk.CTkToplevel):
         self._refresh_status()
 
     def _refresh_status(self):
-        """Show the current count and dominant-first tone order."""
+        """Show the current count and dominant-first tone order.
+
+        Also reached via a delayed self.after() call from the tone-limit
+        flash (see _toggle_tone) that can outlive the dialog if it is
+        closed within the flash window; winfo_exists() guards that case.
+        """
+        if not self.winfo_exists():
+            return
         count = len(self.selected_order)
         description = (" → ".join(self.selected_order) if self.selected_order
                        else "original tone will be preserved")
         self.status_label.configure(
-            text=f"{count} of {TONE_PICKER_LIMIT} selected: {description}")
+            text=f"{count} of {TONE_PICKER_LIMIT} selected: {description}",
+            text_color="gray65")
 
     def _clear(self):
         self.selected_order.clear()
@@ -1356,6 +1418,13 @@ class TonePickerDialog(ctk.CTkToplevel):
 #  Settings dialog
 # --------------------------------------------------------------------------- #
 
+# The backend segmented button shows these labels (notes_017 §1.7/2.8: the
+# raw "anthropic"/"ollama" internal ids were displayed verbatim) while the
+# stored config value stays the internal id either way.
+BACKEND_LABELS = {"anthropic": "Claude", "ollama": "Ollama"}
+BACKEND_IDS = {label: key for key, label in BACKEND_LABELS.items()}
+
+
 class SettingsDialog(ctk.CTkToplevel):
     def __init__(self, master, cfg, on_save):
         super().__init__(master)
@@ -1363,40 +1432,60 @@ class SettingsDialog(ctk.CTkToplevel):
         self.on_save = on_save
 
         self.title("Settings")
-        self.geometry("520x780")
-        self.resizable(False, False)
+        self.geometry("520x640")
+        self.resizable(False, True)
+        self.minsize(480, 420)
         self.transient(master)
         self.grab_set()  # modal
+        bind_dialog_chrome(self, self.destroy)
+        self.after_idle(lambda: position_over_parent(self, master, 520, 640))
+
+        # btn_row is packed on self (not the scrollable body) BEFORE body,
+        # side="bottom", so Save/Cancel stay reachable at a reduced height
+        # or 150% DPI instead of scrolling off with the rest of the content
+        # (notes_017 §1.7: the old fixed 780px dialog was taller than the
+        # app's own 600px minimum height and would clip on a 1080p laptop).
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row.pack(fill="x", padx=16, pady=18, side="bottom")
+        ctk.CTkButton(btn_row, text="Cancel", width=100, fg_color="gray30",
+                      command=self.destroy).pack(side="right", padx=(8, 0))
+        ctk.CTkButton(btn_row, text="Save", width=100,
+                      command=self._save).pack(side="right")
+
+        body = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=0, pady=0)
 
         pad = {"padx": 16, "pady": (10, 0)}
 
-        ctk.CTkLabel(self, text="Backend", font=ctk.CTkFont(weight="bold")
+        ctk.CTkLabel(body, text="Backend", font=ctk.CTkFont(weight="bold")
                      ).pack(anchor="w", **pad)
-        self.backend_var = ctk.StringVar(value=cfg.get("backend", "anthropic"))
+        current_backend = cfg.get("backend", "anthropic")
+        self.backend_var = ctk.StringVar(
+            value=BACKEND_LABELS.get(current_backend, "Claude"))
         seg = ctk.CTkSegmentedButton(
-            self, values=["anthropic", "ollama"], variable=self.backend_var,
+            body, values=list(BACKEND_LABELS.values()), variable=self.backend_var,
             command=lambda _=None: self._refresh_state())
         seg.pack(fill="x", padx=16, pady=(2, 4))
 
-        ctk.CTkLabel(self, text="Claude API key (pay-as-you-go, from "
+        ctk.CTkLabel(body, text="Claude API key (pay-as-you-go, from "
                      "console.anthropic.com)").pack(anchor="w", **pad)
-        self.key_entry = ctk.CTkEntry(self, show="*", width=480)
+        self.key_entry = ctk.CTkEntry(body, show="*", width=480)
         self.key_entry.insert(0, cfg.get("anthropic_api_key", ""))
         self.key_entry.pack(padx=16, pady=(2, 0))
-        ctk.CTkLabel(self, text="Stored in plain text in the config file. "
+        ctk.CTkLabel(body, text="Stored in plain text in the config file. "
                      "Leave blank to use the ANTHROPIC_API_KEY env variable.",
                      text_color="gray60",
                      font=ctk.CTkFont(size=11)).pack(anchor="w", padx=16)
 
-        ctk.CTkLabel(self, text="Claude model").pack(anchor="w", **pad)
+        ctk.CTkLabel(body, text="Claude model").pack(anchor="w", **pad)
         self.model_var = ctk.StringVar(
             value=cfg.get("anthropic_model", DEFAULT_ANTHROPIC_MODEL))
-        ctk.CTkOptionMenu(self, values=ANTHROPIC_MODELS,
+        ctk.CTkOptionMenu(body, values=ANTHROPIC_MODELS,
                           variable=self.model_var).pack(fill="x", padx=16, pady=(2, 0))
 
-        ctk.CTkLabel(self, text="Local Ollama model — type a tag, or Detect "
+        ctk.CTkLabel(body, text="Local Ollama model — type a tag, or Detect "
                      "what Ollama has installed").pack(anchor="w", **pad)
-        ollama_row = ctk.CTkFrame(self, fg_color="transparent")
+        ollama_row = ctk.CTkFrame(body, fg_color="transparent")
         ollama_row.pack(fill="x", padx=16, pady=(2, 0))
         current_model = cfg.get("ollama_model", DEFAULT_OLLAMA_MODEL)
         self.ollama_combo = ctk.CTkComboBox(ollama_row, width=360,
@@ -1406,38 +1495,38 @@ class SettingsDialog(ctk.CTkToplevel):
         self.detect_btn = ctk.CTkButton(ollama_row, text="Detect", width=110,
                                         command=self._detect_models)
         self.detect_btn.pack(side="left", padx=(8, 0))
-        self.ollama_status = ctk.CTkLabel(self, text="", text_color="gray60",
+        self.ollama_status = ctk.CTkLabel(body, text="", text_color="gray60",
                                           font=ctk.CTkFont(size=11))
         self.ollama_status.pack(anchor="w", padx=16)
 
         self.protect_var = tk.BooleanVar(
             value=cfg.get("protect_placeholders", True))
         ctk.CTkCheckBox(
-            self, variable=self.protect_var,
+            body, variable=self.protect_var,
             text="Protect placeholders — mask [Name], {{Date}}, {amount}, "
                  "<Date> while editing").pack(anchor="w", padx=16, pady=(16, 0))
 
         self.letters_var = tk.BooleanVar(
             value=cfg.get("check_letter_conventions", True))
         ctk.CTkCheckBox(
-            self, variable=self.letters_var,
+            body, variable=self.letters_var,
             text="Check British letter conventions — flag salutation / "
                  "sign-off mismatches (advisory)").pack(anchor="w", padx=16, pady=(10, 0))
 
-        ctk.CTkLabel(self, text="Startup & window behaviour",
+        ctk.CTkLabel(body, text="Startup & window behaviour",
                      font=ctk.CTkFont(weight="bold")).pack(anchor="w", **pad)
 
         self.tray_var = tk.BooleanVar(
             value=cfg.get("minimise_to_tray", False) and TRAY_AVAILABLE)
         ctk.CTkCheckBox(
-            self, variable=self.tray_var,
+            body, variable=self.tray_var,
             state="normal" if TRAY_AVAILABLE else "disabled",
             text="Send to the system tray when minimised",
             command=self._refresh_tray_dependent_state
         ).pack(anchor="w", padx=16, pady=(2, 0))
         if not TRAY_AVAILABLE:
             ctk.CTkLabel(
-                self, text="Needs the optional pystray and Pillow packages: "
+                body, text="Needs the optional pystray and Pillow packages: "
                           "pip install pystray pillow",
                 text_color="gray60",
                 font=ctk.CTkFont(size=11)).pack(anchor="w", padx=16)
@@ -1445,29 +1534,22 @@ class SettingsDialog(ctk.CTkToplevel):
         self.autostart_var = tk.BooleanVar(
             value=cfg.get("start_with_windows", False))
         ctk.CTkCheckBox(
-            self, variable=self.autostart_var,
+            body, variable=self.autostart_var,
             text="Start with Windows").pack(anchor="w", padx=16, pady=(10, 0))
 
         self.start_minimised_var = tk.BooleanVar(
             value=cfg.get("start_minimised", False) and TRAY_AVAILABLE)
         self.start_minimised_check = ctk.CTkCheckBox(
-            self, variable=self.start_minimised_var,
+            body, variable=self.start_minimised_var,
             text="Start minimised to tray")
         self.start_minimised_check.pack(anchor="w", padx=16, pady=(10, 0))
         self._refresh_tray_dependent_state()
 
         self.topmost_var = tk.BooleanVar(value=cfg.get("always_on_top", False))
         ctk.CTkCheckBox(
-            self, variable=self.topmost_var,
+            body, variable=self.topmost_var,
             text="Keep Scriptorium on top of other windows"
-        ).pack(anchor="w", padx=16, pady=(10, 0))
-
-        btn_row = ctk.CTkFrame(self, fg_color="transparent")
-        btn_row.pack(fill="x", padx=16, pady=18, side="bottom")
-        ctk.CTkButton(btn_row, text="Cancel", width=100, fg_color="gray30",
-                      command=self.destroy).pack(side="right", padx=(8, 0))
-        ctk.CTkButton(btn_row, text="Save", width=100,
-                      command=self._save).pack(side="right")
+        ).pack(anchor="w", padx=16, pady=(10, 18))
 
         self._refresh_state()
 
@@ -1507,7 +1589,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self.ollama_status.configure(text=f"Found {len(models)} model(s).")
 
     def _refresh_state(self):
-        cloud = self.backend_var.get() == "anthropic"
+        cloud = BACKEND_IDS.get(self.backend_var.get()) == "anthropic"
         self.key_entry.configure(state="normal" if cloud else "disabled")
         self.ollama_combo.configure(state="disabled" if cloud else "normal")
         self.detect_btn.configure(state="disabled" if cloud else "normal")
@@ -1534,7 +1616,7 @@ class SettingsDialog(ctk.CTkToplevel):
         """
         candidate = dict(self.cfg)
         candidate.update({
-            "backend": self.backend_var.get(),
+            "backend": BACKEND_IDS.get(self.backend_var.get(), "anthropic"),
             "anthropic_api_key": self.key_entry.get().strip(),
             "anthropic_model": self.model_var.get(),
             "ollama_model": (
@@ -1751,9 +1833,13 @@ class Scriptorium(ctk.CTk):
             rev_header, values=["Clean", "Inline"], variable=self.diff_view_var,
             command=self._on_diff_view_change, width=160).pack(side="right")
 
-        # Original: editable CTk textbox.
-        self.original_box = ctk.CTkTextbox(panes, wrap="word",
-                                           font=ctk.CTkFont(size=14))
+        # Original: editable CTk textbox. Matched to Revised's face, size and
+        # background (PANE_FONT/PANE_BG/PANE_FG) so the two panes read as one
+        # surface rather than the left looking like a different, "lighter"
+        # widget next to the right's darker themed tk.Text (notes_017 §1.2).
+        self.original_box = ctk.CTkTextbox(
+            panes, wrap="word", fg_color=PANE_BG, text_color=PANE_FG,
+            font=ctk.CTkFont(family=PANE_FONT[0], size=PANE_FONT[1]))
         self.original_box.grid(row=1, column=0, sticky="nsew", padx=(0, 6), pady=4)
         # <<Modified>> covers every kind of change (typing, cut, paste,
         # undo) so the live word/character count in _refresh_status()
@@ -1772,25 +1858,47 @@ class Scriptorium(ctk.CTk):
         revised_frame.grid_columnconfigure(0, weight=1)
 
         self.revised_box = tk.Text(
-            revised_frame, wrap="word", bd=0, padx=10, pady=10,
-            font=("Segoe UI", 12), background="#1d1e1e", foreground="#dce4ee",
-            insertbackground="#dce4ee", relief="flat", state="disabled",
-            highlightthickness=0)
+            revised_frame, wrap="word", bd=0, padx=12, pady=12,
+            font=PANE_FONT, background=PANE_BG, foreground=PANE_FG,
+            insertbackground=PANE_FG, relief="flat", state="disabled",
+            highlightthickness=0, spacing1=4, spacing3=6)
         self.revised_box.grid(row=0, column=0, sticky="nsew")
         scroll = ctk.CTkScrollbar(revised_frame, command=self.revised_box.yview)
         scroll.grid(row=0, column=1, sticky="ns")
         self.revised_box.configure(yscrollcommand=scroll.set)
-        self.revised_box.tag_config("changed", foreground="#4ec9b0")
-        self.revised_box.tag_config("deleted", foreground="#e06c75", overstrike=1)
+        # Background fills, not just foreground ink, so a change is easy to
+        # spot at a glance rather than only meeting AA contrast as coloured
+        # text (notes_017 §1.3/2.3) -- word-level tokenisation stays as-is,
+        # deliberately not moving to character-level diffs (notes_017 §5).
+        self.revised_box.tag_config(
+            "changed", foreground=DIFF_INS_FG, background=DIFF_INS_BG)
+        self.revised_box.tag_config(
+            "deleted", foreground=DIFF_DEL_FG, background=DIFF_DEL_BG,
+            overstrike=1)
         self.revised_box.bind(
             "<Button-3>",
             lambda event: self._show_text_context_menu(event, self.revised_box,
                                                         allow_paste=False))
 
-        # Ambiguity strip (hidden until there is something to show).
-        self.ambiguity_box = ctk.CTkTextbox(self, height=64, wrap="word",
-                                            fg_color="#3a2f1a",
-                                            font=ctk.CTkFont(size=12))
+        # Notice/ambiguity banner (hidden until there is something to show).
+        # A frame with a real Dismiss button rather than a disabled CTkTextbox
+        # (notes_017 §1.6/2.7): the old disabled textbox had no dismiss
+        # control and blocked text selection on some CTk versions, so a
+        # flagged line couldn't even be copied out.
+        self.notice_frame = ctk.CTkFrame(self, fg_color=AMBER_BG,
+                                         corner_radius=6)
+        rule = ctk.CTkFrame(self.notice_frame, width=4, fg_color=AMBER_RULE,
+                            corner_radius=0)
+        rule.pack(side="left", fill="y")
+        self.notice_label = ctk.CTkLabel(
+            self.notice_frame, text="", justify="left", anchor="w",
+            text_color=AMBER_FG, font=ctk.CTkFont(size=12), wraplength=900)
+        self.notice_label.pack(side="left", fill="x", expand=True,
+                               padx=10, pady=8)
+        ctk.CTkButton(
+            self.notice_frame, text="Dismiss", width=80, fg_color="gray30",
+            command=self.notice_frame.pack_forget
+        ).pack(side="right", padx=8, pady=8)
         # packed on demand in _show_ambiguities()
 
     def _build_actionbar(self):
@@ -1842,6 +1950,13 @@ class Scriptorium(ctk.CTk):
                       command=self.import_file).pack(side="right", padx=4)
         ctk.CTkButton(bar2, text="Clear", width=80, fg_color="gray30",
                       command=self.clear_all).pack(side="right", padx=4)
+
+        # Working… motion (notes_017 §1.5/2.6): a static "Working…" label was
+        # the only feedback during a long Ollama call, which reads as frozen.
+        # Packed/started on demand from _set_busy(), not here.
+        self.progress = ctk.CTkProgressBar(self, mode="indeterminate",
+                                           height=4)
+        self._pulse_job = None
 
     def _build_statusbar(self):
         self.status = ctk.CTkLabel(self, text="", anchor="w",
@@ -1989,17 +2104,16 @@ class Scriptorium(ctk.CTk):
             save_config(self.cfg)
 
     def _show_ambiguities(self, items):
+        """Show model ambiguities in a dismissible banner, or hide it."""
         if items:
-            self.ambiguity_box.pack(fill="x", padx=12, pady=(0, 4),
-                                    before=self.status)
-            self.ambiguity_box.configure(state="normal")
-            self.ambiguity_box.delete("1.0", "end")
-            self.ambiguity_box.insert(
-                "end", "⚠ Ambiguities flagged (not silently changed):\n" +
-                "\n".join(f"  • {a}" for a in items))
-            self.ambiguity_box.configure(state="disabled")
+            title = "Ambiguities flagged (not silently changed)"
+            body = "\n".join(f"• {a}" for a in items)
+            self.notice_label.configure(text=f"{title}\n{body}")
+            if not self.notice_frame.winfo_ismapped():
+                self.notice_frame.pack(fill="x", padx=12, pady=(0, 4),
+                                       before=self.status)
         else:
-            self.ambiguity_box.pack_forget()
+            self.notice_frame.pack_forget()
 
     # -- actions ------------------------------------------------------------ #
 
@@ -2019,6 +2133,30 @@ class Scriptorium(ctk.CTk):
         self.accept_btn.configure(state="disabled" if flag else "normal")
         self.softer_btn.configure(state="disabled" if flag else "normal")
         self.stronger_btn.configure(state="disabled" if flag else "normal")
+
+        if flag:
+            self.progress.pack(fill="x", padx=12, pady=(0, 4),
+                               before=self.status)
+            self.progress.start()
+            self._pulse_job = self.after(400, self._pulse_process)
+        else:
+            if self._pulse_job is not None:
+                self.after_cancel(self._pulse_job)
+                self._pulse_job = None
+            self.process_btn.configure(fg_color=["#3a7ebf", BUSY_BLUE])
+            self.progress.stop()
+            self.progress.pack_forget()
+
+    def _pulse_process(self):
+        """Alternate the Process button's blue so a long call still feels alive."""
+        if not self.busy or not self.winfo_exists():
+            return
+        current = self.process_btn.cget("fg_color")
+        # CTk may return a plain string or a (light, dark) pair.
+        dark = current[1] if isinstance(current, (list, tuple)) else current
+        next_colour = BUSY_BLUE_DARK if dark != BUSY_BLUE_DARK else BUSY_BLUE
+        self.process_btn.configure(fg_color=next_colour)
+        self._pulse_job = self.after(400, self._pulse_process)
 
     def _nudge_strength(self, delta):
         """Move Strength one notch (Softer/Stronger) and immediately re-run.

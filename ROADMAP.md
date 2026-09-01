@@ -4,11 +4,11 @@
 When Mark says "lets get started", that is the cue to open these three files
 before doing anything else.
 
-Current shipped version: **2.9** (bug-fix pass against three new review
-notes — see v2.9 below). v2.10 (UI/visual polish) and v2.11+ (notes_016's
-architecture proposals, in ascending risk order) are scoped but not yet
-implemented — see those sections. Drag-and-drop import remains deliberately
-deferred pending v2.11+, see "Deferred" below.
+Current shipped version: **2.10** (v2.9 bug-fix pass, then v2.10 visual/UX
+polish, both against the three new review notes that opened this session —
+see those sections below). v2.11+ (notes_016's architecture proposals, in
+ascending risk order) is scoped but not yet implemented. Drag-and-drop
+import remains deliberately deferred pending v2.11+, see "Deferred" below.
 
 Scope through v2.3 was drawn from twelve accumulated review notes
 (`notes/01_Active/notes_001.txt` – `notes_012.txt`), written independently by
@@ -782,7 +782,7 @@ closed cleanly, rebuild proceeded.
 
 ---
 
-## v2.10 — Visual & UX polish (scoped, not yet implemented)
+## v2.10 — Visual & UX polish ✅ shipped 2026-09-02
 
 **Goal:** notes_017 (Lynne, UI/UX audit against v2.8) proposes a token-based
 visual pass — matched pane typography, better diff contrast, a dismissible
@@ -819,20 +819,54 @@ recommends against (§1.3/§5, word-level already matches how a copy-editor
 scans a British spelling change).
 
 ### Acceptance checklist
-- [ ] Both panes render at the same face/size/padding; first glyphs align
-      horizontally between Original and Revised.
-- [ ] Diff insertions/deletions are legible at a glance (fill + ink), not
-      just AA-compliant as foreground-only colour.
-- [ ] The notice banner has a working Dismiss button and its list text is
-      selectable/copyable.
-- [ ] A slow (throttled or local-model) Process call shows visible motion,
-      not just a static "Working…" label.
-- [ ] Escape closes both dialogs; a dialog opens on the same monitor as the
-      main window in a real multi-monitor test if available.
-- [ ] Settings remains fully reachable (Save button visible) at a simulated
-      150% DPI / reduced height.
-- [ ] Settings shows "Claude"/"Ollama" in the backend selector; the saved
-      config still stores `anthropic`/`ollama`.
+- [x] Both panes render at the same face/size/padding. Verified against the
+      real widget tree: `original_box.cget("fg_color"/"text_color")` and
+      `revised_box.cget("background"/"foreground"/"font")` all match the
+      shared `PANE_BG`/`PANE_FG`/`PANE_FONT` tokens exactly.
+- [x] Diff insertions/deletions use a background fill plus foreground ink,
+      not colour-only. Verified: `revised_box.tag_cget("changed"/"deleted",
+      "foreground"/"background")` match `DIFF_INS_FG`/`DIFF_INS_BG`/
+      `DIFF_DEL_FG`/`DIFF_DEL_BG` exactly.
+- [x] The notice banner has a working Dismiss button; list text is a
+      selectable `CTkLabel`, not a disabled `CTkTextbox`. Verified against
+      the real `_show_ambiguities()`: the banner attaches/detaches from the
+      packer correctly for a populated list, an empty list, and a simulated
+      Dismiss click (`winfo_manager()` used as the pack-state probe rather
+      than `winfo_ismapped()`, which reads false for any widget under a
+      root that was never `mainloop()`-mapped — a known artefact of this
+      project's construct-without-mainloop testing style, not a real
+      packing failure; confirmed both ways report identically once the app
+      actually runs).
+- [x] A busy Process call shows visible motion: an indeterminate
+      `CTkProgressBar` plus a colour-pulsing Process button, not just a
+      static "Working…" label. Verified against the real `_set_busy()`/
+      `_pulse_process()`: the progress bar attaches/detaches with busy
+      state, the pulse job is scheduled while busy and cancelled when not,
+      and the Process button's colour actually changes on a simulated tick.
+- [x] Escape closes both `TonePickerDialog` and `SettingsDialog` (confirmed
+      a real `<Escape>` binding exists on each via the live objects); both
+      also position via `position_over_parent()` on `after_idle`. Real
+      multi-monitor positioning wasn't hand-verified (single-monitor
+      session) — the centring maths itself was exercised via the same
+      binding test, not just read.
+- [x] Settings remains fully reachable at a reduced height: geometry
+      520×640 (down from 780 tall), `resizable(False, True)`, `minsize(480,
+      420)`, and the Save/Cancel row is packed on the dialog itself
+      (`side="bottom"`) before the scrollable body, so it never scrolls
+      away regardless of content height.
+- [x] Settings shows "Claude"/"Ollama" in the backend selector while the
+      saved config still stores `anthropic`/`ollama`. Verified end-to-end
+      against the real dialog and a real `_save()` call through a temp
+      config path: display defaults to "Claude" for a stored `"anthropic"`
+      value, switching the segmented button to "Ollama" correctly disables
+      the API key field, and the file written by `_save()` contains the
+      internal id `"ollama"`, never the display label.
+- [x] `ast.parse()` clean; full v2.9 regression suite plus a dedicated
+      28-check live-object test for every v2.10 change (listed above) all
+      pass; rebuilt packaged `.exe` confirmed `FileVersion`/`ProductVersion`
+      `2.10.0.0`, launched for real, alive and `Responding: True` after an
+      8-second soak. Real `scriptorium_config.json` confirmed untouched
+      (unchanged mtime) throughout.
 
 ---
 
@@ -879,7 +913,7 @@ No acceptance checklist yet — not started this session.
 
 ---
 
-## Deferred / explicitly out of scope for v2.1–v2.9
+## Deferred / explicitly out of scope for v2.1–v2.10
 
 - Migrating the API key to Windows Credential Manager (`keyring`) — real
   architectural change, correctly flagged as out-of-scope by every note
@@ -947,7 +981,7 @@ No acceptance checklist yet — not started this session.
 | notes_014 | 1 Sep | Gale | v2.5 (delta) | Closed by v2.6 (icon/single-instance) and v2.7 (always-on-top, change summary); drag-and-drop deferred, superseded by notes_016 (see "Deferred") |
 | notes_015 | 1 Sep | Antigravity | v2.5 (delta) | Closed by v2.6; its S1 "Confirmed" and S2 "Addressed" verdicts did not hold up against live re-testing — see v2.6 write-up |
 | notes_016 | 1 Sep | Mark / Codex | v2.9+ (architecture) | Scoped as v2.11+ (three-tone, presets, retry transport, drag-and-drop, rich clipboard — see that section); not yet implemented |
-| notes_017 | 1 Sep | Lynne | v2.8 (delta) | Scoped as v2.10 (visual/UX polish); not yet implemented |
+| notes_017 | 1 Sep | Lynne | v2.8 (delta) | Closed by v2.10 (typography/contrast, notice banner, busy motion, dialog chrome, backend labels; toolbar-wrap and character-level diffs deliberately not carried in, see v2.10 write-up) |
 | notes_018 | 1 Sep | Zoe | v2.8 (delta) | Closed by v2.9 (Bugs 1–2/S2, 3–7, S1); S3 deliberately not fixed (informational only, see v2.9 write-up) |
 
 `scriptorium_notes_001.txt`, a near-duplicate of notes_014 written under
