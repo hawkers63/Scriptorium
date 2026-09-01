@@ -38,14 +38,19 @@ Built in Python with a native-style CustomTkinter interface.
 - **Side-by-side diff** — the revision sits beside the original with changed
   words highlighted, with a Clean / Inline toggle; the inline view also shows
   deleted words struck through in red.
-- **Review controls** — Accept, Reject, Copy, Undo, plus Import and Export.
+- **Review controls** — Accept, Reject, Copy revision, Copy summary, Undo,
+  plus Copy/Paste for the Original pane and Import/Export. Text in both
+  panes can also be selected and copied (or, for Original, pasted into) via
+  right-click.
 - **Softer / Stronger** — one-click re-run at the next strength notch down or
   up, instead of changing Strength and pressing Process separately.
-- **Minimise to tray, start with Windows** (optional) — closing the window
-  hides it to the system tray instead of quitting; a "Start with Windows"
-  option launches it minimised at logon. Needs the optional `pystray` and
-  `Pillow` packages — Settings explains and disables the checkbox if they
-  aren't installed, and the app works exactly the same without them.
+- **Minimise to tray, start with Windows** (optional) — the minimise button
+  sends the window straight to the system tray instead of the taskbar; the
+  close button always quits completely, tray icon included. A "Start with
+  Windows" option launches it minimised at logon. Needs the optional
+  `pystray` and `Pillow` packages — Settings explains and disables the
+  checkbox if they aren't installed, and the app works exactly the same
+  without them.
 - **Import and export** — plain text and Markdown always; Word `.docx` files
   too when the optional `python-docx` package is installed.
 - **British English throughout** — `organise`, `colour`, `licence`/`license`,

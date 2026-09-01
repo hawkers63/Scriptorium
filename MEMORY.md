@@ -6,6 +6,104 @@ Mark saying "lets get started").
 
 ---
 
+## 2026-09-01 (continued) — v2.8: hand-testing fixes (layout, tray lifecycle, clipboard, packaging)
+
+Mark hand-tested v2.7 (screenshots `1.jpg`/`2.jpg` on the Desktop) and found
+four issues, none from the notes backlog. All four fixed, verified against
+real objects, and committed as v2.8. Full task list and acceptance evidence
+in `ROADMAP.md`'s v2.8 section; the notable parts not obvious from the diff:
+
+**Action bar overflow** — thirteen buttons on one row overran the window by
+about 45px and overlapped in the middle; the "Copy" button rendering as an
+unreadable sliver next to Undo was that overlap, not a rendering bug in Copy
+itself. Split into two rows. Mark's own suggested fix was to relocate or
+remove "Copy summary" (mistaking it for a duplicate of "Copy") — kept both,
+since they copy different things (original text vs. a diff summary), and
+explained the distinction; the two-row layout resolves the crowding without
+losing either.
+
+**Minimise/close semantics swapped, confirmed with Mark mid-session**: his
+first message read "direct minimisation to the taskbar" for what the
+minimise button should do, which read ambiguously against the same message's
+very next paragraph, which was unambiguously about the *system tray* for the
+close button. Reasoned through it live (documented in-session) before
+touching code, then Mark sent an explicit correction confirming
+"system tray" was intended, not "taskbar" — validating that read before any
+code was written. Net change: minimise button -> straight to tray (new
+`_on_minimize`, bound to `<Unmap>`, filtered to the window itself + an
+`iconic` state check so it doesn't fire on the many
+unrelated-widget/withdraw()-of-itself `<Unmap>` events); close button (X)
+-> always fully quits via `_quit_app()`, which now also tears down any live
+tray icon defensively. Settings checkbox label corrected to match ("Send to
+the system tray when minimised") — the old label ("...instead of closing")
+described the pre-fix behaviour.
+
+**Root cause of "Network error reaching the Claude API: [Errno 2] No such
+file or directory: ...\_MEI#####\base_library.zip"** — this only reproduces
+against the packaged `.exe` (`_MEI...` is PyInstaller onefile's `%TEMP%`
+extraction folder; Python lazily pulls some stdlib modules from
+`base_library.zip` there on first use, e.g. the first network request, not
+at startup). Traced to a real, named cause rather than left as a guess:
+Mark volunteered `C:\Users\Administrator\Desktop\Work Files\
+Clean-Temps-and-Caches.bat` mid-session, which was read in full. Its own
+comments/echo claim "Does NOT touch ... Scriptorium", but the skip check
+only matches when the *directory being cleared* has "\Scriptorium" in its
+own path; it calls `robocopy /MIR` (mirror from an empty folder) against
+`%TEMP%` itself, which doesn't match that check, and `/MIR` recursively
+wipes everything nested inside — including any live `_MEI*` folder,
+Scriptorium's or not. Mark also named three installed always-there cleanup
+tools (Privacy Eraser, Wise Care 365, WinTools.net) as other suspects;
+checked for live processes/services/scheduled tasks for all three — none
+were active, so they weren't the proximate cause this session, though the
+fix protects against that whole class of tool regardless of which one
+someday runs. Fix: `scriptorium.spec`'s `runtime_tmpdir` now points at
+`%LOCALAPPDATA%\Scriptorium\runtime` — the same directory already used for
+the app's own config, and the one his own script's exclusion logic already
+expects to leave alone. No `scriptorium.py` change needed. Did **not** edit
+Mark's personal `.bat` file — out of repo scope, and he didn't ask for that;
+mentioned the gap in the exclusion logic in the session summary in case he
+wants it fixed separately.
+
+**Verification, all against real objects/builds, not mocked:**
+- Action bar: built the real widget tree, grouped buttons by parent frame,
+  measured `winfo_reqwidth()` sums against the actual 1156px available width
+  — both rows fit with large margin (780px and 420px respectively).
+- Minimise/tray/close: drove the real `Scriptorium`/`pystray.Icon` objects
+  via `iconify()` (fires the real `<Unmap>` path, not a direct method call)
+  with `minimise_to_tray` both on and off, confirmed window `state()` and
+  `tray_icon` at each step, confirmed `_on_close()` tears down a live tray
+  icon and destroys the window.
+- Right-click menus: called `_copy_text_selection`/`_paste_at_click`
+  directly against real `CTkTextbox`/`tk.Text` widgets with real selections
+  and real clipboard content, including confirming Copy works on the
+  disabled (read-only) `revised_box` — Tk's `state=disabled` blocks editing,
+  not selection/copy, which is why this worked without touching that state.
+- Packaging: real `pyinstaller scriptorium.spec` rebuild (2.8.0.0 confirmed
+  via `.VersionInfo`), real launch, confirmed the extraction folder lands at
+  `%LOCALAPPDATA%\Scriptorium\runtime\_MEI######` and not under `%TEMP%`,
+  survived a 20+ second soak with the process idle and responsive. One
+  false alarm caught and resolved mid-session: an early `Get-ChildItem`
+  check on the runtime folder came back empty twice in a row (read at the
+  time as possible evidence of an even-more-aggressive cleaner reaching
+  into `%LOCALAPPDATA%`), but a longer soak plus a repeat check showed the
+  folder present and stable throughout — concluded this was a transient
+  read (most likely Defender's real-time scan of the freshly-extracted
+  folder momentarily interfering with enumeration), not a real deletion;
+  didn't let the alarm stand without re-verifying. Real
+  `scriptorium_config.json` confirmed byte-identical before and after (this
+  test never touched Settings) — same discipline as the v2.5 incident.
+- Test process cleanup: `CloseMainWindow()` did not work on this Tk window
+  (consistent with this project's known UI-automation gap — confirmed
+  again, not re-litigated from scratch); used `Stop-Process -Force` instead
+  and removed the orphaned `_MEI######` folder a forced kill leaves behind
+  (expected onefile behaviour regardless of location, not a regression).
+
+`ROADMAP.md`'s "Current shipped version" line updated to 2.8; `README.md`'s
+feature bullets updated for the corrected tray/close semantics and the new
+right-click/Copy-summary/Paste mentions.
+
+---
+
 ## 2026-09-01 (continued) — Both remaining v2.5 items hand-tested for real
 
 Mark asked to hand-test the two items v2.5 had left as "needs a person":

@@ -26,9 +26,22 @@ Notes
   version_info.txt supplies the FileDescription/ProductVersion etc. shown on
   the .exe's Properties > Details tab. Bump version_info.txt's version numbers
   alongside APP_VERSION in scriptorium.py when cutting a release.
+* runtime_tmpdir is pinned under %LOCALAPPDATA%\Scriptorium instead of the
+  default shared %TEMP%\_MEIxxxxxx. Diagnosed 2026-09-01: a onefile build
+  extracts to %TEMP% and depends on that folder surviving for the life of
+  the process (Python lazily pulls some stdlib modules from base_library.zip
+  there on first use -- e.g. on the first network request, not at startup).
+  A generic "sweep %TEMP%" cleanup tool run while Scriptorium is still open
+  deletes it out from under the running process, surfacing as
+  "Network error reaching the Claude API: [Errno 2] No such file or
+  directory: ...\_MEI########\base_library.zip" the next time such a module
+  is needed. %LOCALAPPDATA%\Scriptorium is the same directory the app
+  already uses for its own config, and is the one directory most "clean
+  temp files" scripts already know to leave alone by name.
 """
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+import os
 
 datas = collect_data_files("customtkinter")
 hiddenimports = collect_submodules("customtkinter")
@@ -50,6 +63,12 @@ try:
     hiddenimports += collect_submodules("pystray")
 except Exception:
     pass
+
+# See "runtime_tmpdir" note above — kept out of the shared, frequently-swept
+# %TEMP% so a running instance survives a generic temp/junk cleanup tool.
+runtime_tmpdir = os.path.join(
+    os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+    "Scriptorium", "runtime")
 
 
 a = Analysis(
@@ -79,7 +98,7 @@ exe = EXE(
     strip=False,
     upx=True,
     upx_exclude=[],
-    runtime_tmpdir=None,
+    runtime_tmpdir=runtime_tmpdir,
     console=False,          # windowed app — no console window
     disable_windowed_traceback=False,
     argv_emulation=False,

@@ -4,10 +4,10 @@
 When Mark says "lets get started", that is the cue to open these three files
 before doing anything else.
 
-Current shipped version: **2.7** (always-on-top toggle, copyable change
-summary — on top of v2.6's bug-diagnosis fixes). No unimplemented release is
-currently scoped; drag-and-drop import remains deliberately deferred, see
-"Deferred" below.
+Current shipped version: **2.8** (action-bar layout fix, minimise/close
+lifecycle correction, right-click copy/paste, onefile runtime-tmpdir fix —
+see v2.8 below). No unimplemented release is currently scoped; drag-and-drop
+import remains deliberately deferred, see "Deferred" below.
 
 Scope through v2.3 was drawn from twelve accumulated review notes
 (`notes/01_Active/notes_001.txt` – `notes_012.txt`), written independently by
@@ -563,7 +563,95 @@ note, which v2.6 already covered as bug fixes.
 
 ---
 
-## Deferred / explicitly out of scope for v2.1–v2.7
+## v2.8 — Hand-testing fixes: layout, tray lifecycle, clipboard, packaging ✅ shipped 2026-09-01
+
+**Goal:** four issues Mark found hand-testing v2.7 (the packaged `.exe`,
+screenshots `1.jpg`/`2.jpg`), none from the notes backlog.
+
+1. **Action bar overflow** — thirteen buttons on one `pack(side=...)` row
+   overran the fixed 1180px window (≈1200px of buttons for ≈1156px of
+   space) and overlapped in the middle; the "Copy" button rendering as an
+   unreadable sliver next to Undo was that overlap, not a bug in Copy
+   itself. Split into two rows: review/process actions (Process through
+   Undo) on row 1, Original-pane and file actions (Paste, Copy, Export,
+   Import, Clear) on row 2. Both "Copy" (original text) and "Copy summary"
+   (diff summary) are kept — they copy different things — now that neither
+   is cramped.
+2. **Minimise/close semantics swapped** — previously the native minimise
+   button did a plain OS iconify (an "open, minimised" taskbar entry) and
+   only the titlebar close (X) consulted `minimise_to_tray`, which meant
+   enabling tray made X stop being able to quit at all except via the tray
+   icon's own menu. Now: the minimise button (`<Unmap>`, filtered to the
+   window itself and an `iconic` state check) sends straight to the tray
+   when `minimise_to_tray` + `TRAY_AVAILABLE`; the close button always ends
+   the process via `_quit_app()`, which also tears down any live tray icon
+   first. Settings checkbox label updated to match ("Send to the system
+   tray when minimised").
+3. **Right-click copy/paste** — both `original_box` and `revised_box`
+   (Ctrl+C/Ctrl+V already worked; this is the point-and-click affordance)
+   get a `<Button-3>` context menu: Copy (enabled only with a selection,
+   works on the read-only `revised_box` too since selection/copy isn't
+   blocked by Tk's `state=disabled`) and, Original only, Paste (enabled
+   only when the clipboard holds text). Paste replaces a selection if
+   present, otherwise inserts at the clicked point — this is what makes
+   right-click-Paste on empty space actually land where you clicked.
+4. **Root-cause fix for "Network error reaching the Claude API: [Errno 2]
+   No such file or directory: ...\_MEI#####\base_library.zip"** — confirmed
+   this only happens against the packaged `.exe` (the `_MEI` path is
+   PyInstaller onefile's runtime extraction folder under `%TEMP%`; Python
+   lazily pulls some stdlib modules from `base_library.zip` there on first
+   use, e.g. the first network request, not at startup). Root cause: a
+   generic "sweep `%TEMP%`" cleanup pass — Mark has three such tools
+   installed (Privacy Eraser, Wise Care 365, WinTools.net) plus his own
+   `Clean-Temps-and-Caches.bat` — deletes the live extraction folder out
+   from under the still-running process. Mark's own script's "does NOT
+   touch ... Scriptorium" comment doesn't actually protect it: the skip
+   check only matches a directory argument whose own path contains
+   "\Scriptorium", and it calls `robocopy /MIR` against `%TEMP%` itself
+   (which doesn't match), wiping everything nested inside — including a
+   `_MEI*` folder unrelated to Scriptorium by name. Fixed in
+   `scriptorium.spec`: `runtime_tmpdir` now points at
+   `%LOCALAPPDATA%\Scriptorium\runtime` instead of the default shared
+   `%TEMP%` — the same directory the app already uses for its own config,
+   which *does* match his script's existing exclusion and sits outside
+   what "temp file" cleaners generally target. No `scriptorium.py` change
+   needed; `APP_VERSION` bumped to "2.8" and `version_info.txt` to match.
+
+### Acceptance checklist
+- [x] Both action-bar rows fit the window with margin to spare. Verified
+      programmatically against the real widget tree: row 1 (8 buttons)
+      requests 780px, row 2 (5 buttons) 420px, against 1156px available on
+      each row (window is 1180px, 12px padding each side) — no overlap.
+- [x] Minimising (native button) with tray enabled sends the app straight to
+      the tray with no taskbar entry; with tray off or unavailable it's a
+      plain OS minimise as before. Closing (X) always ends the process and
+      clears any tray icon. Verified against the real `Scriptorium`/
+      `pystray.Icon` objects, both with `minimise_to_tray` on (iconify →
+      real tray icon created, state `withdrawn`; `_finish_tray_restore()` →
+      icon gone, state `normal`; re-minimise then `_on_close()` → tray icon
+      cleared, `destroy()` called) and off (iconify → no tray icon, state
+      `iconic`, i.e. unchanged default behaviour).
+- [x] Right-click Copy works on a selection in both panes, including the
+      disabled `revised_box`; right-click Paste on empty Original space
+      lands at the click point; both disable their menu item when there's
+      nothing to act on. Verified by calling the real handlers directly
+      (`_copy_text_selection`, `_paste_at_click`) against real `CTkTextbox`/
+      `tk.Text` widgets with real selections/clipboard content.
+- [x] Packaged `.exe` rebuilt from the updated spec (`pyinstaller
+      scriptorium.spec`, 2.8.0.0 confirmed via `VersionInfo`); launched for
+      real and confirmed its extraction folder is
+      `%LOCALAPPDATA%\Scriptorium\runtime\_MEI######`, not anywhere under
+      `%TEMP%`, and survives a 20+ second soak with the process idle and
+      responsive (one transient "folder not found" reading during this
+      check turned out to be this session's own `Get-ChildItem` call
+      racing the AV's first-scan of the freshly extracted folder, not a
+      real deletion — re-checked and stable afterwards). Real config file
+      (`scriptorium_config.json`) confirmed byte-identical before/after —
+      this test never touched Settings.
+
+---
+
+## Deferred / explicitly out of scope for v2.1–v2.8
 
 - Migrating the API key to Windows Credential Manager (`keyring`) — real
   architectural change, correctly flagged as out-of-scope by every note

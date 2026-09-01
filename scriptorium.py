@@ -76,7 +76,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.7"
+APP_VERSION = "2.8"
 
 def _config_dir():
     """Return the folder that holds scriptorium_config.json.
@@ -467,7 +467,7 @@ DEFAULT_CONFIG = {
     "ollama_model": DEFAULT_OLLAMA_MODEL,
     "privacy_ack": False,            # whether the cloud-privacy notice was shown
     "import_prompt_shown": False,    # whether the source->frozen import offer was shown
-    "minimise_to_tray": False,       # hide to the system tray instead of closing
+    "minimise_to_tray": False,       # hide to the system tray on minimise (close always quits)
     "start_with_windows": False,     # HKCU Run entry launching --minimised at logon
     "start_minimised": False,        # start withdrawn to tray even without --minimised
     "always_on_top": False,          # pin the window above other applications
@@ -1384,7 +1384,7 @@ class SettingsDialog(ctk.CTkToplevel):
         ctk.CTkCheckBox(
             self, variable=self.tray_var,
             state="normal" if TRAY_AVAILABLE else "disabled",
-            text="Minimise to tray instead of closing",
+            text="Send to the system tray when minimised",
             command=self._refresh_tray_dependent_state
         ).pack(anchor="w", padx=16, pady=(2, 0))
         if not TRAY_AVAILABLE:
@@ -1556,6 +1556,7 @@ class Scriptorium(ctk.CTk):
 
         self._bind_shortcuts()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.bind("<Unmap>", self._on_minimize)
 
         self._maybe_offer_config_migration()
         self._maybe_warn_unreadable_config()
@@ -1711,6 +1712,10 @@ class Scriptorium(ctk.CTk):
         # never falls out of sync with what is actually on screen.
         self.original_box.bind("<<Modified>>", self._on_original_modified)
         self.original_box.edit_modified(False)
+        self.original_box.bind(
+            "<Button-3>",
+            lambda event: self._show_text_context_menu(event, self.original_box,
+                                                        allow_paste=True))
 
         # Revised: a themed tk.Text so we can apply diff tags reliably.
         revised_frame = ctk.CTkFrame(panes)
@@ -1729,6 +1734,10 @@ class Scriptorium(ctk.CTk):
         self.revised_box.configure(yscrollcommand=scroll.set)
         self.revised_box.tag_config("changed", foreground="#4ec9b0")
         self.revised_box.tag_config("deleted", foreground="#e06c75", overstrike=1)
+        self.revised_box.bind(
+            "<Button-3>",
+            lambda event: self._show_text_context_menu(event, self.revised_box,
+                                                        allow_paste=False))
 
         # Ambiguity strip (hidden until there is something to show).
         self.ambiguity_box = ctk.CTkTextbox(self, height=64, wrap="word",
@@ -1737,8 +1746,13 @@ class Scriptorium(ctk.CTk):
         # packed on demand in _show_ambiguities()
 
     def _build_actionbar(self):
+        # Two rows: thirteen buttons on one row overran the 1180px window and
+        # overlapped in the middle (the "Copy" button rendering as a sliver
+        # next to Undo was that overlap, not a rendering bug in Copy itself).
+        # Row 1 is the review/process workflow; row 2 is original-text and
+        # file operations.
         bar = ctk.CTkFrame(self, fg_color="transparent")
-        bar.pack(fill="x", padx=12, pady=8)
+        bar.pack(fill="x", padx=12, pady=(8, 4))
 
         self.process_btn = ctk.CTkButton(bar, text="Process", width=100,
                                          command=self.process)
@@ -1766,16 +1780,20 @@ class Scriptorium(ctk.CTk):
         ctk.CTkButton(bar, text="Undo", width=80, fg_color="gray30",
                       command=self.undo).pack(side="left", padx=4)
 
-        ctk.CTkButton(bar, text="Export…", width=90, fg_color="gray30",
-                      command=self.export_file).pack(side="right", padx=(4, 0))
-        ctk.CTkButton(bar, text="Import…", width=90, fg_color="gray30",
+        bar2 = ctk.CTkFrame(self, fg_color="transparent")
+        bar2.pack(fill="x", padx=12, pady=(0, 8))
+
+        ctk.CTkButton(bar2, text="Paste", width=80, fg_color="gray30",
+                      command=self.paste_original).pack(side="left")
+        ctk.CTkButton(bar2, text="Copy", width=80, fg_color="gray30",
+                      command=self.copy_original).pack(side="left", padx=4)
+
+        ctk.CTkButton(bar2, text="Export…", width=90, fg_color="gray30",
+                      command=self.export_file).pack(side="right")
+        ctk.CTkButton(bar2, text="Import…", width=90, fg_color="gray30",
                       command=self.import_file).pack(side="right", padx=4)
-        ctk.CTkButton(bar, text="Clear", width=80, fg_color="gray30",
+        ctk.CTkButton(bar2, text="Clear", width=80, fg_color="gray30",
                       command=self.clear_all).pack(side="right", padx=4)
-        ctk.CTkButton(bar, text="Copy", width=80, fg_color="gray30",
-                      command=self.copy_original).pack(side="right", padx=4)
-        ctk.CTkButton(bar, text="Paste", width=80, fg_color="gray30",
-                      command=self.paste_original).pack(side="right", padx=4)
 
     def _build_statusbar(self):
         self.status = ctk.CTkLabel(self, text="", anchor="w",
@@ -2175,6 +2193,68 @@ class Scriptorium(ctk.CTk):
         self.clipboard_append(summary)
         self._refresh_status(f"summary copied: \"{summary}\"")
 
+    def _show_text_context_menu(self, event, widget, allow_paste):
+        """Right-click Copy/Paste for the Original and Suggested revision
+        panes -- both already support Ctrl+C/Ctrl+V, this just adds the
+        menu affordance. Copy is enabled only with an active selection;
+        Paste (Original only) is enabled only when the clipboard holds
+        text, and lands at the click point rather than the old caret when
+        there is no selection to replace.
+        """
+        has_selection = bool(widget.tag_ranges("sel"))
+        try:
+            clip_has_text = bool(self.clipboard_get())
+        except tk.TclError:
+            clip_has_text = False
+
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(
+            label="Copy", state="normal" if has_selection else "disabled",
+            command=lambda: self._copy_text_selection(widget))
+        if allow_paste:
+            menu.add_command(
+                label="Paste", state="normal" if clip_has_text else "disabled",
+                command=lambda: self._paste_at_click(widget, event))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _copy_text_selection(self, widget):
+        try:
+            text = widget.get("sel.first", "sel.last")
+        except tk.TclError:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self._refresh_status("copied to clipboard")
+
+    def _paste_at_click(self, widget, event):
+        """Paste the clipboard into `widget` at the right-clicked point.
+
+        Replaces an existing selection if there was one (matching Paste's
+        usual behaviour); otherwise inserts at the clicked position -- this
+        is what makes right-click-Paste on empty space in the Original pane
+        work, rather than always landing wherever the caret last was.
+        """
+        try:
+            incoming = self.clipboard_get()
+        except tk.TclError:
+            self._refresh_status("clipboard is empty")
+            return
+        if not incoming:
+            self._refresh_status("clipboard is empty")
+            return
+        self._remember_for_undo(self.original_box.get("1.0", "end-1c"))
+        try:
+            sel_start = widget.index("sel.first")
+            widget.delete("sel.first", "sel.last")
+            widget.mark_set("insert", sel_start)
+        except tk.TclError:
+            widget.mark_set("insert", f"@{event.x},{event.y}")
+        widget.insert("insert", incoming)
+        self._refresh_status("pasted from clipboard")
+
     def copy_original(self):
         """Copy the whole Original pane to the clipboard (no revision involved)."""
         text = self.original_box.get("1.0", "end-1c")
@@ -2357,23 +2437,45 @@ class Scriptorium(ctk.CTk):
         self.lift()
         self.focus_force()
 
-    def _on_close(self):
-        """Minimise to tray if that's enabled and actually available.
+    def _on_minimize(self, event):
+        """Native minimise button -- send straight to the tray when enabled.
 
-        Falls through to a normal quit otherwise -- including when
-        minimise_to_tray is turned on in config but pystray/Pillow aren't
-        installed, so a stale setting can never trap the user with no way
-        to reach the window (Alt+F4 always works unless tray genuinely
-        took over).
+        <Unmap> also fires for unrelated reasons (a child widget mapping/
+        unmapping during construction, or transiently from withdraw()/
+        deiconify() themselves), so this only acts when the window itself
+        has just become iconic and isn't already on its way to the tray --
+        that guard also stops the withdraw() inside _minimise_to_tray() from
+        re-entering this handler.
         """
+        if event.widget is not self or str(self.state()) != "iconic":
+            return
+        if self.tray_icon is not None:
+            return  # already tray-minimised
         if self.cfg.get("minimise_to_tray") and TRAY_AVAILABLE:
             self._minimise_to_tray()
-            return
+
+    def _on_close(self):
+        """Titlebar close (X) always ends the process completely.
+
+        Minimising to the tray -- when enabled -- happens on the minimise
+        button instead (_on_minimize), so the close button unambiguously
+        quits rather than re-hiding to tray with no obvious way to actually
+        exit.
+        """
         self._quit_app()
 
     def _quit_app(self):
-        """Invalidate in-flight callbacks and actually end the process."""
-        self.tray_icon = None
+        """Tear down any live tray icon, invalidate in-flight callbacks, and
+        actually end the process -- called from the close button as well as
+        the tray menu's own Quit item, so a background process is never left
+        running with no visible window and no tray icon to recover it from.
+        """
+        if self.tray_icon is not None:
+            try:
+                self.tray_icon.stop()
+            except Exception:
+                pass
+            self.tray_icon = None
         self._invalidate_inflight()
         self.destroy()
 
