@@ -159,7 +159,12 @@ TONE_INSTRUCTIONS = {
     ),
     "Persuasive": (
         "present the source's existing reasoning compellingly and emphasise "
-        "its strongest supported points without adding evidence or claims"
+        "its strongest supported points; do not add evaluative or "
+        "promotional adjectives (such as 'cutting-edge', 'remarkable', "
+        "'ingenious') that are not already in the source, and do not "
+        "loosen or tighten the scope of an existing factual or "
+        "quantitative claim (e.g. turning 'lasts three months' into 'up "
+        "to three months')"
     ),
 }
 TONES = ["(keep original)", *TONE_INSTRUCTIONS]
@@ -526,8 +531,11 @@ def build_tone_instruction(tones):
         "\n- Tone guidance:\n"
         f"  {relationship}\n" + "\n".join(descriptions) +
         "\n  Tone guidance may affect wording, rhythm and presentation only. "
-        "It must not introduce facts, increase certainty, invent feelings, "
-        "create commitments or alter the author's intended meaning.")
+        "It must not introduce facts, evaluative or promotional language "
+        "(such as superlatives or marketing adjectives) absent from the "
+        "source, invent feelings, create commitments, change the certainty "
+        "or scope of an existing claim, or alter the author's intended "
+        "meaning.")
 
 
 def build_system_prompt(mode, strength, tones, role="(none)",

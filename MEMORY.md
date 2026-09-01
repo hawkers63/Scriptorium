@@ -188,6 +188,66 @@ conclusions.
 
 ---
 
+## 2026-09-01 (continued) — Live-model checks run against Ollama; found and fixed a real Persuasive embellishment bug
+
+Mark asked to try Ollama for the two checklist items still blocked on
+Claude's `anthropic-workspace-id` issue. Ollama wasn't running
+(`D:\Ollama\App\ollama.exe` installed but no process, port 11434 not
+listening); started it (`ollama serve`, hidden window) — took a few
+seconds longer than expected to actually accept connections despite the
+port showing LISTENING immediately, then came up with six models already
+pulled (llama3.2:3b, llama3.1:8b, llama3.1:8b-instruct-q2_K, tinyllama,
+deepseek-r1:1.5b/7b). Used **llama3.1:8b**, not the configured
+`tinyllama:latest` — deliberately a stronger model, since the point was
+to test whether the prompt design holds up on a real model, not whether a
+1B model can follow instructions at all.
+
+**Four real Process requests, no protection needed:**
+1. Technical Writer role, Direct+Detailed tones, a device-reset source —
+   clean; only "hold" → "press and hold", every number/step preserved.
+2. No role, Persuasive+Confident tones, a filter-marketing source — **not
+   clean**. Added three unsupported evaluative adjectives ("cutting-edge",
+   "remarkable", "ingenious design") and quietly loosened "lasts three
+   months" to "up to three months" (word count 20→39). This is exactly
+   the injection/embellishment failure mode Mark raised at the very start
+   of this work.
+3. Engineer role, no tone, a pump-failure source — clean; only a tense
+   change, no diagnosed cause added beyond the source.
+4. Lawyer role, no tone, a tenancy-notice source — clean; only a missing
+   article inserted, no new obligation or interpretation.
+
+**Fixed** rather than just reported, since the fix was small and
+verifiable in the same pass: tightened `TONE_INSTRUCTIONS["Persuasive"]`
+and the shared closing guard in `build_tone_instruction()` (both in
+`scriptorium.py`) to explicitly name evaluative/promotional adjectives
+("such as 'cutting-edge', 'remarkable', 'ingenious'") and claim-scope
+changes as forbidden — the previous wording only named "facts" and
+"certainty", which didn't cover an added descriptive adjective or a
+quantitative claim's scope shifting in either direction. Re-ran the same
+Persuasive+Confident case three more times against llama3.1:8b after the
+fix: no more multi-adjective pile-ups or scope-loosening, but a single
+mild evaluative adjective still slipped in on 2 of 3 attempts ("latest"/
+"significant"/"durable" once, "innovative"/"long-lasting design" once) —
+real, reduced-but-not-eliminated residual risk on this local model.
+Re-ran the full non-live-model isolated test set plus a live GUI launch
+afterwards — all still pass, clean launch.
+
+**Judgement call, not escalated further:** did not keep iterating the
+Persuasive wording to chase zero residual risk — diminishing returns on a
+quantised 8B local model, and Scriptorium's core design (nothing applies
+without the user reviewing the diff and clicking Accept) is the actual
+backstop here, not the prompt alone. Recorded in `ROADMAP.md`'s v2.4
+checklist (now fully ticked, all four line items covering the live-model
+gap either tested clean or tested-then-fixed) that Persuasive specifically
+deserves extra scrutiny at review time, and that it's worth re-testing
+against Claude once its key/workspace issue is resolved — a flagship
+model may hold the bounded instruction more reliably than this local one.
+
+**Ollama is still running** (started this session, not stopped) —
+`D:\Ollama\App\ollama.exe serve`, hidden window, PID varies per launch.
+
+---
+
 ## 2026-08-31 — Session paused after v2.3, by Mark's choice
 
 v2.1, v2.2 and v2.3 are all implemented, committed, and pushed to

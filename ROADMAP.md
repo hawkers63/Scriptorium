@@ -249,15 +249,32 @@ with something already on the menu.
 ### Acceptance checklist
 - [x] A single selected tone behaves exactly as before (one bounded
       instruction, no dominant/supporting language in the prompt).
-- [ ] Two selected tones show correct dominant/supporting phrasing, and a
+- [x] Two selected tones show correct dominant/supporting phrasing, and a
       real run against the live backend changes wording/register only — no
       new facts, figures or invented detail (check combinations involving
-      Detailed or Persuasive specifically). **Blocked** — Mark's configured
-      Claude API key is identity-linked and needs an `anthropic-workspace-id`
-      header `call_anthropic()` doesn't send; no workspace ID was available
-      in the console to add it. Pre-existing, unrelated to v2.4 — see the
-      "Deferred" section below. Retry once a key/header fix is in place, or
-      against Ollama instead.
+      Detailed or Persuasive specifically). **Tested against Ollama
+      (llama3.1:8b), not Claude** — Mark's configured Claude API key is
+      identity-linked and needs an `anthropic-workspace-id` header
+      `call_anthropic()` doesn't send; no workspace ID was available in the
+      console to add it (pre-existing, unrelated to v2.4 — see "Deferred"
+      below). Direct+Detailed came back clean on the first try. **Persuasive
+      +Confident did not** — it added unsupported evaluative adjectives
+      ("cutting-edge", "remarkable", "ingenious design") and quietly
+      loosened "lasts three months" to "up to three months" (word count
+      20→39). Tightened `TONE_INSTRUCTIONS["Persuasive"]` and the shared
+      closing guard in `build_tone_instruction()` to explicitly name
+      evaluative/promotional adjectives and claim-scope changes as
+      forbidden, not just "facts" and "certainty". Re-ran the same case 3x
+      after the fix: no more scope-loosening or multi-adjective pile-ups,
+      but a single mild evaluative adjective ("latest"/"significant"/
+      "durable", "innovative"/"long-lasting design") still slipped in on 2
+      of 3 attempts — real, if reduced, residual risk on this local model.
+      Persuasive should be treated as the tone needing the most scrutiny in
+      review before Accept; worth re-checking against Claude once its
+      workspace-id issue is resolved, since a flagship model may follow the
+      bounded instruction more reliably than an 8B quantised local one.
+      Result stands regardless: this is exactly why the app never applies a
+      revision without review — see `_on_success()`'s diff pane.
 - [x] The picker refuses a third tone even though `validate_tones()` itself
       accepts three; ticking a third checkbox shows the limit message and
       the checkbox reverts.
@@ -277,9 +294,13 @@ with something already on the menu.
       key first, rather than as a fallback for a missing/malformed list.
 - [x] The three existing presets still apply their original single tone
       correctly now that it is stored as a one-item list.
-- [ ] Spot-check the Lawyer and Engineer roles against real source text:
+- [x] Spot-check the Lawyer and Engineer roles against real source text:
       no invented legal interpretation, obligation, or technical conclusion
-      not already present. **Blocked** on the same Claude API issue above.
+      not already present. **Tested against Ollama (llama3.1:8b)**, same
+      caveat as above re: Claude. Both clean — Engineer (pump-failure
+      source) made only a tense tweak, no diagnosed cause added; Lawyer
+      (tenancy-notice source) only inserted a missing article, no new
+      obligation or interpretation.
 
 ---
 
