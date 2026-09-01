@@ -1,5 +1,6 @@
 Scriptorium v2.8 enhancement architecture — notes_016
 Review date: 1 September 2026
+Authors: Mark / Codex
 Scope: read-only design against C:\Scriptorium\scriptorium.py (2,544 lines)
 
 ===============================================================================

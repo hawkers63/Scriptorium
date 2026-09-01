@@ -1,7 +1,7 @@
 ================================================================================
  SCRIPTORIUM v2.8 — READ-ONLY STATIC BUG HUNT
 ================================================================================
- Author:    Grok Bug-Hunter (read-only static analysis)
+ Author:    Zoe (Bug Hunter - read-only static analysis)
  Date:      Tuesday 1 September 2026 (Europe/London)
  Target:    C:\Scriptorium\scriptorium.py (APP_VERSION = "2.8", 2,544 lines)
             git HEAD 6790b09 "v2.8: action bar layout, minimise/close
