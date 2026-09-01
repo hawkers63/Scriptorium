@@ -17,8 +17,14 @@ Notes
   collect_submodules gather them so the packaged app is styled correctly.
 * python-docx is optional — its default template is bundled only if the package
   is installed at build time; otherwise the .exe still runs, just without .docx.
-* To give the window a custom icon, drop a scriptorium.ico beside this file and
-  set  icon="scriptorium.ico"  in the EXE() call below.
+* pystray + Pillow are optional too — needed only for "minimise to tray";
+  bundled only if installed at build time, same pattern as python-docx.
+* icon/icon-96.ico gives the .exe its taskbar/Explorer icon; icon/icon-96.png
+  is bundled as data because the tray icon (resource_path() in scriptorium.py)
+  loads it via PIL/pystray at runtime, not as a Windows icon resource.
+  version_info.txt supplies the FileDescription/ProductVersion etc. shown on
+  the .exe's Properties > Details tab. Bump version_info.txt's version numbers
+  alongside APP_VERSION in scriptorium.py when cutting a release.
 """
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
@@ -26,10 +32,18 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 datas = collect_data_files("customtkinter")
 hiddenimports = collect_submodules("customtkinter")
 
+datas += [("icon/icon-96.png", "icon")]
+
 # python-docx is optional; bundle its template only if it is installed.
 try:
     datas += collect_data_files("docx")
     hiddenimports += collect_submodules("docx")
+except Exception:
+    pass
+
+# pystray is optional; bundle its platform backends only if it is installed.
+try:
+    hiddenimports += collect_submodules("pystray")
 except Exception:
     pass
 
@@ -68,5 +82,6 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,              # set to "scriptorium.ico" once you add one
+    icon="icon/icon-96.ico",
+    version="version_info.txt",
 )

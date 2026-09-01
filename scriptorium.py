@@ -36,7 +36,7 @@ Dependencies
     Optional: install python-docx to import from and export to Word (.docx)
     files (`pip install python-docx`). Plain text and Markdown work without it.
 
-Author: built with Mark, August 2026. Version 2.4.
+Author: built with Mark, August 2026. Version 2.5.
 """
 
 import os
@@ -46,6 +46,7 @@ import json
 import secrets
 import threading
 import difflib
+import winreg
 import urllib.request
 import urllib.error
 
@@ -54,13 +55,27 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
+# Tray support is optional — the app works exactly as before without it, just
+# with "minimise to tray" unavailable (Settings explains why and disables the
+# checkbox rather than letting it silently do nothing). No new dependency is
+# required to run Scriptorium at all; this only matters if minimise_to_tray
+# is turned on.
+try:
+    import pystray
+    from PIL import Image as PILImage
+    TRAY_AVAILABLE = True
+except ImportError:
+    pystray = None
+    PILImage = None
+    TRAY_AVAILABLE = False
+
 
 # --------------------------------------------------------------------------- #
 #  Configuration
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.4"
+APP_VERSION = "2.5"
 
 def _config_dir():
     """Return the folder that holds scriptorium_config.json.
@@ -69,19 +84,113 @@ def _config_dir():
     keeps working. Running as a packaged .exe (PyInstaller sets sys.frozen): a
     per-user Scriptorium folder under %LOCALAPPDATA%, because a frozen app's own
     directory can be temporary (a one-file build) or read-only.
+
+    If %LOCALAPPDATA%\\Scriptorium can't be created (permissions, a missing
+    LOCALAPPDATA, disk trouble), fall back to the same dedicated "Scriptorium"
+    subfolder name under the user's home directory instead of a bare loose
+    file directly in it — a loose file is easy to mistake for a stray
+    document, and a later launch where %LOCALAPPDATA% works again would
+    otherwise silently stop finding it, making settings appear to reset.
+    Only if even that fails (an all-but-unreachable case) does this fall back
+    to the bare home directory, matching the previous last-resort behaviour.
     """
-    if getattr(sys, "frozen", False):
-        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    if not getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(__file__))
+
+    for base in (os.environ.get("LOCALAPPDATA"), os.path.expanduser("~")):
+        if not base:
+            continue
         target = os.path.join(base, "Scriptorium")
         try:
             os.makedirs(target, exist_ok=True)
             return target
         except OSError:
-            return os.path.expanduser("~")
-    return os.path.dirname(os.path.abspath(__file__))
+            continue
+    return os.path.expanduser("~")
 
 
 CONFIG_PATH = os.path.join(_config_dir(), "scriptorium_config.json")
+
+
+def find_source_config_candidate():
+    """Return a plausible pre-existing source-mode config path, or None.
+
+    Only meaningful when running frozen (see _config_dir()): the packaged
+    .exe and `python scriptorium.py` use different config locations by
+    design, so a user trying the standalone build after using the source
+    version would otherwise lose their API key and preferences with no
+    explanation. A config file sitting next to the running .exe is the one
+    place such a user would plausibly have left one — copying the .exe
+    into an existing checkout, or trying it from the same folder they had
+    been running the script from. Nothing wider is searched.
+    """
+    if not getattr(sys, "frozen", False):
+        return None
+    candidate = os.path.join(os.path.dirname(sys.executable),
+                             "scriptorium_config.json")
+    if (os.path.isfile(candidate)
+            and os.path.abspath(candidate) != os.path.abspath(CONFIG_PATH)):
+        return candidate
+    return None
+
+
+def resource_path(relative_path):
+    """Resolve a bundled read-only resource (e.g. the tray icon image).
+
+    Distinct from _config_dir(): that one finds a writable per-user folder
+    for scriptorium_config.json. This finds a bundled, read-only asset
+    shipped alongside the code — next to the script when running from
+    source, or under PyInstaller's onefile extraction folder (sys._MEIPASS)
+    when frozen, per scriptorium.spec's `datas` entry for icon/.
+    """
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, relative_path)
+
+
+def _autostart_command():
+    """Return the command line that should launch Scriptorium at logon.
+
+    Frozen: the .exe itself (already windowed, console=False). From source:
+    pythonw.exe (not python.exe) so no console flashes, falling back to
+    python.exe if pythonw.exe isn't found beside the running interpreter.
+    Either way, --minimised tells __init__ to start withdrawn to tray
+    rather than showing the window on every logon.
+    """
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}" --minimised'
+    pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+    interpreter = pythonw if os.path.isfile(pythonw) else sys.executable
+    script = os.path.abspath(__file__)
+    return f'"{interpreter}" "{script}" --minimised'
+
+
+_AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_AUTOSTART_VALUE = "Scriptorium"
+
+
+def set_autostart(enabled):
+    """Add or remove the HKCU Run entry that starts Scriptorium at logon.
+
+    Returns True on success, False on a registry error (e.g. an unusually
+    locked-down HKCU) so the caller can tell the user rather than silently
+    claim the setting took effect.
+    """
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _AUTOSTART_KEY, 0,
+                            winreg.KEY_SET_VALUE) as key:
+            if enabled:
+                winreg.SetValueEx(key, _AUTOSTART_VALUE, 0, winreg.REG_SZ,
+                                  _autostart_command())
+            else:
+                try:
+                    winreg.DeleteValue(key, _AUTOSTART_VALUE)
+                except FileNotFoundError:
+                    pass  # already absent -- disabling is still a success
+        return True
+    except OSError as exc:
+        print(f"[warning] could not update the Windows startup entry: {exc}")
+        return False
+
 
 # Current Claude model IDs (verified against the Claude Platform docs).
 # Sonnet 4.6 is a strong, economical default for editing work; Haiku is the
@@ -327,6 +436,10 @@ DEFAULT_CONFIG = {
     "anthropic_model": DEFAULT_ANTHROPIC_MODEL,
     "ollama_model": DEFAULT_OLLAMA_MODEL,
     "privacy_ack": False,            # whether the cloud-privacy notice was shown
+    "import_prompt_shown": False,    # whether the source->frozen import offer was shown
+    "minimise_to_tray": False,       # hide to the system tray instead of closing
+    "start_with_windows": False,     # HKCU Run entry launching --minimised at logon
+    "start_minimised": False,        # start withdrawn to tray even without --minimised
     "protect_placeholders": True,    # mask [Name], {{Date}} etc. during editing
     "check_letter_conventions": True,  # advisory salutation/sign-off check
     "default_mode": "Paraphrase",      # toolbar knobs applied at startup
@@ -398,7 +511,8 @@ def normalise_config(cfg):
             clean[key] = DEFAULT_CONFIG[key]
 
     for key in ("privacy_ack", "protect_placeholders",
-                "check_letter_conventions"):
+                "check_letter_conventions", "import_prompt_shown",
+                "minimise_to_tray", "start_with_windows", "start_minimised"):
         value = clean.get(key, DEFAULT_CONFIG[key])
         if isinstance(value, str):
             clean[key] = value.strip().lower() in ("1", "true", "yes", "on")
@@ -1138,7 +1252,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self.on_save = on_save
 
         self.title("Settings")
-        self.geometry("520x620")
+        self.geometry("520x740")
         self.resizable(False, False)
         self.grab_set()  # modal
 
@@ -1198,6 +1312,38 @@ class SettingsDialog(ctk.CTkToplevel):
             text="Check British letter conventions — flag salutation / "
                  "sign-off mismatches (advisory)").pack(anchor="w", padx=16, pady=(10, 0))
 
+        ctk.CTkLabel(self, text="Startup & window behaviour",
+                     font=ctk.CTkFont(weight="bold")).pack(anchor="w", **pad)
+
+        self.tray_var = tk.BooleanVar(
+            value=cfg.get("minimise_to_tray", False) and TRAY_AVAILABLE)
+        ctk.CTkCheckBox(
+            self, variable=self.tray_var,
+            state="normal" if TRAY_AVAILABLE else "disabled",
+            text="Minimise to tray instead of closing",
+            command=self._refresh_tray_dependent_state
+        ).pack(anchor="w", padx=16, pady=(2, 0))
+        if not TRAY_AVAILABLE:
+            ctk.CTkLabel(
+                self, text="Needs the optional pystray and Pillow packages: "
+                          "pip install pystray pillow",
+                text_color="gray60",
+                font=ctk.CTkFont(size=11)).pack(anchor="w", padx=16)
+
+        self.autostart_var = tk.BooleanVar(
+            value=cfg.get("start_with_windows", False))
+        ctk.CTkCheckBox(
+            self, variable=self.autostart_var,
+            text="Start with Windows").pack(anchor="w", padx=16, pady=(10, 0))
+
+        self.start_minimised_var = tk.BooleanVar(
+            value=cfg.get("start_minimised", False) and TRAY_AVAILABLE)
+        self.start_minimised_check = ctk.CTkCheckBox(
+            self, variable=self.start_minimised_var,
+            text="Start minimised to tray")
+        self.start_minimised_check.pack(anchor="w", padx=16, pady=(10, 0))
+        self._refresh_tray_dependent_state()
+
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
         btn_row.pack(fill="x", padx=16, pady=18, side="bottom")
         ctk.CTkButton(btn_row, text="Cancel", width=100, fg_color="gray30",
@@ -1248,6 +1394,18 @@ class SettingsDialog(ctk.CTkToplevel):
         self.ollama_combo.configure(state="disabled" if cloud else "normal")
         self.detect_btn.configure(state="disabled" if cloud else "normal")
 
+    def _refresh_tray_dependent_state(self):
+        """Start-minimised only makes sense once tray is on and available.
+
+        Force-clears the variable when disabling it, so a stale True value
+        from a config with tray off can't be saved back out unintentionally
+        just because the checkbox was left ticked from an earlier state.
+        """
+        enabled = TRAY_AVAILABLE and bool(self.tray_var.get())
+        self.start_minimised_check.configure(state="normal" if enabled else "disabled")
+        if not enabled:
+            self.start_minimised_var.set(False)
+
     def _save(self):
         """Validate and persist settings, keeping the dialog open on failure.
 
@@ -1265,6 +1423,9 @@ class SettingsDialog(ctk.CTkToplevel):
                 self.ollama_combo.get().strip() or DEFAULT_OLLAMA_MODEL),
             "protect_placeholders": bool(self.protect_var.get()),
             "check_letter_conventions": bool(self.letters_var.get()),
+            "minimise_to_tray": bool(self.tray_var.get()),
+            "start_with_windows": bool(self.autostart_var.get()),
+            "start_minimised": bool(self.start_minimised_var.get()),
         })
         candidate = normalise_config(candidate)
         if not save_config(candidate, force=True):
@@ -1275,6 +1436,15 @@ class SettingsDialog(ctk.CTkToplevel):
                 "read-only or open elsewhere, then try again.",
                 parent=self)
             return
+
+        if not set_autostart(candidate["start_with_windows"]):
+            messagebox.showwarning(
+                "Startup entry not updated",
+                "Settings were saved, but Scriptorium could not update the "
+                "Windows startup registry entry. \"Start with Windows\" may "
+                "not reflect this change.",
+                parent=self)
+
         self.cfg.clear()
         self.cfg.update(candidate)
         self.on_save()
@@ -1295,6 +1465,7 @@ class Scriptorium(ctk.CTk):
         self._request_id = 0          # bumped on every Process and every cancel
         self._result_source = ""      # the text last_result was generated from
         self.selected_tones = list(self.cfg.get("default_tones", ["Concise"]))
+        self.tray_icon = None         # the live pystray.Icon, only while hidden to tray
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
@@ -1311,9 +1482,17 @@ class Scriptorium(ctk.CTk):
         self._bind_shortcuts()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        self._maybe_offer_config_migration()
         self._maybe_warn_unreadable_config()
         self._maybe_show_privacy_notice()
         self._refresh_status()
+
+        # Only ever start hidden if the tray is genuinely available -- a
+        # start-minimised launch with no working tray would trap the user
+        # with no way to reach an invisible window.
+        wants_minimised = "--minimised" in sys.argv[1:] or self.cfg.get("start_minimised")
+        if wants_minimised and self.cfg.get("minimise_to_tray") and TRAY_AVAILABLE:
+            self._minimise_to_tray()
 
     # -- layout ------------------------------------------------------------- #
 
@@ -1474,6 +1653,15 @@ class Scriptorium(ctk.CTk):
                                          command=self.process)
         self.process_btn.pack(side="left")
 
+        self.softer_btn = ctk.CTkButton(
+            bar, text="− Softer", width=80, fg_color="gray30",
+            command=lambda: self._nudge_strength(-1))
+        self.softer_btn.pack(side="left", padx=(8, 4))
+        self.stronger_btn = ctk.CTkButton(
+            bar, text="+ Stronger", width=90, fg_color="gray30",
+            command=lambda: self._nudge_strength(1))
+        self.stronger_btn.pack(side="left", padx=4)
+
         self.accept_btn = ctk.CTkButton(
             bar, text="Accept →", width=110, fg_color="#2f7d4f",
             hover_color="#276a43", command=self.accept)
@@ -1557,6 +1745,67 @@ class Scriptorium(ctk.CTk):
                 "fresh copy, or repair the JSON by hand.",
                 parent=self)
 
+    def _maybe_offer_config_migration(self):
+        """Offer to import an existing source-mode config, once, when frozen.
+
+        Mirrors _maybe_show_privacy_notice()'s one-time-flag pattern: gated
+        on import_prompt_shown rather than on whether a frozen config file
+        happens to exist yet, since Settings or the privacy notice could
+        already have created one for unrelated reasons. The source file
+        itself is only ever read, never written — declining, or there being
+        no candidate at all, leaves it completely untouched.
+        """
+        if not getattr(sys, "frozen", False) or self.cfg.get("import_prompt_shown"):
+            return
+        self.cfg["import_prompt_shown"] = True
+        save_config(self.cfg)
+
+        candidate = find_source_config_candidate()
+        if not candidate:
+            return
+        if not messagebox.askyesno(
+                "Import existing settings?",
+                "Scriptorium found an existing configuration from the "
+                f"source version at:\n\n{candidate}\n\n"
+                "Import its API key and preferences into this standalone "
+                "version? That file will not be changed either way.",
+                parent=self):
+            return
+        try:
+            with open(candidate, "r", encoding="utf-8") as fh:
+                imported = json.load(fh)
+        except (OSError, json.JSONDecodeError) as exc:
+            messagebox.showerror(
+                "Import failed",
+                f"Could not read the existing configuration.\n\n{exc}")
+            return
+        if not isinstance(imported, dict):
+            messagebox.showerror(
+                "Import failed",
+                "The existing configuration file is not a valid settings file.")
+            return
+        merged = dict(self.cfg)
+        merged.update(imported)
+        merged["import_prompt_shown"] = True
+        merged = normalise_config(merged)
+        if not save_config(merged, force=True):
+            messagebox.showerror(
+                "Import failed",
+                "The existing settings were read, but could not be saved "
+                "to this version's configuration file.")
+            return
+        self.cfg.clear()
+        self.cfg.update(merged)
+        # The toolbar's Mode/Strength/Role/Tone/diff-view controls were
+        # already built from the pre-import config; apply the imported
+        # values to them now rather than waiting for a restart.
+        self.mode_var.set(merged.get("default_mode", self.mode_var.get()))
+        self.strength_var.set(merged.get("default_strength", self.strength_var.get()))
+        self.role_var.set(merged.get("default_role", self.role_var.get()))
+        self._set_selected_tones(merged.get("default_tones", self.selected_tones))
+        self.diff_view_var.set(merged.get("default_diff_view", self.diff_view_var.get()))
+        self._refresh_status("settings imported")
+
     def _maybe_show_privacy_notice(self):
         if self.cfg.get("backend") == "anthropic" and not self.cfg.get("privacy_ack"):
             messagebox.showinfo(
@@ -1598,6 +1847,21 @@ class Scriptorium(ctk.CTk):
             text="Working…" if flag else "Process",
             state="disabled" if flag else "normal")
         self.accept_btn.configure(state="disabled" if flag else "normal")
+        self.softer_btn.configure(state="disabled" if flag else "normal")
+        self.stronger_btn.configure(state="disabled" if flag else "normal")
+
+    def _nudge_strength(self, delta):
+        """Move Strength one notch (Softer/Stronger) and immediately re-run.
+
+        Clamped at the ends of STRENGTHS rather than wrapping — clicking
+        Softer already at "Light" just re-runs at "Light" again.
+        """
+        if self.busy:
+            return
+        index = STRENGTHS.index(self.strength_var.get())
+        index = max(0, min(len(STRENGTHS) - 1, index + delta))
+        self.strength_var.set(STRENGTHS[index])
+        self.process()
 
     def _claim_request(self, request_id):
         """Return True if this callback still owns the UI.
@@ -1940,9 +2204,66 @@ class Scriptorium(ctk.CTk):
         self._refresh_status("settings saved")
 
     def _on_close(self):
-        """Invalidate in-flight callbacks before destroying the window."""
+        """Minimise to tray if that's enabled and actually available.
+
+        Falls through to a normal quit otherwise -- including when
+        minimise_to_tray is turned on in config but pystray/Pillow aren't
+        installed, so a stale setting can never trap the user with no way
+        to reach the window (Alt+F4 always works unless tray genuinely
+        took over).
+        """
+        if self.cfg.get("minimise_to_tray") and TRAY_AVAILABLE:
+            self._minimise_to_tray()
+            return
+        self._quit_app()
+
+    def _quit_app(self):
+        """Invalidate in-flight callbacks and actually end the process."""
+        self.tray_icon = None
         self._invalidate_inflight()
         self.destroy()
+
+    def _minimise_to_tray(self):
+        """Withdraw the window and show a tray icon in its place.
+
+        The icon exists only while the window is hidden: restoring it (via
+        its default action or the "Show Scriptorium" menu item) or quitting
+        from it tears the icon back down first. There is never a stray icon
+        left once the window is visible again, and never an icon thread
+        running when it isn't needed.
+        """
+        if self.tray_icon is not None:
+            return  # already minimised
+        try:
+            image = PILImage.open(resource_path(os.path.join("icon", "icon-96.png")))
+        except OSError as exc:
+            # Fail safe: keep the window open rather than vanish with no
+            # visible icon and no way back.
+            print(f"[warning] could not load the tray icon image: {exc}")
+            return
+        menu = pystray.Menu(
+            pystray.MenuItem("Show Scriptorium", self._tray_restore, default=True),
+            pystray.MenuItem("Quit", self._tray_quit),
+        )
+        self.tray_icon = pystray.Icon("Scriptorium", image, "Scriptorium", menu)
+        threading.Thread(target=self.tray_icon.run, daemon=True).start()
+        self.withdraw()
+
+    def _tray_restore(self, icon, _item):
+        """Tray callback -- runs on pystray's own thread, not Tk's."""
+        icon.stop()
+        self._post_to_ui(self._finish_tray_restore)
+
+    def _finish_tray_restore(self):
+        self.tray_icon = None
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+
+    def _tray_quit(self, icon, _item):
+        """Tray Quit -- runs on pystray's own thread, not Tk's."""
+        icon.stop()
+        self._post_to_ui(self._quit_app)
 
 
 def main():

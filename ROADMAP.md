@@ -4,9 +4,9 @@
 When Mark says "lets get started", that is the cue to open these three files
 before doing anything else.
 
-Current shipped version: **2.3** (state-consistency fixes, live counts,
-presets, review shortcuts). This roadmap scopes the next three releases:
-**2.4 → 2.6**.
+Current shipped version: **2.5** (multi-tone composition, expanded roles,
+tray/autostart, packaging polish). This roadmap has one release left
+unimplemented: **v2.6**, the dedicated bug-diagnosis session.
 
 Scope through v2.3 was drawn from twelve accumulated review notes
 (`notes/01_Active/notes_001.txt` – `notes_012.txt`), written independently by
@@ -315,11 +315,16 @@ remaining small distribution-polish items so packaging work lands together.
 1. **Minimise to tray / start with Windows** (notes_008 full spec, notes_012
    Feature 2). Settings-gated (`minimise_to_tray`, `start_with_windows`,
    `start_minimised` config keys). `_on_close()` withdraws instead of
-   destroying when the option is on; a `ctypes`-based `Shell_NotifyIcon`
-   wrapper (no new pip dependency) or `pystray`+`pillow` if the ctypes path
-   proves painful; `winreg` `HKCU\...\Run` entry launching `pythonw.exe
-   scriptorium.py --minimised`. Ship with a visible Quit path from day one
-   — never trap the user with a broken tray icon and no window.
+   destroying when the option is on. Implemented with **`pystray`+`Pillow`**
+   (Mark's choice over the ctypes path, to avoid hand-rolling a Win32
+   message loop) — both optional: `TRAY_AVAILABLE` gates the Settings
+   checkbox and is re-checked at every `_on_close()`, so a config with
+   `minimise_to_tray: true` but the packages missing still just quits
+   normally rather than trapping the user. `winreg` `HKCU\...\Run` entry
+   (`set_autostart()`) launches `pythonw.exe scriptorium.py --minimised`
+   from source or the `.exe` directly when frozen. The tray icon only
+   exists while the window is hidden — created on minimise, torn down on
+   restore or Quit — never left running in the background otherwise.
 2. **Give the packaged `.exe` its icon and version metadata** (notes_011
    Finding 13). `icon/icon-96.ico` already exists but `scriptorium.spec`
    sets `icon=None`; add it plus a minimal PyInstaller version-info
@@ -339,21 +344,67 @@ remaining small distribution-polish items so packaging work lands together.
    re-run `process()`. Low-risk polish to land alongside the packaging work.
 
 ### Acceptance checklist
-- [ ] Close the window with "minimise to tray" on: window vanishes, process
+- [x] Close the window with "minimise to tray" on: window vanishes, process
       stays alive, tray icon appears; left-click restores and focuses it.
-- [ ] Tray Quit ends the process and removes the icon; Alt+F4 with the
-      option off quits normally as before.
+      **Verified programmatically** by driving the real `Scriptorium`/
+      `pystray.Icon` objects end to end: `_on_close()` withdraws the window
+      and a real tray icon appears in the notification area (confirmed
+      live, briefly, during testing); calling the icon's own "Show
+      Scriptorium" callback deiconifies and refocuses the window and tears
+      the icon down. **Not done by an actual mouse click** — that specific
+      click-to-restore interaction still needs a person, since pystray's
+      Windows backend owns its own message loop outside what this session
+      could drive.
+- [x] Tray Quit ends the process and removes the icon; Alt+F4 with the
+      option off quits normally as before. Verified both paths
+      programmatically (`_tray_quit` → real `destroy()`; `_on_close()` with
+      `minimise_to_tray` off → real `destroy()`), plus the safety case:
+      `minimise_to_tray: true` but `TRAY_AVAILABLE` false (packages
+      missing) still quits normally rather than vanishing with no icon.
 - [ ] Log off/on (or reboot) with "start with Windows" ticked: app starts
       minimised, no console flash, `pythonw.exe` confirmed via Task
-      Manager.
-- [ ] Untick "start with Windows" in Settings; `HKCU\...\Run` value is gone
-      (`reg query`).
-- [ ] Packaged `.exe` shows the Scriptorium icon in Explorer/taskbar and
-      populated FileDescription/ProductVersion fields.
-- [ ] Deleting/renaming `%LOCALAPPDATA%\Scriptorium` and relaunching
+      Manager. **Needs a person** — an actual logon event can't be
+      simulated in-session. What is verified: `set_autostart(True)` writes
+      the exact `pythonw.exe ... --minimised` command line to the real
+      `HKCU\...\Run` (confirmed via `winreg` read-back), and `__init__`
+      correctly treats `--minimised` (or `start_minimised` in config) plus
+      an available tray as "start withdrawn," never showing the window
+      first.
+- [x] Untick "start with Windows" in Settings; `HKCU\...\Run` value is gone.
+      Verified against the real registry (`winreg` read after
+      `set_autostart(False)`, and via a full Settings-dialog save cycle) —
+      value confirmed removed both times, registry left clean afterwards.
+- [x] Packaged `.exe` shows the Scriptorium icon in Explorer/taskbar and
+      populated FileDescription/ProductVersion fields. Verified against a
+      real `pyinstaller scriptorium.spec` build: `Get-Item ... .VersionInfo`
+      shows the correct FileDescription/ProductVersion/CompanyName, and
+      `System.Drawing.Icon.ExtractAssociatedIcon` confirms the icon
+      resource is present. The packaged `.exe` (with the new `winreg`/
+      `pystray`/`Pillow` imports) launches cleanly with no crash.
+- [x] Deleting/renaming `%LOCALAPPDATA%\Scriptorium` and relaunching
       produces a dedicated fallback folder, not a loose file in `~`.
-- [ ] First run of the `.exe` after having used the source version offers
-      the import prompt; declining leaves both configs untouched.
+      Verified by simulating an `os.makedirs` failure on the primary path:
+      `_config_dir()` now falls back to a same-named `Scriptorium`
+      subfolder under the user's home directory, not a bare loose file,
+      and only falls all the way back to a loose file if that second
+      attempt also fails.
+- [x] First run of the `.exe` after having used the source version offers
+      the import prompt; declining leaves both configs untouched. Verified
+      with a temp candidate config and a patched `CONFIG_PATH`/
+      `sys.executable`: declining leaves the candidate file byte-for-byte
+      unchanged and does not import its values into the live config;
+      accepting imports the API key/mode/role/tones (applied to the live
+      toolbar immediately, not just on next restart) while still leaving
+      the source file untouched; a second launch does not ask again.
+
+**One incident during hand-testing**: an early save-cycle test ran against
+the *real* `scriptorium_config.json` instead of a patched path and briefly
+flipped `minimise_to_tray`/`start_with_windows` to `true` in it (and wrote
+a real, immediately-removed `HKCU\...\Run` entry). Caught and reverted
+within the same session — confirmed both the config file and the registry
+were restored to their prior (off) state, with the API key untouched
+throughout. Every test after this one explicitly patches `CONFIG_PATH` to
+a temp file.
 
 ---
 

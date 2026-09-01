@@ -6,6 +6,145 @@ Mark saying "lets get started").
 
 ---
 
+## 2026-09-01 (continued) — v2.5 (tray/autostart, packaging polish) implemented
+
+Continuing straight on from v2.4 in the same session, on Mark's "move on
+to v2.5." All five v2.5 tasks from `ROADMAP.md` implemented, hand-tested,
+and committed (APP_VERSION bumped to "2.5").
+
+**Architecture choice, asked up front:** the tray icon could be a
+ctypes-only `Shell_NotifyIcon` wrapper (no new dependency, but a hand-rolled
+Win32 message loop merged into Tk's event loop) or `pystray`+`Pillow`
+(two new optional dependencies, far less code). Asked Mark; he chose
+**pystray+Pillow**. Both were already installed in this environment
+(pystray 0.19.5, Pillow 12.1.1), which let this session verify the tray
+lifecycle against the real library rather than just reading its docs.
+
+**Implemented, in roadmap order:**
+1. **Frozen-config fallback fix** — `_config_dir()` now tries a same-named
+   `Scriptorium` subfolder under the user's home directory if
+   `%LOCALAPPDATA%\Scriptorium` can't be created, instead of falling
+   straight to a bare loose file there; only falls all the way back to the
+   loose file if that second attempt also fails.
+2. **Packaged `.exe` icon + version metadata** — `scriptorium.spec` now
+   sets `icon="icon/icon-96.ico"` and `version="version_info.txt"` (new
+   file, hand-written `VSVersionInfo` structure PyInstaller evaluates
+   directly). Verified against a real `pyinstaller scriptorium.spec`
+   build, not just read — `Get-Item ... .VersionInfo` shows the correct
+   FileDescription/ProductVersion/CompanyName, and
+   `Icon.ExtractAssociatedIcon` confirms the icon resource is present.
+3. **Softer/Stronger one-click re-run** — `_nudge_strength(delta)` clamps
+   the `STRENGTHS` index and calls `process()`; wired into `_set_busy()`
+   alongside Process/Accept so it greys out mid-request too.
+4. **One-time source→frozen config migration prompt** —
+   `find_source_config_candidate()` checks only next to the running `.exe`
+   (nowhere wider); `_maybe_offer_config_migration()` mirrors
+   `_maybe_show_privacy_notice()`'s one-time-flag pattern exactly
+   (`import_prompt_shown`, not "does a frozen config file happen to exist
+   yet"). The source file is only ever read, never written, on either
+   Yes or No. Accepting applies the imported mode/role/tones/diff-view to
+   the *live* toolbar immediately rather than waiting for a restart.
+5. **Minimise to tray / start with Windows** — `TRAY_AVAILABLE` (a top-level
+   optional `import pystray`/`from PIL import Image`) gates a Settings
+   checkbox that's disabled with an explanation if missing, and is
+   re-checked at every `_on_close()` — a stale `minimise_to_tray: true`
+   with the packages missing still just quits normally, never traps the
+   user. The tray icon (`icon/icon-96.png` via `resource_path()`, now
+   bundled as PyInstaller `datas`) exists only while the window is hidden:
+   created in `_minimise_to_tray()`, torn down in `_tray_restore()`/
+   `_tray_quit()` (both pystray-thread callbacks that hand off to Tk's
+   thread via the existing `_post_to_ui()` helper — same cross-thread
+   pattern `process()`'s worker already used). `set_autostart()` writes/
+   removes a `HKCU\...\Run` entry via `winreg` (`pythonw.exe` from source,
+   the `.exe` itself when frozen), both passing `--minimised`; `__init__`
+   treats `--minimised` or `start_minimised` in config as "start withdrawn"
+   — but only when tray is genuinely available, for the same
+   never-trap-the-user reason.
+
+**Verification performed:**
+- `ast.parse()` syntax check after every edit — clean throughout.
+- Full regression pass of the v2.4-era isolated logic tests (tone/role/
+  config, `DEFAULT_CONFIG` round-trip, `WRITING_PRESETS` validity) — all
+  still pass with the new config keys added.
+- **Frozen fallback**: simulated an `os.makedirs` failure on the primary
+  path — confirmed it now falls back to a dedicated subfolder, not a bare
+  loose file, cleaning up the test artifact directory afterwards.
+- **Migration prompt**: full cycle against temp files with patched
+  `sys.frozen`/`sys.executable`/`CONFIG_PATH` (never the real configs) —
+  candidate-found/not-found, declined (candidate untouched, no import,
+  flag still set so it doesn't ask again), accepted (values imported into
+  live cfg *and* the toolbar, flag set, candidate still untouched
+  afterwards), and confirmed a second launch doesn't re-prompt.
+- **Tray lifecycle — driven against the real `pystray`/`PIL`, not
+  mocked**: `_on_close()` with tray on actually withdrew the window and
+  created a real, briefly-visible tray icon; calling the icon's own "Show
+  Scriptorium" callback deiconified/refocused the window and tore the
+  icon down; calling the Quit callback destroyed the app for real; the
+  safety fallback (tray on in config but `TRAY_AVAILABLE` patched False)
+  correctly fell through to a normal quit instead of vanishing. Each
+  scenario run as a **separate process** — running multiple `Scriptorium()`
+  (`ctk.CTk()`) instances in one process causes customtkinter's global
+  DPI/appearance-mode tracker to misbehave across instances (harmless
+  `invalid command name ... after script` noise, and a `TclError` on an
+  unrelated second instance after the first was destroyed) — a test-harness
+  artifact, not an app bug; real usage only ever has one instance.
+- **Autostart — against the real `HKCU` registry**, not simulated:
+  `set_autostart(True)` then a `winreg` read-back confirmed the exact
+  `pythonw.exe ... --minimised` command line; `set_autostart(False)` then
+  a read confirmed the value was gone; disabling when already absent still
+  reports success. A full `SettingsDialog._save()` cycle was also run
+  end-to-end and confirmed both the config and the registry updated
+  together correctly.
+- **Packaged `.exe` rebuilt twice** (once after icon/version changes, once
+  after the tray/autostart/winreg additions) via a real
+  `pyinstaller scriptorium.spec` run, both times launched for real and
+  confirmed no startup crash from the new imports. Solved a recurring
+  false alarm in this process: `Get-Process -Id $p.Id` right after
+  `Start-Process` sometimes reports the PyInstaller onefile **bootloader**
+  process (a lightweight parent with a blank title), not the actual
+  unpacked Python/Tk **child** process that owns the real window — checking
+  by image name (`Scriptorium.exe`) and picking the higher-memory PID
+  resolves it. Not a bug in the app; a quirk of how onefile builds run.
+- Launched the live source-run GUI after every major change — clean title,
+  empty stderr throughout.
+
+**One real incident, caught and fixed within the session:** an early
+Settings-save test ran against the *real* `scriptorium_config.json`
+instead of a patched path, briefly flipping `minimise_to_tray` and
+`start_with_windows` to `true` in Mark's actual config (and writing a
+real, harmless `HKCU\...\Run` entry). Caught immediately by checking the
+file after the test; reverted both the config values and the registry
+entry, verified clean afterwards, without ever touching or displaying the
+real API key. Every test written after this one explicitly patches
+`CONFIG_PATH` to a temp file rather than trusting a real `Scriptorium()`
+instantiation not to save for real.
+
+**Still needs a person, genuinely can't be done from this session:**
+- An actual mouse click on the live tray icon to restore the window
+  (pystray's Windows backend owns its own message loop; this session
+  called its callback directly rather than physically clicking).
+- A real log-off/log-on or reboot to confirm "start with Windows" fires at
+  logon and shows no console flash — the registry entry is verified
+  correct, but Windows actually executing it at a real logon event can't
+  be simulated in-session.
+- Visual confirmation the tray icon looks right at actual taskbar
+  size/theme, and that the Explorer/taskbar icon and Properties dialog
+  look right to a human, not just to `VersionInfo`/`ExtractAssociatedIcon`.
+
+`ROADMAP.md` updated: the v2.5 checklist ticked for everything verified
+above, the two genuinely-blocked items marked "needs a person" rather than
+left unchecked with no explanation, and the incident recorded there too.
+The "Current shipped version" line at the top (stale at 2.3 since before
+v2.4 — an oversight last session, fixed now) updated to 2.5, since v2.6 is
+the only unscoped release left.
+
+Next session: hand-test the two person-only items above if Mark wants
+that confirmed before relying on it, then move to v2.6 (the dedicated bug
+diagnosis session) whenever Mark is ready — it is deliberately unscoped
+beyond the verification procedure already in `ROADMAP.md`.
+
+---
+
 ## 2026-09-01 — v2.4 (multi-tone composition & expanded roles) implemented
 
 Continuing from the v2.3 pause: Mark added `notes_013.txt` (Mark/Codex),

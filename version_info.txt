@@ -1,0 +1,35 @@
+# PyInstaller Windows version-info resource for Scriptorium.
+# Referenced by scriptorium.spec's EXE(version="version_info.txt").
+# Bump the version tuples/strings here alongside APP_VERSION in scriptorium.py.
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(2, 5, 0, 0),
+    prodvers=(2, 5, 0, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0),
+  ),
+  kids=[
+    StringFileInfo(
+      [
+        StringTable(
+          u'040904B0',
+          [
+            StringStruct(u'CompanyName', u'Mark Hawksworth'),
+            StringStruct(u'FileDescription', u'Scriptorium — British English writing assistant'),
+            StringStruct(u'FileVersion', u'2.5.0.0'),
+            StringStruct(u'InternalName', u'Scriptorium'),
+            StringStruct(u'LegalCopyright', u'© Mark Hawksworth'),
+            StringStruct(u'OriginalFilename', u'Scriptorium.exe'),
+            StringStruct(u'ProductName', u'Scriptorium'),
+            StringStruct(u'ProductVersion', u'2.5.0.0'),
+          ],
+        )
+      ]
+    ),
+    VarFileInfo([VarStruct(u'Translation', [1033, 1200])]),
+  ],
+)

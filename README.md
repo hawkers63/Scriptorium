@@ -39,6 +39,13 @@ Built in Python with a native-style CustomTkinter interface.
   words highlighted, with a Clean / Inline toggle; the inline view also shows
   deleted words struck through in red.
 - **Review controls** — Accept, Reject, Copy, Undo, plus Import and Export.
+- **Softer / Stronger** — one-click re-run at the next strength notch down or
+  up, instead of changing Strength and pressing Process separately.
+- **Minimise to tray, start with Windows** (optional) — closing the window
+  hides it to the system tray instead of quitting; a "Start with Windows"
+  option launches it minimised at logon. Needs the optional `pystray` and
+  `Pillow` packages — Settings explains and disables the checkbox if they
+  aren't installed, and the app works exactly the same without them.
 - **Import and export** — plain text and Markdown always; Word `.docx` files
   too when the optional `python-docx` package is installed.
 - **British English throughout** — `organise`, `colour`, `licence`/`license`,
@@ -64,11 +71,12 @@ Built in Python with a native-style CustomTkinter interface.
   pip install -r requirements.txt
   ```
 
-  That installs `customtkinter`, the only required package. For Word `.docx`
-  import/export, also install the optional extra:
+  That installs `customtkinter`, the only required package. Two optional
+  extras add features but aren't required to run Scriptorium at all:
 
   ```
-  pip install python-docx
+  pip install python-docx        # Word (.docx) import/export
+  pip install pystray pillow     # minimise to tray / start with Windows
   ```
 
 ---
@@ -143,9 +151,7 @@ under `%LOCALAPPDATA%\Scriptorium` rather than next to the script.
 
 ## Roadmap
 
-- Further robustness and polish (from ongoing review).
-- Optional minimise-to-tray and start-with-Windows, deferred until it can be
-  tested on a real Windows session.
+- Further robustness and polish (from ongoing review) — see `ROADMAP.md`.
 
 ---
 

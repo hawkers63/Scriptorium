@@ -1,7 +1,13 @@
 # Scriptorium runtime dependency.
-# Everything else (urllib, tkinter, json, difflib) ships with Python.
+# Everything else (urllib, tkinter, json, difflib, winreg) ships with Python.
 customtkinter>=5.2.0
 
-# Optional extra (NOT installed by the line above) — only needed for Word
-# (.docx) import/export. Install it yourself if you want that support:
+# Optional extras (NOT installed by the line above):
+#
+# Word (.docx) import/export:
 #     pip install python-docx
+#
+# Minimise-to-tray (Settings > "Minimise to tray instead of closing"). The
+# checkbox is disabled with an explanation if these aren't installed; every
+# other feature works exactly the same without them.
+#     pip install pystray pillow
