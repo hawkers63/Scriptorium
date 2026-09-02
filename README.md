@@ -17,14 +17,16 @@ Built in Python with a native-style CustomTkinter interface.
     minimum changes necessary.
   - **Clarify** — improve readability and structure without adding new claims.
 - **Adjustable strength** — Light, Standard, or Substantial.
-- **Optional tone control** — choose up to two of twelve tones (Formal,
+- **Optional tone control** — choose up to three of twelve tones (Formal,
   Neutral, Casual, Friendly, Diplomatic, Empathetic, Direct, Confident,
   Concise, Detailed, Constructive, Persuasive) via a compact picker. The
-  first tone chosen is dominant; a second is blended in as a supporting
-  characteristic. Each tone is a bounded, data-driven instruction rather than
-  a bare label, so it can only reshape wording and register — never invent
-  facts, evidence or detail. Genuinely contradictory pairs (e.g. Concise +
-  Detailed) are refused with an explanation.
+  first tone chosen is dominant, the second supports it, and a third is
+  only a light accent that's weakened or dropped rather than allowed to
+  change content, certainty or scope. Each tone is a bounded, data-driven
+  instruction rather than a bare label, so it can only reshape wording and
+  register — never invent facts, evidence or detail. Genuinely
+  contradictory pairs (e.g. Concise + Detailed, Neutral + Persuasive) are
+  refused with an explanation.
 - **Writing roles** — an optional context (Creative, Software Developer,
   Engineer, Executive, Project Manager, Client Relations, Academic,
   Technical Writer, Journalist, Legal & Compliance, Lawyer) that steers

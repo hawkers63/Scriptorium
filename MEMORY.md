@@ -192,11 +192,103 @@ session ever touched it.
 "Current shipped version" updated to 2.10; notes_017's source-notes-table
 row marked closed.
 
-Next session: v2.11+ (notes_016's five architecture proposals — three-tone
-picker first, since it needs the live-model calibration discipline
-[[mark_meaning_preservation_priority]] requires; then user presets, retry
-transport, and the two raw-Win32 items last) whenever Mark is ready — fully
-scoped in `ROADMAP.md` already, nothing implemented yet.
+Continued straight into v2.11 the same session — see the entry below.
+
+---
+
+## 2026-09-02 (continued) — v2.11 (three-tone picker); found and fixed real embellishment bugs via calibration
+
+Continued from v2.10 in the same session, per Mark's earlier go-ahead to
+use Ollama (free, local) for calibration rather than spend against the
+real Claude API. Full detail and the complete calibration write-up is in
+`ROADMAP.md`'s v2.11 section; the two things worth recording here that
+aren't obvious from a diff:
+
+**Ollama on this machine could not load `llama3.1:8b`** (the model v2.4's
+calibration used) — repeated real server-log cycles of "client connection
+closed before llama-server finished loading" / "llm server not
+responding", consistent with the box reporting only ~4 GiB free RAM
+against the model's ~4.7 GiB weight+buffer footprint (confirmed via the
+real `ollama serve` stderr log, not guessed). Killed the stalled attempt
+after ~10 minutes of retry cycling rather than let it hang indefinitely,
+and switched to `llama3.2:3b` (already pulled locally, loads comfortably)
+— a real, still-meaningfully-capable model, not a toy 1B one, so the
+calibration signal is still worth trusting, just not identical to v2.4's
+choice. Worth remembering for next time Ollama calibration is needed on
+this machine: default to `llama3.2:3b`, not `llama3.1:8b`, unless more RAM
+is free.
+
+**The calibration process worked exactly as intended — it caught real
+bugs, not just confirmed the design.** First pass (3 of notes_016 §2.3's
+own suggested test cases, run through the real `call_ollama()`/
+`mask_placeholders()`/`build_system_prompt()` pipeline, not mocked) found
+three concrete embellishment failures, the same class of bug as v2.4's
+Persuasive+Confident finding:
+1. Formal+Concise+Diplomatic invented a commitment ("I am committed to
+   finding a solution") in a message that only offered to discuss
+   something — despite the guard clause already explicitly forbidding
+   "create commitments". The model did it anyway; the guard needed a
+   concrete example, not just the abstract rule, to actually hold.
+2. Confident+Direct+Friendly swapped a hedge word for confirmatory
+   language ("seems" → "as expected"), directly overstating certainty
+   against Confident's own instruction, and lost the source's explicit
+   "haven't fully checked yet" / "not 100% sure yet" caveats in the same
+   pass.
+3. Neutral+Detailed+Constructive (Neutral as the *dominant* tone) added
+   "Fortunately" before "no data was lost" — an unearned emotional
+   interjection against Neutral's own explicit "unembellished... over
+   strong emotional... colouring" instruction.
+
+Fixed with targeted, concrete additions rather than vague tightening:
+`TONE_INSTRUCTIONS["Neutral"]` now names forbidden interjections directly
+("fortunately", "unfortunately", "importantly");
+`TONE_INSTRUCTIONS["Confident"]` now names the specific hedge→confirmation
+swap pattern and lists the allowed hedge words explicitly (seems/might/
+may/could/appears); the shared closing guard in `build_tone_instruction()`
+now includes the actual failing sentence as a worked example of a
+forbidden invented commitment. Re-ran all three cases post-fix, then the
+trickiest one (Confident+Direct+Friendly, since certainty-overstatement
+was the subtlest of the three bugs) twice more for a 3x check matching
+v2.4's own discipline — five real backend calls, all clean: no invented
+commitments, no hedge-word swaps (the model consistently landed on
+"appears"/"appears to be" from the newly-named allowed list, not a
+coincidence), no unearned interjections, every number/time/negation/
+placeholder round-tripped intact. This is a cleaner result than v2.4's own
+Persuasive fix, which still had a residual issue 2 of 3 times — accepted
+without further iteration, same reasoning v2.4 used: diminishing returns
+on a small local model, and Scriptorium's actual backstop is the user
+reviewing the diff before Accept, not the prompt alone.
+
+Also implemented (code-only, no live-model risk): `TONE_PICKER_LIMIT`
+raised to `MAX_SELECTED_TONES` (3); `TONE_CONFLICTS` gained the
+`Neutral`/`Persuasive` pair, confirmed not to falsely trigger on the
+previously-legal pairs notes_016 named (Friendly+Formal, Direct+
+Diplomatic, Confident+Empathetic); `TonePickerDialog`'s label updated to
+describe the third slot as "a light accent — not an equal third voice."
+
+**Verification**: `ast.parse()` clean; a dedicated logic-test script
+covers the new limit, the new conflict pair (including embedded in a
+three-item list), the preserved legal pairs, and the exact dominant/
+supporting/accent phrasing at each tone count; full v2.9/v2.10 regression
+suites re-run together and all still pass; a real `Scriptorium()`
+construct/destroy cycle confirmed clean; packaged `.exe` rebuilt,
+`FileVersion`/`ProductVersion` confirmed `2.11.0.0`, launched for real,
+alive and `Responding: True`. Real `scriptorium_config.json` confirmed
+untouched (unchanged mtime) throughout — the calibration ran entirely
+against Ollama with a temp/inline config, never the live file. Ollama
+stopped and its runtime folder cleaned up after testing, same as v2.4's
+session-end discipline.
+
+`ROADMAP.md` restructured: v2.11 is now its own shipped section (three-tone
+picker only); the other four notes_016 proposals renumbered to v2.12+;
+"Current shipped version" updated to 2.11; `README.md`'s tone-control
+bullet updated for three tones and the new conflict pair.
+
+Next session: v2.12+ (persisted user presets first — self-contained, no
+prompt surface touched — then the backend retry transport, then the two
+raw-Win32 items: Explorer drag-and-drop and the rich `CF_HTML` clipboard
+diff) whenever Mark is ready — fully scoped in `ROADMAP.md`, nothing
+implemented yet.
 
 ---
 

@@ -36,7 +36,7 @@ Dependencies
     Optional: install python-docx to import from and export to Word (.docx)
     files (`pip install python-docx`). Plain text and Markdown work without it.
 
-Author: built with Mark, August 2026. Version 2.10.
+Author: built with Mark, August 2026. Version 2.11.
 """
 
 import os
@@ -77,7 +77,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.10"
+APP_VERSION = "2.11"
 
 # A small shared palette (notes_017, v2.10) so the two text panes, the diff
 # tags and the notice banner read as one surface instead of drifting
@@ -312,7 +312,9 @@ TONE_INSTRUCTIONS = {
     ),
     "Neutral": (
         "keep the register even and impartial, favouring plain, unembellished "
-        "wording over strong emotional or persuasive colouring"
+        "wording over strong emotional or persuasive colouring; do not add "
+        "editorial interjections such as 'fortunately', 'unfortunately' or "
+        "'importantly' that are not already in the source"
     ),
     "Casual": (
         "use relaxed, natural phrasing and contractions where appropriate, "
@@ -336,7 +338,10 @@ TONE_INSTRUCTIONS = {
     ),
     "Confident": (
         "use assured and composed phrasing without overstating certainty or "
-        "strengthening the source's claims"
+        "strengthening the source's claims; do not replace a hedge word "
+        "('seems', 'might', 'may', 'could', 'appears') with wording that "
+        "implies confirmation (e.g. 'is', 'will', 'as expected') unless the "
+        "source itself already states that certainty"
     ),
     "Concise": (
         "remove avoidable repetition and wordiness while retaining every "
@@ -362,14 +367,15 @@ TONE_INSTRUCTIONS = {
 }
 TONES = ["(keep original)", *TONE_INSTRUCTIONS]
 
-# Up to MAX_SELECTED_TONES may be combined, ordered with the first as
-# dominant and the rest as supporting characteristics (see
-# build_tone_instruction()). The toolbar picker is deliberately capped
-# lower, at TONE_PICKER_LIMIT, until a two-tone combination has actually
-# been checked against real output for injected content — raising it to
-# MAX_SELECTED_TONES is then a one-line change, not a redesign.
+# Up to MAX_SELECTED_TONES may be combined, ordered dominant, supporting,
+# then accent (see build_tone_instruction()). The picker was capped lower,
+# at TONE_PICKER_LIMIT=2, until a two-tone combination was actually checked
+# against real output for injected content -- done in v2.4 (Persuasive+
+# Confident needed a tightened guard) and again for the third slot in v2.11
+# (Ollama llama3.1:8b, see ROADMAP.md's v2.11 section for the calibration
+# runs), so the picker now matches the data model's existing ceiling.
 MAX_SELECTED_TONES = 3
-TONE_PICKER_LIMIT = 2
+TONE_PICKER_LIMIT = MAX_SELECTED_TONES
 
 TONE_CONFLICTS = {
     frozenset({"Concise", "Detailed"}): (
@@ -379,6 +385,11 @@ TONE_CONFLICTS = {
     frozenset({"Casual", "Formal"}): (
         "'Casual' and 'Formal' are opposite registers. Choose the one that "
         "best reflects the intended result."
+    ),
+    frozenset({"Neutral", "Persuasive"}): (
+        "'Neutral' calls for impartial wording, while 'Persuasive' argues "
+        "for the source's position. Choose the one that best reflects the "
+        "intended result."
     ),
 }
 
@@ -718,9 +729,13 @@ STRENGTH_INSTRUCTIONS = {
 def build_tone_instruction(tones):
     """Return a bounded prompt instruction for an ordered tone combination.
 
-    The first tone is dominant; later tones refine it rather than competing
-    equally. Every instruction stays subordinate to meaning preservation —
-    tone may reshape wording, rhythm and presentation only, never content.
+    The first tone is dominant, the second (if any) supporting, and the
+    third (if any) only a light accent -- each rung weaker than the last.
+    Every instruction stays subordinate to meaning preservation and, below
+    that, to the earlier tone(s) -- see the explicit precedence ladder
+    below, added for the three-tone case (notes_016 §2.3) so a model has
+    somewhere to land when an accent tone can't be honoured without
+    drifting from what a stronger-priority instruction already requires.
     """
     tones = validate_tones(tones)
     if not tones:
@@ -730,12 +745,20 @@ def build_tone_instruction(tones):
 
     if len(tones) == 1:
         relationship = f"Use {tones[0]} as the target tone."
-    else:
-        supporting = ", ".join(tones[1:])
+    elif len(tones) == 2:
         relationship = (
-            f"Use {tones[0]} as the dominant tone. Blend in {supporting} as "
-            f"supporting characteristics. If they compete, {tones[0]} takes "
-            "priority.")
+            f"Use {tones[0]} as the dominant tone and {tones[1]} as a "
+            "supporting characteristic. If they compete, "
+            f"{tones[0]} takes priority.")
+    else:
+        relationship = (
+            f"Use {tones[0]} as the dominant tone, {tones[1]} as a "
+            f"supporting characteristic, and {tones[2]} only as a light "
+            "accent. Precedence when they compete, highest first: factual "
+            "fidelity and meaning; the selected editing mode; "
+            f"{tones[0]}; {tones[1]}; {tones[2]}. Weaken or drop the accent "
+            "tone entirely before letting it change content, certainty or "
+            "scope.")
 
     return (
         "\n- Tone guidance:\n"
@@ -743,9 +766,14 @@ def build_tone_instruction(tones):
         "\n  Tone guidance may affect wording, rhythm and presentation only. "
         "It must not introduce facts, evaluative or promotional language "
         "(such as superlatives or marketing adjectives) absent from the "
-        "source, invent feelings, create commitments, change the certainty "
-        "or scope of an existing claim, or alter the author's intended "
-        "meaning.")
+        "source, invent feelings, create commitments, reassurances or "
+        "offers of help that are not already stated in the source (e.g. do "
+        "not add 'I am committed to finding a solution' to a message that "
+        "only offers to discuss something), change the certainty or scope "
+        "of an existing claim, or alter the author's intended meaning. "
+        "Preserve attribution, negation, modality, quantifiers, "
+        "comparisons and expressed uncertainty exactly as the source states "
+        "them.")
 
 
 def build_system_prompt(mode, strength, tones, role="(none)",
@@ -1331,8 +1359,9 @@ class TonePickerDialog(ctk.CTkToplevel):
 
         ctk.CTkLabel(
             self,
-            text=("The first tone selected is dominant; a second tone "
-                  "supports it rather than competing equally."),
+            text=("Selection order matters: the first tone is dominant, "
+                  "the second supports it, and a third is only a light "
+                  "accent — not an equal third voice."),
             wraplength=380, justify="left", text_color="gray65",
         ).pack(anchor="w", padx=18, pady=(0, 10))
 

@@ -4,11 +4,12 @@
 When Mark says "lets get started", that is the cue to open these three files
 before doing anything else.
 
-Current shipped version: **2.10** (v2.9 bug-fix pass, then v2.10 visual/UX
-polish, both against the three new review notes that opened this session —
-see those sections below). v2.11+ (notes_016's architecture proposals, in
-ascending risk order) is scoped but not yet implemented. Drag-and-drop
-import remains deliberately deferred pending v2.11+, see "Deferred" below.
+Current shipped version: **2.11** (v2.9 bug-fix pass, v2.10 visual/UX
+polish, v2.11 three-tone picker — all three against the review notes that
+opened this session; see those sections below). v2.12+ (notes_016's
+remaining four architecture proposals, in ascending risk order) is scoped
+but not yet implemented. Drag-and-drop import remains deliberately deferred
+pending v2.12+, see "Deferred" below.
 
 Scope through v2.3 was drawn from twelve accumulated review notes
 (`notes/01_Active/notes_001.txt` – `notes_012.txt`), written independently by
@@ -660,7 +661,7 @@ UI/UX visual audit; notes_018 Zoe — a fresh static bug hunt against v2.8).
 Rather than one grab-bag release, the work was split: this version closes
 every concrete, confirmed bug notes_018 found (all low individual risk, all
 worth fixing on their own merits); notes_017's visual polish and notes_016's
-five architecture proposals are scoped separately below (v2.10, v2.11+) since
+five architecture proposals are scoped separately below (v2.10, v2.11/v2.12+) since
 bundling correctness fixes with new-feature/visual work would make either
 harder to verify in isolation.
 
@@ -870,42 +871,144 @@ scans a British spelling change).
 
 ---
 
-## v2.11+ — notes_016 architecture proposals (scoped, not yet implemented)
+## v2.11 — Three-tone picker ✅ shipped 2026-09-02
 
-**Goal:** notes_016 (Mark/Codex) proposes five substantial features for
-v2.9+. Given their very different risk profiles, they are sequenced rather
-than shipped as one release — lowest-risk/most self-contained first, the two
-raw-Win32 items (window-procedure subclassing, hand-rolled `CF_HTML`
-clipboard transfer) last, since this project's own history shows Win32-level
-features need the most hand-testing and carry the highest single-bug blast
-radius (a bad `WNDPROC` can hang or crash the whole app, not just one
-feature).
+**Goal:** notes_016 §2.3/3.4 — raise `TONE_PICKER_LIMIT` to
+`MAX_SELECTED_TONES` (3, already supported by the data model per v2.4's
+deliberately conservative rollout), add the `Neutral`/`Persuasive` conflict
+pair, and a dominant/supporting/accent prompt hierarchy with an explicit
+fidelity-first precedence ladder. **Subject to
+[[mark_meaning_preservation_priority]]**: this directly touches prompt
+construction, so it needed the same live-model calibration discipline v2.4
+used for two-tone — and, as with v2.4's Persuasive+Confident finding, the
+first calibration pass found real embellishment bugs that were then fixed
+and re-verified rather than shipped as-is.
 
-1. **Three-tone picker** (notes_016 §2.3/3.4) — raise `TONE_PICKER_LIMIT` to
-   `MAX_SELECTED_TONES` (3, already supported by the data model per v2.4's
-   deliberately conservative rollout), add the `Neutral`/`Persuasive`
-   conflict pair, and the dominant/supporting/accent prompt hierarchy with
-   an explicit fidelity-first precedence ladder. **Subject to
-   [[mark_meaning_preservation_priority]]**: this directly touches prompt
-   construction, so needs the same live-model calibration discipline v2.4
-   used (the Persuasive+Confident embellishment bug found and fixed then is
-   the reason a third tone wasn't opened up sooner) — run notes_016's
-   calibration matrix (§2.3) against a real backend before shipping, not
-   just unit-test the validation logic.
-2. **Persisted user presets** (notes_016 §2.2/3.3) — `user_presets` config
+1. `TONE_PICKER_LIMIT = MAX_SELECTED_TONES` (was hard-coded to 2).
+2. `TONE_CONFLICTS` gains `frozenset({"Neutral", "Persuasive"})`; previously-
+   legal pairs (Friendly+Formal, Direct+Diplomatic, Confident+Empathetic)
+   confirmed to remain legal, per notes_016's own reasoning that these are
+   blendable rather than truly contradictory.
+3. `build_tone_instruction()` rewritten for three tiers: single-tone keeps
+   the plain "target tone" phrasing unchanged; two-tone keeps the existing
+   dominant/supporting phrasing unchanged; three-tone adds "...and X only
+   as a light accent" plus an explicit precedence ladder ("factual fidelity
+   and meaning; the selected editing mode; dominant; supporting; accent")
+   and an instruction to weaken or drop the accent tone entirely rather than
+   let it change content, certainty or scope.
+4. `TonePickerDialog`'s explanatory label updated to describe the third tier
+   as "a light accent — not an equal third voice."
+
+### Live-model calibration (Ollama, against `scriptorium_config.json`'s
+free local backend — no Claude API spend incurred)
+
+Ran `call_ollama()`/`mask_placeholders()`/`restore_placeholders()`/
+`build_system_prompt()` end to end (not mocked) against three of
+notes_016 §2.3's own suggested calibration cases: Formal+
+Concise+Diplomatic on a tense client email, Confident+Direct+Friendly on an
+update containing hedged uncertainty, and Neutral+Detailed+Constructive on
+a technical incident summary containing names, numbers, negation and a
+`[CustomerName]` placeholder. **Originally attempted against `llama3.1:8b`**
+(the model v2.4's calibration used, deliberately stronger than a 1B model)
+**but this session's machine could not load it** — repeated
+"client connection closed / llm server not responding" cycles in the real
+Ollama server log, consistent with the box's ~4 GiB free RAM against the
+model's ~4.7 GiB weight+buffer footprint. Switched to `llama3.2:3b`
+(available locally, loads comfortably) rather than keep retrying a load
+that wasn't going to succeed on this hardware.
+
+**First pass found three real, concrete embellishment bugs** — the same
+failure mode as v2.4's Persuasive+Confident finding, not hypothetical:
+1. Formal+Concise+Diplomatic added *"I want to assure you that I am
+   committed to finding a solution"* to a message that only offered to
+   discuss the situation — an invented commitment, explicitly forbidden by
+   the guard clause already in place, but the model added it anyway.
+2. Confident+Direct+Friendly turned *"seems to be going okay so far"* into
+   *"progressing as expected"* — replacing a hedge with confirmatory
+   wording, directly against Confident's own "without overstating
+   certainty" instruction, plus a loss of the source's explicit "haven't
+   fully checked yet" / "not 100% sure yet" caveats.
+3. Neutral+Detailed+Constructive (Neutral as the *dominant* tone here)
+   added *"Fortunately"* before "no data was lost" — an unearned emotional
+   interjection, directly against Neutral's own "unembellished... over
+   strong emotional... colouring" instruction.
+
+**Fixed, not just reported** (mirroring v2.4's response to its own finding):
+- `TONE_INSTRUCTIONS["Neutral"]` now explicitly names forbidden editorial
+  interjections ("fortunately", "unfortunately", "importantly").
+- `TONE_INSTRUCTIONS["Confident"]` now explicitly forbids replacing a hedge
+  word (seems/might/may/could/appears) with confirmatory wording (is/will/
+  as expected) unless the source itself already states that certainty.
+- The shared closing guard in `build_tone_instruction()` now names
+  "reassurances or offers of help that are not already stated in the
+  source" as forbidden, with the exact failing example as a concrete
+  illustration ("do not add 'I am committed to finding a solution'...").
+
+**Re-ran all three cases after the fix, then the trickiest one
+(Confident+Direct+Friendly) twice more** — five real backend calls total
+across this pass, eight over the whole session. All five post-fix runs came
+back clean: no invented commitments, no hedge-word-to-confirmation swaps
+(the model consistently chose "appears"/"appears to be", from the newly
+allowed-hedge-words list, not a coincidence), no unearned emotional
+interjections. Placeholder round-trip, negation ("not fully
+confirmed"/"established"), and all numbers/times (14:32, 8%, 14:47, 1%,
+14:52, v2.3.1) survived every run intact. Minor, not-worth-chasing residue
+observed and accepted (matching v2.4's own judgement call not to chase
+zero residual risk on a small local model): "Friday" was twice generalised
+to "the end of this week" — a mild loss of precision, not a fabrication or
+contradiction — and one run added "sharp decline" to describe an 8%→<1%
+error-rate drop, a characterisation the actual numbers support rather than
+an invented fact.
+
+### Acceptance checklist
+- [x] Picker permits exactly three tones and shows deterministic selection
+      order; a fourth is refused via the non-blocking status-label flash
+      added in v2.10. Verified against the real `TonePickerDialog`.
+- [x] `Neutral`+`Persuasive` conflicts in any position, including embedded
+      in a three-item list; `Concise`+`Detailed` and `Casual`+`Formal`
+      still conflict as before; `Friendly`+`Formal`, `Direct`+`Diplomatic`
+      and `Confident`+`Empathetic` remain legal. Verified against the real
+      `validate_tones()`.
+- [x] Single- and two-tone phrasing is byte-identical to pre-v2.11 output
+      (no accent/precedence-ladder language leaks into fewer than three
+      tones). Verified against the real `build_tone_instruction()`.
+- [x] A real three-tone combination changes wording/register only — no new
+      facts, invented commitments, or overstated certainty — checked
+      specifically against combinations touching Confident and Neutral,
+      per this session's own findings. **Tested against Ollama
+      (llama3.2:3b)**, not Claude (no live spend incurred; see calibration
+      write-up above for why 3b rather than 4.4's 8b this session). Three
+      real embellishment bugs found on the first pass, fixed, and
+      confirmed absent across five further real backend calls.
+- [x] `ast.parse()` clean; full non-live-model regression suite (config,
+      presets, role/tone table membership, four-tone-over-limit rejection)
+      still passes.
+
+---
+
+## v2.12+ — Remaining notes_016 architecture proposals (scoped, not yet implemented)
+
+**Goal:** notes_016's other four proposals, sequenced by risk — lowest-risk/
+most self-contained first, the two raw-Win32 items (window-procedure
+subclassing, hand-rolled `CF_HTML` clipboard transfer) last, since this
+project's own history shows Win32-level features need the most
+hand-testing and carry the highest single-bug blast radius (a bad `WNDPROC`
+can hang or crash the whole app, not just one feature).
+
+1. **Persisted user presets** (notes_016 §2.2/3.3) — `user_presets` config
    key, `PresetManagerDialog`, `normalise_user_presets()`. Self-contained,
    no prompt/content surface touched, well-specified in the note.
-3. **Backend retry transport** (notes_016 §2.5/3.6) — `_request_json_with_retries()`
+2. **Backend retry transport** (notes_016 §2.5/3.6) — `_request_json_with_retries()`
    beneath `call_anthropic()`/`call_ollama()`, bounded exponential backoff,
    `Retry-After` handling. Moderate risk (touches the request path both
    backends share) but no Win32/ctypes involved.
-4. **Explorer drag-and-drop** (notes_016 §2.1/3.2) — unlike notes_014/015's
+3. **Explorer drag-and-drop** (notes_016 §2.1/3.2) — unlike notes_014/015's
    incomplete `DragAcceptFiles`-only proposal (deferred after v2.7, see
    below), this note supplies the full `WM_DROPFILES` `WNDPROC` subclass.
    Legitimate now, but the highest platform risk in the backlog — needs
    dedicated hand-testing per notes_016's own verification matrix (§5)
    before it ships.
-5. **Markdown diff export + rich `CF_HTML` clipboard diff** (notes_016
+4. **Markdown diff export + rich `CF_HTML` clipboard diff** (notes_016
    §2.4/3.5) — the other raw-Win32 item (manual `GlobalAlloc`/clipboard
    transaction); sequenced last for the same reason as drag-and-drop.
 
@@ -913,7 +1016,7 @@ No acceptance checklist yet — not started this session.
 
 ---
 
-## Deferred / explicitly out of scope for v2.1–v2.10
+## Deferred / explicitly out of scope for v2.1–v2.11
 
 - Migrating the API key to Windows Credential Manager (`keyring`) — real
   architectural change, correctly flagged as out-of-scope by every note
@@ -959,7 +1062,7 @@ No acceptance checklist yet — not started this session.
   file is actually dropped. Revisit as its own properly-scoped session
   (real Win32 message-loop subclassing, needs hand-testing) rather than
   guessing at it inside v2.7. **Superseded 2026-09-02**: notes_016 supplies
-  the missing `WM_DROPFILES` subclass; now scoped as v2.11+ item 4 above,
+  the missing `WM_DROPFILES` subclass; now scoped as v2.12+ item 3 above,
   no longer blocked on an incomplete proposal.
 
 ---
@@ -980,7 +1083,7 @@ No acceptance checklist yet — not started this session.
 | notes_013 | 31 Aug | Mark / Codex | v2.3 | Closed by v2.4 |
 | notes_014 | 1 Sep | Gale | v2.5 (delta) | Closed by v2.6 (icon/single-instance) and v2.7 (always-on-top, change summary); drag-and-drop deferred, superseded by notes_016 (see "Deferred") |
 | notes_015 | 1 Sep | Antigravity | v2.5 (delta) | Closed by v2.6; its S1 "Confirmed" and S2 "Addressed" verdicts did not hold up against live re-testing — see v2.6 write-up |
-| notes_016 | 1 Sep | Mark / Codex | v2.9+ (architecture) | Scoped as v2.11+ (three-tone, presets, retry transport, drag-and-drop, rich clipboard — see that section); not yet implemented |
+| notes_016 | 1 Sep | Mark / Codex | v2.9+ (architecture) | Three-tone picker closed by v2.11 (found and fixed two real embellishment bugs beyond what the note itself proposed — see that section); presets, retry transport, drag-and-drop, rich clipboard scoped as v2.12+, not yet implemented |
 | notes_017 | 1 Sep | Lynne | v2.8 (delta) | Closed by v2.10 (typography/contrast, notice banner, busy motion, dialog chrome, backend labels; toolbar-wrap and character-level diffs deliberately not carried in, see v2.10 write-up) |
 | notes_018 | 1 Sep | Zoe | v2.8 (delta) | Closed by v2.9 (Bugs 1–2/S2, 3–7, S1); S3 deliberately not fixed (informational only, see v2.9 write-up) |
 
