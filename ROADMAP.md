@@ -4,18 +4,20 @@
 When Mark says "lets get started", that is the cue to open these three files
 before doing anything else.
 
-Current shipped version: **2.22** (v2.9 bug-fix pass, v2.10 visual/UX
+Current shipped version: **2.23** (v2.9 bug-fix pass, v2.10 visual/UX
 polish, v2.11 three-tone picker, v2.12 persisted user presets, v2.13 backend
 retry transport, v2.14 hand-testing fixes, v2.15 Explorer drag-and-drop,
 v2.17 readability metrics + shortcuts reference, v2.18 house-style
 avoid-list, v2.19 headless batch/CLI mode, v2.20 in-session revision
 history, v2.16 rich `CF_HTML` clipboard diff (shipped as build `2.21`),
-v2.22 tray/start-up lifecycle gating — see those sections below). All five
+v2.22 tray/start-up lifecycle gating, v2.23 drop-safety/preset-repair/
+export/reading-time/clipboard polish — see those sections below). All five
 notes_019 proposals and notes_016's full original proposal set shipped by
 build 2.21, clearing the backlog for the first time since notes_001 opened
 it; v2.22 closed a fresh hand-testing defect (notes_020) found immediately
-after. notes_021's second-generation hardening pass is scoped but not yet
-implemented — see its own section below.
+after. notes_021's second-generation hardening pass is under way (v2.23
+above; the fidelity audit and cancellable retry transport remain — see
+v2.23's "notes_021 delivery plan" note).
 
 Scope through v2.3 was drawn from twelve accumulated review notes
 (`notes/01_Active/notes_001.txt` – `notes_012.txt`), written independently by
@@ -1950,6 +1952,108 @@ re-diagnosing an apparent "hang" from scratch.
 
 ---
 
+## v2.23 — Drop-replacement safety, preset repair notice, export/reading-time/clipboard polish ✅ shipped 2026-09-03
+
+**Goal:** notes_021 (Codex, second-generation hardening pass against v2.21 —
+see "notes_021 delivery plan" below for the full five-area review and why
+each area was scoped the way it was) — the note's own recommended "Ship 2"
+bundle: everything it judged low-risk UI/integrity polish, landed together.
+No prompt or content-generation surface touched.
+
+1. **Explorer-drop replacement confirmation** (§2.1/3.1). `_load_file_path()`
+   gains `confirm_replace=False`; reads the document first (so a corrupt or
+   unsupported file never triggers a pointless question), then asks once
+   only when Original already holds non-whitespace text. The Explorer-drop
+   call site passes `confirm_replace=True`; `import_file()`'s existing
+   no-confirm behaviour is unchanged, since choosing a file there is
+   already a deliberate act.
+2. **Preset-repair visibility** (§2.2/3.2). `normalise_user_presets()`/
+   `normalise_config()`/`load_config()` gain an optional, capped
+   (5 messages + an omitted count) issues collector, populated only when
+   `load_config()` reads a real file from disk — internal re-normalisation
+   before a save stays silent. `_maybe_warn_config_repairs()` (beside
+   `_maybe_warn_unreadable_config()`) explains what was dropped and why, so
+   a later Settings/preset save can no longer silently erase a malformed
+   entry with no explanation the user ever saw.
+3. **Immediate tone-conflict feedback** (§2.3/3.3, the one small piece of
+   the fidelity-audit proposal shipped now — the audit itself is separate,
+   see below). `tone_conflict_message()` split out of `validate_tones()`;
+   `TonePickerDialog._toggle_tone()` calls it right after tentatively
+   appending a tone and reverts immediately with the same message
+   `_apply()`'s final `validate_tones()` call would have shown — one source
+   of truth, feedback moved earlier.
+4. **Annotated Markdown as a second diff-export format** (§2.4/3.4).
+   `build_annotated_markdown_diff()` (same `_tokenise()`/`SequenceMatcher`
+   contract as the visible diff and rich clipboard) plus a small
+   `DiffExportFormatDialog` opened from Export diff, offering "Unified
+   diff" (unchanged default) or "Annotated prose" (`<del>`/`<strong>` in a
+   single `<pre>` block, `html.escape()`d against literal source markup).
+5. **Reading-time boundary fix** (§2.4/3.4). `reading_metrics()` now
+   returns fractional minutes instead of `round()`-ing them (ties-to-even
+   was rounding 201–299 words down to a flat 1); `_refresh_status()` shows
+   "under a minute" only below 1.0 and `math.ceil()` otherwise — a full 200
+   words now correctly reads "~1 min read" rather than "under a minute".
+6. **Clipboard-contention retry** (§2.4/3.4). `_open_clipboard_with_retries()`
+   makes up to 5 bounded, increasing-wait attempts (worst case 0.20s) before
+   `set_html_clipboard()` raises — `OpenClipboard` commonly fails
+   transiently since clipboard ownership is global to the desktop.
+
+### Acceptance checklist
+- [x] A drop over populated Original asks once; declining leaves Original,
+      undo stack and any in-flight request untouched; accepting loads
+      normally. A drop over empty Original, and every `import_file()` call,
+      never prompts. Verified against a real `Scriptorium()`, all four
+      cases, including a genuine file read from disk.
+- [x] A config with five-plus malformed preset entries (non-string name,
+      blank name, overlong name, reserved-name collision, invalid mode)
+      shows a capped warning naming up to 5 of them plus an omitted count,
+      keeps the one valid entry, and leaves `self.cfg["user_presets"]`
+      correct; a clean config shows no warning. Verified against real
+      `normalise_user_presets()`/`load_config()`/a real `Scriptorium()`
+      construction with `messagebox.showwarning` observed directly.
+- [x] Ticking a conflicting tone in a real `TonePickerDialog` reverts it
+      immediately with the exact conflict message; a legal second tone
+      still applies normally.
+- [x] `export_diff_file()` offers the format choice before the save
+      dialogue; both "unified" and "annotated" produce the correct
+      document; cancelling the format choice skips the save dialogue
+      entirely rather than falling through to a default. Verified
+      end-to-end against a real `Scriptorium()`, both formats' actual file
+      contents inspected.
+- [x] `reading_metrics()` returns `< 1` for 199 and exactly `1.0` for 200
+      words (displaying "~1 min read", correctly no longer "under a
+      minute" — the actual bug); 201/399/400/401 words all ceiling to the
+      expected whole-minute label.
+- [x] `build_annotated_markdown_diff()` HTML-escapes literal `<`/`>`/`&` in
+      the source and correctly marks insertions/deletions.
+- [x] A real `set_html_clipboard()` call round-trips through a genuinely
+      independent reader (raw `ctypes` `CF_UNICODETEXT` read, not this
+      project's own writer code); `_open_clipboard_with_retries()` recovers
+      from real, deliberately induced clipboard contention from another
+      thread holding `OpenClipboard` briefly.
+- [x] `ast.parse()` clean; quick regression pass (`DEFAULT_CONFIG` round
+      trip, `ROLES`/`TONES` membership, four-tone-over-limit rejection) and
+      a real `Scriptorium()` construct/destroy cycle all still pass.
+      Packaged `.exe` rebuilt (`FileVersion`/`ProductVersion` `2.23.0.0`),
+      launched for real, alive and `Responding: True`. Real
+      `scriptorium_config.json` confirmed untouched throughout.
+
+**notes_021 delivery plan (context for this and the versions after it)**:
+Codex's review found all five originally-requested architecture areas
+already fully shipped in v2.21 and proposed a second-generation hardening
+pass instead, in this recommended order: (1) notes_020's lifecycle defect
+first (v2.22, above); (2) this low-risk UI/integrity bundle (v2.23); (3) a
+deterministic, advisory protected-content fidelity audit, calibrated before
+being trusted; (4) request-scoped cancellation for the retry transport,
+fault-injection tested; (5) visible streaming, explicitly deferred pending
+two product decisions the note itself flags as still open. Areas 3–4 are
+scoped as their own future versions rather than bundled here, matching the
+note's own reasoning that fidelity-audit correctness and cancellation
+correctness each deserve isolated verification; area 5 stays out of scope
+until those product decisions are actually made.
+
+---
+
 ## Deferred / explicitly out of scope for v2.1–v2.13
 
 - Migrating the API key to Windows Credential Manager (`keyring`) — real
@@ -2020,6 +2124,8 @@ re-diagnosing an apparent "hang" from scratch.
 | notes_016 | 1 Sep | Mark / Codex | v2.9+ (architecture) | Three-tone picker closed by v2.11 (found and fixed real embellishment bugs); user presets closed by v2.12 (one deliberate dialog-ownership deviation); retry transport closed by v2.13 (one stale-docstring fix noticed and corrected along the way); Explorer drag-and-drop closed by v2.15 (verified with a real synthetic WM_DROPFILES message end-to-end); rich CF_HTML clipboard diff scoped as v2.16, not yet implemented |
 | notes_017 | 1 Sep | Lynne | v2.8 (delta) | Closed by v2.10 (typography/contrast, notice banner, busy motion, dialog chrome, backend labels; toolbar-wrap and character-level diffs deliberately not carried in, see v2.10 write-up) |
 | notes_018 | 1 Sep | Zoe | v2.8 (delta) | Closed by v2.9 (Bugs 1–2/S2, 3–7, S1); S3 deliberately not fixed (informational only, see v2.9 write-up) |
+| notes_020 | 2 Sep | Mark | v2.22 (hand-test diagnosis) | Closed by v2.22 |
+| notes_021 | 2 Sep | Codex | v2.21+ (hardening) | Confirmed all five originally-requested areas already shipped by build 2.21; §2.1/2.2/2.3(partial)/2.4 closed by v2.23; §2.3's fidelity audit and §2.5's cancellable retry transport not yet implemented (see v2.23's "notes_021 delivery plan"); §2.5's streaming groundwork explicitly deferred pending two open product decisions |
 
 `scriptorium_notes_001.txt`, a near-duplicate of notes_014 written under
 `AGENTS.md`'s (now-abandoned) `scriptorium_notes_[N].txt` draft-path

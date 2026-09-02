@@ -1,0 +1,151 @@
+**Date:** 2026-09-02  
+**Author:** Mark  
+
+The two observed symptoms are indicative of the same lifecycle bug associated with Windows 11 and Tk, rather than two distinct feature failures.
+
+**Issue Identification**  
+The issue arises from the interaction between the tray hide functionality, which is linked to the `<Unmap>` event, and the application of the start-hidden configuration within the `__init__` method, prior to the window achieving a stable Win32 placement.  
+
+```python
+self.protocol("WM_DELETE_WINDOW", self._on_close)
+self.bind("<Unmap>", self._on_minimize)
+```
+
+The determination of whether the application should start minimised is contingent upon the presence of the `--minimised` argument in `sys.argv[1:]` or the corresponding configuration setting `start_minimised`. If either condition is met, and if the configuration allows minimisation to the tray while the tray functionality is available, the application invokes the `_minimise_to_tray()` method.
+
+```python
+wants_minimised = "--minimised" in sys.argv[1:] or self.cfg.get("start_minimised")
+if wants_minimised and self.cfg.get("minimise_to_tray") and TRAY_AVAILABLE:
+    self._minimise_to_tray()
+```
+
+In the context of Windows 11, this combination of conditions fails in both scenarios. Specifically, a double-click action leads directly to the tray. If the option to “Send to the system tray when minimised” is enabled, this behaviour is sufficient. Tk/CTk frequently maps a new toplevel window as iconic because Windows restores the last placement, particularly following a previous `withdraw()` or taskbar minimisation. Consequently, the `<Unmap>` event is triggered with the state being "iconic", leading to the `_on_minimize` method erroneously interpreting a standard launch as a user-initiated minimisation. No `start_minimised` flag is required in this context.
+
+Furthermore, the start minimised functionality does not persist. The `_minimise_to_tray()` method executes during the `__init__` phase, after which the `mainloop()` maps the window, and a delayed call to `iconbitmap()` at 200 ms may remap it again. The early `withdraw()` operation is subsequently overridden, resulting in Windows 11 inconsistently displaying the application as hidden.
+
+**Additional Considerations**  
+There are two further complications in this area:
+
+1. The autostart mechanism invariably appends `--minimised`, even when the “Start minimised to tray” option is disabled:
+    ```python
+    return f'"{sys.executable}" --minimised'
+    ```
+
+2. If the desktop or taskbar shortcut was created from that Run key, every double-click will initiate a “start hidden” launch.
+
+The start-hidden functionality still necessitates both `minimise_to_tray` and either `start_minimised` or `--minimised`, in addition to the availability of the tray. Merely selecting the “Start minimised” option has no effect; the settings interface even forces this checkbox back to an off state.
+
+The accompanying `scriptorium_config.json` file has both tray flags set to false. If the live machine corresponds to that configuration file, an instant tray appearance indicates the presence of a `--minimised` shortcut or a different configuration located under `%LOCALAPPDATA%\Scriptorium` (for the frozen executable) as opposed to the source checkout.
+
+**Proposed Solution**  
+To address this issue, it is recommended not to rewrite the tray stack. The `<Unmap>` event should be gated until the first normal mapping occurs, ensuring a visible launch unless a hidden start was explicitly requested. The tray withdrawal should be deferred until after this mapping.
+
+In the `Scriptorium.__init__`, replace the existing `<Unmap>` binding and immediate start-minimised block with the following:
+
+```python
+self._window_ready = False
+self.protocol("WM_DELETE_WINDOW", self._on_close)
+self.bind("<Unmap>", self._on_minimize)
+self.bind("<Map>", self._on_mapped)
+self.after_idle(self._apply_launch_visibility)
+```
+
+The implementation of the `_on_mapped` method should be as follows:
+
+```python
+def _on_mapped(self, event):
+    if event.widget is not self:
+        return
+    if not self._window_ready:
+        # Windows 11 frequently delivers an iconic Unmap during initial placement.
+        # The tray-on-minimise should only be armed after the window has been successfully mapped.
+        self.after(300, self._arm_tray_minimise)
+```
+
+The `_arm_tray_minimise` method can be defined as:
+
+```python
+def _arm_tray_minimise(self):
+    self._window_ready = True
+```
+
+The method to determine whether the start should be minimised should be as follows:
+
+```python
+def _wants_start_minimised(self):
+    return (
+        "--minimised" in sys.argv[1:]
+        or bool(self.cfg.get("start_minimised"))
+    )
+```
+
+The application of launch visibility should be determined with the following method:
+
+```python
+def _apply_launch_visibility(self):
+    """Decide first-show versus tray-only after Tk has acknowledged the HWND."""
+    hidden = (
+        self._wants_start_minimised()
+        and self.cfg.get("minimise_to_tray")
+        and TRAY_AVAILABLE
+    )
+    if hidden:
+        # The use of after() rather than __init__: a withdraw-before-map is ignored on Windows 11.
+        self.after(50, self._minimise_to_tray)
+        return
+    try:
+        self.state("normal")
+    except tk.TclError:
+        pass
+    self.deiconify()
+    self.lift()
+```
+
+The `_on_minimize` method should be updated as follows:
+
+```python
+def _on_minimize(self, event):
+    if not self._window_ready:
+        return
+    if event.widget is not self or str(self.state()) != "iconic":
+        return
+    if self.tray_icon is not None:
+        return
+    if self.cfg.get("minimise_to_tray") and TRAY_AVAILABLE:
+        self._minimise_to_tray()
+```
+
+Additionally, the automatic startup command should be revised to avoid enforcing `--minimised` upon every logon command:
+
+```python
+def _autostart_command(start_minimised=False):
+    if getattr(sys, "frozen", False):
+        cmd = f'"{sys.executable}"'
+    else:
+        pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+        interpreter = pythonw if os.path.isfile(pythonw) else sys.executable
+        cmd = f'"{interpreter}" "{os.path.abspath(__file__)}"'
+    if start_minimised:
+        cmd += " --minimised"
+    return cmd
+```
+
+The `start_minimised` flag should be threaded through the `set_autostart()` method from `SettingsDialog._save()`. As a result, an interactive double-click will not encounter `--minimised` unless that option is enabled.
+
+An optional enhancement within the `_minimise_to_tray` method could include an additional check: after `self.withdraw()`, implement `self.after(100, self._ensure_still_withdrawn)` to re-withdraw if Tk has remapped due to the `iconbitmap()` call.
+
+**Verification Steps**  
+Before and after the implementation, please check the following on the machine:
+
+- The target of the shortcut/taskbar pin must not include `--minimised` for a standard launch.
+- The registry entry at `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Scriptorium` should be verified for the same criterion.
+- Confirm which configuration file is being loaded: either the source alongside `scriptorium.py` or `%LOCALAPPDATA%\Scriptorium\scriptorium_config.json` for the executable.
+
+Post-patch, initiate a cold start with the tray option enabled and the `start_minimised` option disabled. The expected outcome is a window appearing on the desktop without an icon. Minimising should result in the tray icon, and clicking the tray icon should restore the desktop window. Conversely, logging in with both flags enabled should yield no visible desktop window, only the tray icon (ensure to check the hidden overflow chevron on Windows 11).
+
+**Additional Remarks**  
+The frozen and source configurations exist in different paths by design (`_config_dir()`). Settings saved in one launch mode will not apply to the other, which may lead to the perception that “the checkbox does nothing.”
+
+The `start_minimised` flag is forcibly cleared when the tray option is disabled (`_refresh_tray_dependent_state`). This behaviour is appropriate, as a hidden start without an icon would cause the window to become trapped.
+
+I would recommend treating this as a minor v2.22 lifecycle patch: there are no changes to the data model or prompts, only the addition of first-map gating and a more accurate autostart command line. If desired, the next step could involve implementing these functions directly within `scriptorium.py`, ensuring they are wired through the settings save functionality.

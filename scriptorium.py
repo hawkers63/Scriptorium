@@ -44,6 +44,7 @@ import sys
 import re
 import json
 import html
+import math
 import secrets
 import argparse
 import threading
@@ -83,7 +84,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.22"
+APP_VERSION = "2.23"
 
 # A small shared palette (notes_017, v2.10) so the two text panes, the diff
 # tags and the notice banner read as one surface instead of drifting
@@ -487,6 +488,22 @@ TONE_CONFLICTS = {
 }
 
 
+def tone_conflict_message(tones):
+    """Return the first hard-conflict message for a tone selection, or "".
+
+    Split out from validate_tones() (notes_021 §2.3/3.3) so the tone-picker
+    dialogue can offer the same message as immediate feedback at the moment
+    a conflicting checkbox is ticked, rather than only at Apply time --
+    validate_tones() remains the sole authoritative check, this is purely a
+    read-only preview of what it would say.
+    """
+    selected = set(tones)
+    for pair, message in TONE_CONFLICTS.items():
+        if pair.issubset(selected):
+            return message
+    return ""
+
+
 def validate_tones(tones):
     """Return a normalised, ordered, conflict-free tone list.
 
@@ -509,10 +526,9 @@ def validate_tones(tones):
     if len(normalised) > MAX_SELECTED_TONES:
         raise ValueError(f"Choose no more than {MAX_SELECTED_TONES} tones.")
 
-    selected = set(normalised)
-    for pair, message in TONE_CONFLICTS.items():
-        if pair.issubset(selected):
-            raise ValueError(message)
+    conflict = tone_conflict_message(normalised)
+    if conflict:
+        raise ValueError(conflict)
 
     return normalised
 
@@ -653,16 +669,37 @@ def normalise_preset(preset):
     return {"mode": mode, "strength": strength, "role": role, "tones": tones}
 
 
-def normalise_user_presets(value):
+def _record_config_issue(issues, message):
+    """Record one config repair, capped so corrupt input can't grow it freely.
+
+    issues is None during ordinary internal re-normalisation (e.g. before a
+    save), so that path stays silent -- only load_config() supplies a real
+    collector, for data actually read from disk (notes_021 §2.2/3.2).
+    """
+    if issues is None:
+        return
+    if len(issues["messages"]) < 5:
+        issues["messages"].append(message)
+    else:
+        issues["omitted"] += 1
+
+
+def normalise_user_presets(value, issues=None):
     """Validate a stored user_presets mapping, protecting reserved names.
 
     Names are stripped, capped at MAX_PRESET_NAME_LENGTH, compared
     case-insensitively, and capped at MAX_USER_PRESETS entries. A name that
     collides (case-insensitively) with a built-in preset or the manager
     label is dropped, not renamed -- silently shadowing a built-in preset
-    would be more surprising than losing one malformed entry.
+    would be more surprising than losing one malformed entry. The optional
+    issues collector (notes_021 §2.2/3.2) explains what was dropped and why,
+    without changing what a caller that ignores it gets back.
     """
     if not isinstance(value, dict):
+        _record_config_issue(
+            issues,
+            "User presets were ignored because 'user_presets' is not an "
+            "object.")
         return {}
     reserved = {name.casefold() for name in WRITING_PRESETS}
     reserved.add(PRESET_MANAGER_LABEL.casefold())
@@ -670,15 +707,39 @@ def normalise_user_presets(value):
     used_names = set(reserved)
     for raw_name, raw_preset in value.items():
         if len(clean) >= MAX_USER_PRESETS:
+            _record_config_issue(
+                issues,
+                f"Only the first {MAX_USER_PRESETS} valid user presets "
+                "were loaded.")
             break
         if not isinstance(raw_name, str):
+            _record_config_issue(
+                issues, "A user preset with a non-text name was ignored.")
             continue
         name = raw_name.strip()
         folded = name.casefold()
-        if not name or len(name) > MAX_PRESET_NAME_LENGTH or folded in used_names:
+        if not name:
+            _record_config_issue(
+                issues, "A user preset with a blank name was ignored.")
+            continue
+        if len(name) > MAX_PRESET_NAME_LENGTH:
+            _record_config_issue(
+                issues,
+                f"Preset '{name[:24]}…' was ignored because its name is "
+                "too long.")
+            continue
+        if folded in used_names:
+            _record_config_issue(
+                issues,
+                f"Preset '{name}' was ignored because its name duplicates "
+                "another preset or a built-in name.")
             continue
         preset = normalise_preset(raw_preset)
         if preset is None:
+            _record_config_issue(
+                issues,
+                f"Preset '{name}' was ignored because its mode, strength, "
+                "role or tones are invalid.")
             continue
         clean[name] = preset
         used_names.add(folded)
@@ -794,7 +855,7 @@ def normalise_tone_config(cfg):
     return clean
 
 
-def normalise_config(cfg):
+def normalise_config(cfg, *, issues=None):
     """Return a copy of cfg with constrained settings restored to safe values.
 
     A hand-edited or stale config file can contain an out-of-range enum (an
@@ -840,7 +901,8 @@ def normalise_config(cfg):
             clean[key] = value
 
     clean = normalise_tone_config(clean)
-    clean["user_presets"] = normalise_user_presets(clean.get("user_presets", {}))
+    clean["user_presets"] = normalise_user_presets(
+        clean.get("user_presets", {}), issues=issues)
     clean["house_style_avoid"] = normalise_house_style_avoid(
         clean.get("house_style_avoid", []))
     return clean
@@ -857,6 +919,7 @@ def load_config():
     trust default_mode/backend/etc. are one of the supported values.
     """
     load_config.unreadable = False
+    load_config.repair_warnings = {"messages": [], "omitted": 0}
     cfg = dict(DEFAULT_CONFIG)
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8-sig") as fh:
@@ -872,7 +935,13 @@ def load_config():
         print("[warning] config file is not a JSON object; using defaults.")
         return normalise_config(cfg)
     cfg.update(loaded)
-    return normalise_config(cfg)
+    # Only a real, readable object loaded from disk is worth explaining
+    # repairs for (notes_021 §2.2/3.2) -- the missing-file and unreadable
+    # branches above already have their own, higher-priority messaging.
+    issues = {"messages": [], "omitted": 0}
+    clean = normalise_config(cfg, issues=issues)
+    load_config.repair_warnings = issues
+    return clean
 
 
 def save_config(cfg, *, force=False):
@@ -1572,6 +1641,42 @@ def build_markdown_diff(original, revised):
     )
 
 
+def build_annotated_markdown_diff(original, revised):
+    """Return a prose-readable Markdown review with semantic HTML changes.
+
+    A unified diff (build_markdown_diff() above) suits source control and
+    technical review; this is the alternative for a reader assessing
+    ordinary prose (notes_021 §2.4/3.4) -- deleted text struck through,
+    inserted text bold, wrapped in a single <pre> block so a Markdown
+    viewer preserves whitespace and never interprets the source's own
+    Markdown as document structure. Reuses the same _tokenise()/
+    SequenceMatcher contract as the visible diff pane and the rich
+    clipboard, so all three always agree on what changed for the same
+    revision.
+    """
+    original_tokens = _tokenise(original)
+    revised_tokens = _tokenise(revised)
+    matcher = difflib.SequenceMatcher(
+        None, original_tokens, revised_tokens, autojunk=False)
+    output = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        old_text = html.escape("".join(original_tokens[i1:i2]))
+        new_text = html.escape("".join(revised_tokens[j1:j2]))
+        if tag == "equal":
+            output.append(new_text)
+        elif tag == "delete":
+            output.append(f"<del>{old_text}</del>")
+        elif tag == "insert":
+            output.append(f"<strong>{new_text}</strong>")
+        else:
+            output.append(f"<del>{old_text}</del><strong>{new_text}</strong>")
+    return (
+        "# Scriptorium annotated revision\n\n"
+        "Deleted text is struck through; inserted text is bold.\n\n"
+        "<pre>" + "".join(output) + "</pre>\n"
+    )
+
+
 def build_html_diff(original, revised):
     """Return one valid HTML fragment with review-style insert/delete spans.
 
@@ -1679,6 +1784,28 @@ def _global_clipboard_memory(data):
     return handle
 
 
+def _open_clipboard_with_retries(user32, owner_hwnd, attempts=5):
+    """Open the clipboard across brief, bounded ownership contention.
+
+    OpenClipboard commonly fails transiently because clipboard ownership is
+    global to the desktop -- some other process can hold it for a moment
+    around its own copy/paste (notes_021 §2.4C). Worst-case total wait here
+    is 0.02+0.04+0.06+0.08 = 0.20s, small enough for a user-initiated copy
+    on the Tk thread; a genuinely stuck owner still surfaces the existing
+    friendly failure afterwards rather than retrying forever.
+    """
+    for attempt in range(attempts):
+        ctypes.set_last_error(0)
+        if user32.OpenClipboard(owner_hwnd):
+            return
+        if attempt < attempts - 1:
+            time.sleep(0.02 * (attempt + 1))
+    error_code = ctypes.get_last_error()
+    if error_code:
+        raise ctypes.WinError(error_code)
+    raise OSError("The Windows clipboard is currently in use.")
+
+
 def set_html_clipboard(owner_hwnd, plain_text, html_fragment):
     """Publish rich HTML first and clean Unicode text as a fallback.
 
@@ -1715,8 +1842,7 @@ def set_html_clipboard(owner_hwnd, plain_text, html_fragment):
     html_transferred = False
     text_transferred = False
     try:
-        if not user32.OpenClipboard(owner_hwnd):
-            raise ctypes.WinError()
+        _open_clipboard_with_retries(user32, owner_hwnd)
         try:
             if not user32.EmptyClipboard():
                 raise ctypes.WinError()
@@ -1797,7 +1923,13 @@ def reading_metrics(text):
     else:
         label = "Very difficult"
 
-    minutes = max(round(word_count / 200), 1)
+    # Fractional, not rounded: round() ties-to-even rounds 201-299 words
+    # down to a flat 1, and the caller's own "1 minute" threshold treated
+    # even an exact 200-word text as "under a minute" (notes_021 §2.4B).
+    # Returning the fraction and letting the caller ceil() it above 1.0
+    # keeps the same 200-words-per-minute assumption without that boundary
+    # error.
+    minutes = word_count / 200
     return label, minutes
 
 
@@ -2027,7 +2159,7 @@ class TonePickerDialog(ctk.CTkToplevel):
         self._refresh_status()
 
     def _toggle_tone(self, tone):
-        """Track selection order and enforce the picker's soft limit."""
+        """Track selection order and enforce the picker's soft limit/conflicts."""
         if self.variables[tone].get():
             if tone not in self.selected_order:
                 if len(self.selected_order) >= TONE_PICKER_LIMIT:
@@ -2041,6 +2173,18 @@ class TonePickerDialog(ctk.CTkToplevel):
                     self.after(1800, self._refresh_status)
                     return
                 self.selected_order.append(tone)
+                # Immediate feedback the moment a conflicting box is ticked
+                # (notes_021 §2.3/3.3), rather than only at Apply time --
+                # validate_tones() there remains the sole authoritative
+                # check; this is a read-only preview of the same rule.
+                conflict = tone_conflict_message(self.selected_order)
+                if conflict:
+                    self.selected_order.remove(tone)
+                    self.variables[tone].set(False)
+                    self.status_label.configure(
+                        text=conflict, text_color="#e06c75")
+                    self.after(2400, self._refresh_status)
+                    return
         elif tone in self.selected_order:
             self.selected_order.remove(tone)
         self._refresh_status()
@@ -2121,6 +2265,59 @@ class ShortcutsDialog(ctk.CTkToplevel):
 
         ctk.CTkButton(self, text="Close", width=90,
                       command=self.destroy).pack(pady=(0, 16))
+
+
+class DiffExportFormatDialog(ctk.CTkToplevel):
+    """Choose between the two review-oriented Markdown diff formats.
+
+    notes_021 §2.4/3.4: unified diff (the existing default) suits source
+    control and technical review; annotated prose reads more naturally as
+    an ordinary document. Cancelling (Escape or the window close button)
+    leaves self.result as None, which export_diff_file() treats as "export
+    cancelled", same as declining the save-path dialog that follows it.
+    """
+
+    def __init__(self, master):
+        super().__init__(master)
+        self.result = None
+        self.title("Export diff")
+        self.geometry("430x210")
+        self.resizable(False, False)
+        bind_dialog_chrome(self, on_close=self.destroy)
+        position_over_parent(self, master, 430, 210)
+
+        ctk.CTkLabel(
+            self, text="Choose a Markdown review format",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).pack(anchor="w", padx=18, pady=(18, 4))
+        ctk.CTkLabel(
+            self,
+            text=("Unified diff suits source control. Annotated prose is "
+                  "easier to read as an ordinary document."),
+            wraplength=390, justify="left", text_color="gray65",
+        ).pack(anchor="w", padx=18, pady=(0, 14))
+
+        buttons = ctk.CTkFrame(self, fg_color="transparent")
+        buttons.pack(fill="x", padx=18)
+        ctk.CTkButton(
+            buttons, text="Unified diff",
+            command=lambda: self._choose("unified"),
+        ).pack(side="left", expand=True, fill="x", padx=(0, 4))
+        ctk.CTkButton(
+            buttons, text="Annotated prose",
+            command=lambda: self._choose("annotated"),
+        ).pack(side="left", expand=True, fill="x", padx=(4, 0))
+
+    def _choose(self, value):
+        self.result = value
+        self.destroy()
+
+
+def choose_diff_export_format(master):
+    """Return 'unified', 'annotated', or None if the dialogue was closed."""
+    dialogue = DiffExportFormatDialog(master)
+    master.wait_window(dialogue)
+    return dialogue.result
 
 
 # --------------------------------------------------------------------------- #
@@ -2677,6 +2874,7 @@ class Scriptorium(ctk.CTk):
 
         self._maybe_offer_config_migration()
         self._maybe_warn_unreadable_config()
+        self._maybe_warn_config_repairs()
         self._maybe_show_privacy_notice()
         self._refresh_status()
 
@@ -3115,7 +3313,8 @@ class Scriptorium(ctk.CTk):
             metrics = reading_metrics(original)
             if metrics:
                 label, minutes = metrics
-                time_text = "under a minute" if minutes <= 1 else f"~{minutes} min read"
+                time_text = ("under a minute" if minutes < 1
+                             else f"~{math.ceil(minutes)} min read")
                 msg += f"   |   {label} · {time_text}"
         if self.last_result:
             revised = self.last_result["revised"]
@@ -3150,6 +3349,33 @@ class Scriptorium(ctk.CTk):
                 "been overwritten. Open Settings and click Save to write a "
                 "fresh copy, or repair the JSON by hand.",
                 parent=self)
+
+    def _maybe_warn_config_repairs(self):
+        """Explain bounded repairs made to otherwise-readable preset data.
+
+        normalise_user_presets() already drops a malformed entry safely
+        (notes_021 §2.2/3.2), but silently -- a user who saves any further
+        preset change afterwards would have the already-normalised in-memory
+        config, minus the dropped entry, written straight back over the
+        file, permanently losing it with no explanation. Only load_config()
+        supplies a real issues collector, so this is empty (and a no-op)
+        whenever the unreadable-file warning above already fired instead.
+        """
+        issue_state = getattr(
+            load_config, "repair_warnings", {"messages": [], "omitted": 0})
+        messages = list(issue_state.get("messages", []))
+        omitted = int(issue_state.get("omitted", 0))
+        if not messages and not omitted:
+            return
+        if omitted:
+            messages.append(f"{omitted} further issue(s) were omitted.")
+        detail = "\n".join(f"• {item}" for item in messages)
+        messagebox.showwarning(
+            "Some presets could not be loaded",
+            "Scriptorium ignored invalid user-preset entries but left the "
+            "configuration file in place. Review it before saving further "
+            f"preset changes.\n\n{detail}\n\nFile: {CONFIG_PATH}",
+            parent=self)
 
     def _maybe_offer_config_migration(self):
         """Offer to import an existing source-mode config, once, when frozen.
@@ -3574,13 +3800,15 @@ class Scriptorium(ctk.CTk):
         self._refresh_status("rich diff copied to clipboard")
 
     def export_diff_file(self):
-        """Export the active revision as a fenced unified Markdown diff.
+        """Export the active revision as a Markdown diff, in a chosen format.
 
         Deliberately separate from export_file(): that one exports the
         clean revision text (or Original, unprocessed) for someone who just
         wants the result; this is the explicitly review-oriented path,
         showing what changed and from what, for pasting into a PR
         description, a code-review tool, or an email summarising an edit.
+        Offers a choice of unified diff or annotated prose (notes_021
+        §2.4/3.4) since the latter reads far better for ordinary text.
         """
         if not self.last_result:
             self._refresh_status("nothing to export as a diff")
@@ -3591,13 +3819,21 @@ class Scriptorium(ctk.CTk):
                 "Export the diff anyway?", parent=self):
             return
 
+        export_format = choose_diff_export_format(self)
+        if export_format is None:
+            return
+
         path = filedialog.asksaveasfilename(
             title="Export revision diff", defaultextension=".md",
             filetypes=[("Markdown", "*.md")])
         if not path:
             return
-        document = build_markdown_diff(
-            self._result_source, self.last_result["revised"])
+        if export_format == "annotated":
+            document = build_annotated_markdown_diff(
+                self._result_source, self.last_result["revised"])
+        else:
+            document = build_markdown_diff(
+                self._result_source, self.last_result["revised"])
         try:
             with open(path, "w", encoding="utf-8", newline="\n") as fh:
                 fh.write(document)
@@ -3728,12 +3964,17 @@ class Scriptorium(ctk.CTk):
         """
         return read_document_path(path)
 
-    def _load_file_path(self, path):
+    def _load_file_path(self, path, *, confirm_replace=False):
         """Load one path into Original through the normal undo/state boundary.
 
         Shared by the Import dialog and a completed Explorer drop, so both
         get identical encoding fallback, error handling and undo/stale-
-        result behaviour.
+        result behaviour. confirm_replace (notes_021 §2.1/3.1) asks once
+        before replacing non-empty Original text -- only after a successful
+        read, so an unsupported/corrupt/locked file never triggers a
+        pointless replacement question. Explorer drops opt in via this
+        flag; the explicit Import dialogue keeps its existing no-confirm
+        behaviour, since choosing a file there is already a deliberate act.
         """
         try:
             content = self._read_document_path(path)
@@ -3756,7 +3997,19 @@ class Scriptorium(ctk.CTk):
             messagebox.showerror("Import failed",
                                  f"Could not read the Word file.\n\n{exc}")
             return
-        self._remember_for_undo(self.original_box.get("1.0", "end-1c"))
+
+        current = self.original_box.get("1.0", "end-1c")
+        if confirm_replace and current.strip():
+            name = os.path.basename(path)
+            if not messagebox.askyesno(
+                    "Replace the original text?",
+                    f"Drop '{name}' into Original and replace the current "
+                    "text?\n\nYou can undo the replacement afterwards.",
+                    parent=self):
+                self._refresh_status("file drop cancelled")
+                return
+
+        self._remember_for_undo(current)
         self.reject()
         self.original_box.delete("1.0", "end")
         self.original_box.insert("1.0", content)
@@ -3980,7 +4233,7 @@ class Scriptorium(ctk.CTk):
                 parent=self,
             )
             return
-        self._load_file_path(path)
+        self._load_file_path(path, confirm_replace=True)
 
     def _disable_file_drops(self):
         """Remove the subclass before Tk destroys the native window."""

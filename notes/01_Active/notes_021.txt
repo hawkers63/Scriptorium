@@ -1,0 +1,1454 @@
+Scriptorium enhancement architecture review — notes_021
+Review date: 2 September 2026
+Author: Codex (Lead Enhancement & Feature Architect)
+Scope: read-only design against C:\Scriptorium\scriptorium.py
+Observed baseline: v2.21, 4,402 lines (not the v2.8 baseline in the brief)
+
+===============================================================================
+1. EXECUTIVE SUMMARY
+===============================================================================
+
+The five requested enhancement areas are not open gaps in the live source.
+They were implemented incrementally after v2.8 and are now present in v2.21:
+
+1. Explorer drag-and-drop is implemented with DragAcceptFiles, a pointer-sized
+   WNDPROC subclass, WM_DROPFILES/DragQueryFileW handling, and a deliberately
+   separate Tk poller (v2.15; lines 300-363 and 3763-3992).
+2. User-defined presets are validated, persisted atomically under
+   user_presets in scriptorium_config.json, and managed from a dialogue
+   (v2.12; lines 598-728, 731-905, 2441-2522 and 2752-2858).
+3. Three-tone composition, ordered dominant/supporting/accent, is live and
+   calibrated, with three hard conflict pairs and explicit fidelity guards
+   (v2.11; lines 395-511, 937-984 and 1967-2072).
+4. Fenced Markdown diff export, CF_HTML rich clipboard copying, live word and
+   character counts, readability and reading-time metrics are present
+   (v2.16-v2.21; lines 1535-1795, 3042-3055, 3083-3123 and 3526-3597).
+5. Claude and Ollama already share bounded exponential-backoff retry logic for
+   transient HTTP and network failures, honouring Retry-After and reporting
+   progress without blocking Tk (v2.13; lines 1148-1375 and 3381-3396).
+
+Re-implementing those features would add churn and risk without user value.
+This note therefore treats v2.21 as the canonical baseline and proposes a
+second-generation hardening pass:
+
+* Explorer drops: protect populated Original text from an accidental,
+  low-friction replacement while retaining the proven native message bridge.
+* Presets: make valid-but-repaired preset configuration visible to the user;
+  malformed presets are currently discarded silently during normalisation.
+* Three-tone pipeline: add immediate conflict feedback and a deterministic,
+  advisory fidelity audit for protected facts which a prompt alone cannot
+  guarantee.
+* Export and clipboard: add an annotated, prose-readable Markdown review
+  format, correct reading-time rounding at the one-minute boundary, and retry
+  briefly when another Windows process temporarily owns the clipboard.
+* Backend transport: add request-scoped cancellation and split response
+  consumption from request/retry transport, establishing a safe seam for a
+  later streaming implementation without changing the current JSON contract.
+
+Recommended delivery order:
+
+1. Resolve notes_020's separate v2.22 tray/start-up lifecycle defect first.
+   It is an observed defect, whereas every item below is an enhancement.
+2. Ship the drop confirmation, preset repair notice, reading-time correction
+   and clipboard-open retry together as a low-risk UI/integrity release.
+3. Ship the fidelity audit behind deterministic tests, then calibrate it
+   against real Claude and Ollama output before treating its warnings as
+   trusted. It must remain advisory.
+4. Ship cancellable retry transport separately, with fault-injection tests.
+5. Add visible streaming only in a later release, after choosing a structured
+   incremental-response contract. Merely setting stream=true would expose JSON
+   envelope fragments in the revision pane and would not be a usable feature.
+
+No source file has been changed by this review. The only written artefact is
+this sequential project note, as required by the read-only reporting mandate.
+
+
+===============================================================================
+2. DETAILED ARCHITECTURAL PROPOSALS
+===============================================================================
+
+-------------------------------------------------------------------------------
+2.1 Explorer drag-and-drop: retain the native bridge; add replacement safety
+-------------------------------------------------------------------------------
+
+Current architecture
+--------------------
+
+The implementation is materially stronger than the v2.8-era brief anticipated.
+The process-level Win32 declarations correctly use pointer-sized LRESULT/WPARAM
+types and select SetWindowLongPtrW on 64-bit Python. Scriptorium.__init__ keeps
+the callback and previous WNDPROC alive on self. The native callback does not
+call Tcl/Tk: it copies the HDROP paths and screen point into plain Python state,
+calls DragFinish in a finally block, and returns. A separately scheduled
+_poll_dropped_files() method performs hit-testing and UI work after the native
+callback stack has unwound. That separation is load-bearing and should not be
+collapsed; the comments record a real interpreter-state crash caused by calling
+back into Tcl from the WNDPROC.
+
+The Import dialogue and Explorer drop both converge on _load_file_path(), so
+encoding fallback, Word gating, undo, revision invalidation and error messages
+do not drift. _disable_file_drops() also restores the previous procedure before
+the top-level is destroyed.
+
+Remaining UX risk
+-----------------
+
+A drop is deliberately lower friction than choosing Import. At present, one
+valid dropped file immediately replaces all text in Original. An undo snapshot
+exists, but replacement is still surprising if a user releases a file while
+moving it across the window. This is the most important residual drop risk; it
+does not justify touching the proven WNDPROC implementation.
+
+Proposal
+--------
+
+Add a keyword-only confirm_replace flag to _load_file_path(). Read and validate
+the incoming document first. If it is readable and Original already contains
+non-whitespace text, ask once before mutating any editor or request state. The
+Explorer path supplies confirm_replace=True; the explicit Import dialogue keeps
+its current behaviour unless product testing shows users also want confirmation
+there.
+
+This order has three useful properties:
+
+* an unsupported, locked or corrupt document cannot trigger a pointless
+  replacement question;
+* declining the question leaves Original, Suggested revision, busy state and
+  the in-flight request untouched;
+* accepting still passes through the existing undo/reject boundary, so it
+  cancels stale backend ownership exactly as a normal import does.
+
+State and configuration impact
+------------------------------
+
+No configuration key is required. This is a transaction boundary around the
+existing state mutation. The raw drop-event list, window procedure, polling
+interval and supported suffix set remain unchanged.
+
+Performance and platform impact
+-------------------------------
+
+The confirmation is reached only after a successful read, so there is no added
+work on ordinary typing or backend calls. Large .docx files are still decoded
+on the Tk thread; that is an existing limitation. A separate size ceiling or
+background document loader may be warranted if real documents demonstrate a
+visible pause, but should not be bundled into the replacement-safety patch.
+
+Do not add ChangeWindowMessageFilterEx by default merely to make drops work
+when Scriptorium is run elevated. Accepting WM_DROPFILES across Windows
+integrity levels widens the native message surface. The safe default is to run
+the app at the same integrity level as Explorer and retain Import as the
+fallback.
+
+Verification gate
+-----------------
+
+Test both source and packaged builds with a Unicode filename, a long path, a
+valid file over empty Original, a valid file over populated Original (accept
+and decline), an invalid suffix, a corrupt .docx, multiple files, a drop outside
+Original, a drop during a backend request, and closing the window immediately
+after a drop. Confirm that DragFinish is reached on every native path and that
+declining replacement does not cancel an in-flight request.
+
+
+-------------------------------------------------------------------------------
+2.2 User presets: keep the schema; expose normalisation repairs
+-------------------------------------------------------------------------------
+
+Current architecture
+--------------------
+
+The requested persistent preset model is already complete and appropriately
+small:
+
+    "user_presets": {
+      "My client reply": {
+        "mode": "Clarify",
+        "strength": "Standard",
+        "role": "Client Relations",
+        "tones": ["Diplomatic", "Concise"]
+      }
+    }
+
+normalise_preset() validates each record against MODES, STRENGTHS, ROLES and
+validate_tones(). normalise_user_presets() protects built-in names, caps names
+and count, handles case-folded duplicates, and preserves insertion order.
+_write_user_presets() constructs a candidate configuration, normalises it,
+writes it atomically, and changes live state only after a confirmed save. The
+PresetManagerDialog supports new saves, case-insensitive overwrite and deletion.
+
+There is no need to replace the mapping with a database, add a third-party
+serialiser, or duplicate all four editors inside the management dialogue.
+Overwriting a preset by saving the current toolbar under the same name is a
+compact and understandable update path.
+
+Remaining data-trust risk
+-------------------------
+
+Valid JSON can contain malformed preset entries. Those entries are silently
+dropped by normalise_user_presets(). The application remains safe, but the
+user receives no explanation. On a later user-initiated Settings or preset
+save, the already-normalised self.cfg is written back, permanently removing
+the rejected entries from the file. This is a data-consistency issue even
+though it is not a crash.
+
+Proposal
+--------
+
+Let normalise_user_presets() accept an optional, bounded issue collector.
+load_config() supplies one only when normalising data read from disk and stores
+the resulting state on load_config.repair_warnings. A new startup notice
+explains which entries were ignored and points at CONFIG_PATH. Internal
+normalisation before a save continues to omit the collector, so it remains a
+pure canonicalisation step rather than displaying messages from deep inside
+persistence code.
+
+The warning must be concise and capped. An adversarial or hand-corrupted config
+must not generate a dialogue containing hundreds of lines. The implementation
+below reports at most five individual repairs plus an omitted-count summary.
+
+State and schema impact
+-----------------------
+
+The on-disk schema is unchanged. load_config.repair_warnings is process-local
+diagnostic state, analogous to the existing load_config.unreadable flag. This
+is intentionally lower risk than introducing a schema version solely for the
+current preset mapping.
+
+For a future schema migration, migrate the raw loaded object before merging it
+with DEFAULT_CONFIG. The historical default_tone migration bug documented at
+lines 762-769 was caused precisely by merging defaults first and obscuring
+whether a new key was genuinely present. That broader versioning change is
+sound, but it is not required to make preset repairs visible and should remain
+a separate persistence release.
+
+Verification gate
+-----------------
+
+Use standard-library unittest or direct pure-function checks for: a non-object
+user_presets value; non-string names; blank/overlong/reserved names; duplicate
+names differing only by case; invalid mode, strength, role and tone conflicts;
+31 valid records; and a mixture of valid and invalid entries. Confirm the valid
+subset remains in order, no exception escapes, no more than six warning lines
+are shown, a clean config produces no notice, and an unreadable JSON file still
+uses the existing higher-priority unreadable-config warning.
+
+
+-------------------------------------------------------------------------------
+2.3 Three-tone pipeline: immediate conflicts plus deterministic fidelity audit
+-------------------------------------------------------------------------------
+
+Current architecture
+--------------------
+
+The full three-tone composition requested in the brief is already live:
+
+* MAX_SELECTED_TONES and TONE_PICKER_LIMIT are both 3.
+* validate_tones() is the single validation boundary used by configuration,
+  presets, the picker, prompt construction and batch mode.
+* order is semantic: dominant, supporting, then a light accent.
+* Concise/Detailed, Casual/Formal and Neutral/Persuasive are rejected as hard
+  conflicts.
+* the prompt's precedence ladder places factual fidelity and the editing mode
+  above all three tones, and tells the model to weaken or drop the accent before
+  changing content, certainty or scope.
+* individual Confident, Detailed, Constructive and Persuasive instructions
+  include targeted anti-embellishment boundaries established through real
+  local-model calibration.
+
+That prompt design is strong, but a language-model instruction cannot guarantee
+semantic fidelity. The diff remains the ultimate human review surface.
+
+Proposal A: report hard conflicts at selection time
+---------------------------------------------------
+
+Extract the conflict lookup into tone_conflict_message(). validate_tones()
+continues to enforce it authoritatively. TonePickerDialog._toggle_tone() also
+calls it immediately after tentatively appending a tone; when a conflict is
+found, it reverts that checkbox and displays the reason in the existing status
+label. Apply still validates again as defence in depth.
+
+This changes no conflict policy. It simply moves feedback from the end of the
+dialogue to the action which caused it, while preserving one source of truth.
+
+Proposal B: advisory protected-content inventory
+------------------------------------------------
+
+Add audit_revision_fidelity(original, revised), a deterministic local check
+which compares exact multisets of high-risk tokens the current system prompt
+already says must not change:
+
+* numeric/currency/percentage expressions;
+* URLs and email addresses;
+* Windows paths; and
+* explicitly quoted passages.
+
+If an item disappears or a new item appears, add a concise warning to the
+existing ambiguity banner after placeholder restoration. Do not rewrite the
+revision, silently restore these items, mark the request as failed, or disable
+Accept. A number can legitimately move, and conservative regular expressions
+can produce false positives. The correct product posture is therefore
+"deterministic attention cue", not "semantic proof".
+
+This check directly addresses the highest-risk three-tone failure mode: a model
+obeying an interpersonal or persuasive style request while quietly strengthening
+a quantity, changing a URL, altering quoted material, or inventing a figure.
+It also benefits single-tone and no-tone requests without changing their prompt.
+
+State, prompt and performance impact
+------------------------------------
+
+There is no configuration change and no additional data leaves the machine.
+The system prompt is unchanged. Four regular-expression scans and Counter
+comparisons are linear in text length and negligible compared with diffing or a
+backend call. Audit the fully restored revision, not the masked model response,
+so warnings refer to the text the user actually sees and exports.
+
+Calibration and verification gate
+---------------------------------
+
+Pure tests should cover duplicates (two identical figures in Original, one in
+Revised), changed currency, decimal commas, percentages, dates represented as
+several numeric tokens, punctuation beside URLs, email addresses, UNC and drive
+paths, straight/curly quotations, unchanged inventories in a different order,
+and a clean paragraph with no protected items.
+
+Then run a fixed corpus against both configured backends across one-, two- and
+three-tone selections, especially Persuasive + Confident + Direct and Formal +
+Diplomatic + Concise. Record false positives and genuine catches. Do not expand
+the audit to proper nouns until there is a reliable tokenisation policy; naive
+capitalisation rules misclassify sentence openings and create warning fatigue.
+
+
+-------------------------------------------------------------------------------
+2.4 Export, clipboard and metrics: readable review output and edge hardening
+-------------------------------------------------------------------------------
+
+Current architecture
+--------------------
+
+v2.21 already offers all baseline utilities requested:
+
+* build_markdown_diff() produces a safely fenced unified diff;
+* build_html_diff(), _build_cf_html(), _global_clipboard_memory() and
+  set_html_clipboard() publish semantic rich HTML and CF_UNICODETEXT in one
+  Windows clipboard transaction with correct ownership bookkeeping;
+* _refresh_status() shows live words, characters, Flesch label and reading time;
+* all diff-related actions compare against _result_source and warn when the
+  visible revision is stale.
+
+Proposal A: add annotated Markdown as a second review format
+------------------------------------------------------------
+
+Unified diff is ideal for repositories and technical review, but awkward for a
+reader assessing ordinary prose. Add build_annotated_markdown_diff(), using the
+same _tokenise()/SequenceMatcher contract as the visible diff and rich clipboard.
+It emits a Markdown document with a <pre> review block, <del> for removed text
+and <strong> for inserted text. html.escape() protects literal source markup;
+the <pre> wrapper preserves whitespace and prevents source Markdown from being
+interpreted as document structure.
+
+Keep the existing unified form as the default. A small format dialogue opened
+from Export diff offers:
+
+* Unified diff — best for source control and technical review.
+* Annotated prose — best for reading in a Markdown viewer.
+
+No new action-bar button is needed; the current two-row layout was deliberately
+balanced after earlier width failures.
+
+Proposal B: correct reading-time semantics
+------------------------------------------
+
+reading_metrics() currently returns max(round(word_count / 200), 1). Python's
+round() uses ties-to-even and rounds 201-299 words down to one minute. The status
+formatter also labels every integer value of 1 as "under a minute", including
+exactly 200 words. Return the fractional minutes (word_count / 200) and format it
+as "under a minute" only below 1.0; otherwise display math.ceil(minutes). This
+preserves the existing 200-words-per-minute assumption while removing a visible
+boundary error.
+
+Proposal C: tolerate brief clipboard contention
+------------------------------------------------
+
+OpenClipboard commonly fails transiently because clipboard ownership is global
+to the desktop. The current method makes one attempt and immediately reports an
+error. Add five bounded attempts with short increasing waits. The worst-case
+delay in the proposed helper is 0.20 seconds, small enough for this user action
+on the Tk thread. Retain the existing allocation/transfer/finally ownership
+logic unchanged; only replace the single OpenClipboard call.
+
+State and performance impact
+----------------------------
+
+No configuration change is needed. Annotated export has the same asymptotic
+cost as the current visible and HTML diffs. The format dialogue adds one click
+only to the explicitly review-oriented Export diff action. Clipboard retry is
+bounded and never runs during ordinary copy/paste unless Copy rich diff is used.
+
+Verification gate
+-----------------
+
+Test annotated output containing literal <, >, &, backticks, asterisks, tildes,
+Unicode, blank lines and long backtick runs. Render it in at least GitHub or a
+CommonMark-capable viewer and confirm deletions/insertions align with the app's
+Inline view. Verify 199, 200, 201, 399 and 400-word reading-time labels. For the
+clipboard, deliberately hold the clipboard open from another process for less
+than and longer than the retry budget; the first case should recover and the
+second should preserve the existing friendly failure without leaking handles.
+
+
+-------------------------------------------------------------------------------
+2.5 Backend resilience and streaming preparation: cancellable transport seam
+-------------------------------------------------------------------------------
+
+Current architecture
+--------------------
+
+_request_json_with_retries() already does the important fundamentals correctly:
+
+* a fresh urllib.request.Request is built for every attempt;
+* HTTPError is handled before URLError;
+* only configured transient statuses are retried;
+* Retry-After supports both seconds and HTTP dates and is bounded;
+* fallback exponential delay has jitter and a maximum;
+* network drops, timeouts and http.client failures are retried;
+* malformed successful responses, authentication failures and missing models
+  are not retried;
+* retry sleeps occur on the worker, and on_retry returns to Tk through the
+  guarded request-id boundary.
+
+Remaining resilience issue
+--------------------------
+
+Reject, Clear, Import, a new document drop and application shutdown invalidate
+UI ownership, but they do not stop the old worker. A worker sleeping between
+attempts can wake and issue another paid or expensive request which the UI has
+already promised to ignore. With Ollama's 300-second per-attempt timeout, that
+background work can also continue for a long time after cancellation.
+
+Python cannot reliably interrupt an already-blocked urllib read from another
+thread without closing its socket through a more invasive transport design.
+It can, however, prevent every subsequent attempt and make backoff waits wake
+immediately. That is a meaningful, low-risk first cancellation boundary and is
+also a prerequisite for streaming.
+
+Proposal A: request-scoped cancellation Event
+---------------------------------------------
+
+Give each Process invocation its own threading.Event. _invalidate_inflight()
+sets the current event before incrementing the request id. The worker passes the
+event through run_backend(), call_anthropic()/call_ollama(), and the shared
+retry helper. The helper checks before opening each attempt and uses
+cancel_event.wait(delay), rather than time.sleep(delay), during backoff.
+
+Never clear and reuse an Event: an old worker could observe the cleared state
+and resume. Allocate one Event per request and capture that exact object in the
+worker closure. Batch mode passes no event and remains synchronous.
+
+Proposal B: separate response consumption from retry transport
+--------------------------------------------------------------
+
+Rename the inner transport to _request_with_retries() and supply a
+response_reader callback. The existing _request_json_with_retries() becomes a
+thin wrapper using _read_json_response(), so Claude and Ollama behaviour and
+return types do not change.
+
+This creates the correct future seam:
+
+    request construction -> retry/open policy -> response protocol reader
+
+Claude streaming uses event-stream semantics, whereas Ollama streams newline-
+delimited JSON. They should eventually have separate response readers behind
+the same open/retry policy. Neither reader should call Tk directly. Deltas
+should enter a bounded thread-safe queue which Tk drains on a timer, matching
+the safe producer/consumer pattern already proven by Explorer drops.
+
+Do not enable visible streaming in this patch. The current model contract is one
+JSON object containing a revised string, ambiguity list and note. Showing bytes
+as they arrive would display JSON quoting and an incomplete envelope, and a
+transparent retry after visible chunks would duplicate text. Before enabling
+streaming, make two explicit product decisions:
+
+1. whether the Suggested revision pane may show an unreviewed partial draft;
+2. once any visible delta has been delivered, whether a stream failure leaves a
+   labelled partial result or discards it (it must never retry invisibly from
+   the beginning into the same pane).
+
+State and performance impact
+----------------------------
+
+One Event reference is added to Scriptorium. Completed events are tiny and are
+released with their worker closure. There is no configuration change and no
+effect on successful request latency. Cancellation during backoff becomes
+immediate; cancellation during an active urlopen/read remains bounded by the
+existing socket timeout and is explicitly not overstated as solved.
+
+Verification gate
+-----------------
+
+Fault-inject a 503 followed by success, 429 with numeric Retry-After, 429 with an
+HTTP-date, 401, invalid JSON on HTTP 200, connection reset, TimeoutError and
+http.client.IncompleteRead. Assert attempt counts and that non-transient or
+parse failures never retry. Cancel before attempt one, during backoff and after
+success; only the backoff case should demonstrate an immediate timing change.
+Confirm a cancelled request never opens a subsequent request and never updates
+the UI, while a normal request still reports retry progress and completes.
+
+
+===============================================================================
+3. MODULAR CODE SNIPPETS
+===============================================================================
+
+These snippets are proposals, not applied changes. They follow the live v2.21
+interfaces and preserve British English in code comments, docstrings and UI
+copy. Where a snippet replaces a method, the full replacement is provided.
+
+-------------------------------------------------------------------------------
+3.1 Safe Explorer replacement
+-------------------------------------------------------------------------------
+
+Replace Scriptorium._load_file_path() with:
+
+```python
+    def _load_file_path(self, path, *, confirm_replace=False):
+        """Load one document through the normal undo/state boundary.
+
+        Explorer drops may request confirmation before replacing populated
+        Original text. The document is read first so a corrupt or unsupported
+        file never presents a pointless replacement question.
+        """
+        try:
+            content = self._read_document_path(path)
+        except ImportError:
+            messagebox.showerror(
+                "Import failed",
+                "Reading Word files needs the python-docx package.\n\n"
+                "Install it with:  pip install python-docx",
+                parent=self,
+            )
+            return False
+        except UnicodeDecodeError as exc:
+            messagebox.showerror(
+                "Import failed",
+                "The file encoding could not be read. Save it as UTF-8 and "
+                f"try again.\n\n({exc})",
+                parent=self,
+            )
+            return False
+        except OSError as exc:
+            messagebox.showerror("Import failed", str(exc), parent=self)
+            return False
+        except Exception as exc:  # Bad, locked or corrupt optional Word input.
+            messagebox.showerror(
+                "Import failed",
+                f"Could not read the Word file.\n\n{exc}",
+                parent=self,
+            )
+            return False
+
+        current = self.original_box.get("1.0", "end-1c")
+        if confirm_replace and current.strip():
+            name = os.path.basename(path)
+            if not messagebox.askyesno(
+                    "Replace the original text?",
+                    f"Drop '{name}' into Original and replace the current "
+                    "text?\n\nYou can undo the replacement afterwards.",
+                    parent=self):
+                self._refresh_status("file drop cancelled")
+                return False
+
+        self._remember_for_undo(current)
+        self.reject()
+        self.original_box.delete("1.0", "end")
+        self.original_box.insert("1.0", content)
+        self._refresh_status(f"imported {os.path.basename(path)}")
+        return True
+```
+
+At the end of Scriptorium._handle_dropped_paths(), replace:
+
+```python
+        self._load_file_path(path)
+```
+
+with:
+
+```python
+        self._load_file_path(path, confirm_replace=True)
+```
+
+No change is required in import_file(); its existing call uses the default.
+
+
+-------------------------------------------------------------------------------
+3.2 Loss-aware user-preset normalisation
+-------------------------------------------------------------------------------
+
+Add this small helper immediately above normalise_user_presets(), then replace
+normalise_user_presets() with the version below:
+
+```python
+def _record_config_issue(issues, message):
+    """Record a repair without allowing corrupt input to grow memory freely."""
+    if issues is None:
+        return
+    if len(issues["messages"]) < 5:
+        issues["messages"].append(message)
+    else:
+        issues["omitted"] += 1
+
+
+def normalise_user_presets(value, issues=None):
+    """Return valid user presets and optionally explain rejected entries.
+
+    The optional collector is used only while loading a real configuration
+    file. Internal candidate normalisation can omit it and remain silent.
+    """
+    if not isinstance(value, dict):
+        _record_config_issue(
+            issues,
+            "User presets were ignored because 'user_presets' is not an "
+            "object.",
+        )
+        return {}
+
+    reserved = {name.casefold() for name in WRITING_PRESETS}
+    reserved.add(PRESET_MANAGER_LABEL.casefold())
+    clean = {}
+    used_names = set(reserved)
+
+    for raw_name, raw_preset in value.items():
+        if len(clean) >= MAX_USER_PRESETS:
+            _record_config_issue(
+                issues,
+                f"Only the first {MAX_USER_PRESETS} valid user presets were "
+                "loaded.",
+            )
+            break
+        if not isinstance(raw_name, str):
+            _record_config_issue(
+                issues,
+                "A user preset with a non-text name was ignored.",
+            )
+            continue
+
+        name = raw_name.strip()
+        folded = name.casefold()
+        if not name:
+            _record_config_issue(
+                issues,
+                "A user preset with a blank name was ignored.",
+            )
+            continue
+        if len(name) > MAX_PRESET_NAME_LENGTH:
+            _record_config_issue(
+                issues,
+                f"Preset '{name[:24]}…' was ignored because its name is too "
+                "long.",
+            )
+            continue
+        if folded in reserved:
+            _record_config_issue(
+                issues,
+                f"Preset '{name}' was ignored because the name is reserved.",
+            )
+            continue
+        if folded in used_names:
+            _record_config_issue(
+                issues,
+                f"Preset '{name}' was ignored because its name duplicates "
+                "another preset.",
+            )
+            continue
+
+        preset = normalise_preset(raw_preset)
+        if preset is None:
+            _record_config_issue(
+                issues,
+                f"Preset '{name}' was ignored because its mode, strength, "
+                "role or tones are invalid.",
+            )
+            continue
+
+        clean[name] = preset
+        used_names.add(folded)
+
+    return clean
+```
+
+Change normalise_config()'s signature and its user-presets line to:
+
+```python
+def normalise_config(cfg, *, issues=None):
+    """Return cfg with constrained settings restored to safe values."""
+    # Keep the existing body unchanged up to the final collection validators.
+
+    clean["user_presets"] = normalise_user_presets(
+        clean.get("user_presets", {}),
+        issues=issues,
+    )
+```
+
+In load_config(), initialise the new function attribute beside unreadable, then
+collect issues only for a valid object loaded from disk:
+
+```python
+    load_config.unreadable = False
+    load_config.repair_warnings = {"messages": [], "omitted": 0}
+
+    # Keep the existing read/error branches. After cfg.update(loaded):
+    issues = {"messages": [], "omitted": 0}
+    clean = normalise_config(cfg, issues=issues)
+    load_config.repair_warnings = issues
+    return clean
+```
+
+Add this Scriptorium helper beside _maybe_warn_unreadable_config():
+
+```python
+    def _maybe_warn_config_repairs(self):
+        """Explain bounded repairs made to otherwise readable preset data."""
+        issue_state = getattr(
+            load_config,
+            "repair_warnings",
+            {"messages": [], "omitted": 0},
+        )
+        messages = list(issue_state.get("messages", []))
+        omitted = int(issue_state.get("omitted", 0))
+        if not messages and not omitted:
+            return
+
+        if omitted:
+            messages.append(f"{omitted} further issue(s) were omitted.")
+        detail = "\n".join(f"• {item}" for item in messages)
+        messagebox.showwarning(
+            "Some presets could not be loaded",
+            "Scriptorium ignored invalid preset entries but left the "
+            "configuration file in place. Review it before saving further "
+            f"preset changes.\n\n{detail}\n\nFile: {CONFIG_PATH}",
+            parent=self,
+        )
+```
+
+Call self._maybe_warn_config_repairs() in __init__ immediately after
+self._maybe_warn_unreadable_config(). If unreadable is true, repair_warnings
+will be empty, so the existing unreadable-file path remains the only warning.
+
+
+-------------------------------------------------------------------------------
+3.3 Tone conflict feedback and protected-content audit
+-------------------------------------------------------------------------------
+
+Add this helper immediately above validate_tones(), then replace its conflict
+loop with a call to the helper:
+
+```python
+def tone_conflict_message(tones):
+    """Return the first hard-conflict message, or an empty string."""
+    selected = set(tones)
+    for pair, message in TONE_CONFLICTS.items():
+        if pair.issubset(selected):
+            return message
+    return ""
+
+
+def validate_tones(tones):
+    """Return a normalised, ordered, conflict-free tone list."""
+    normalised = []
+    for tone in tones:
+        if tone in ("", "(keep original)") or tone in normalised:
+            continue
+        if tone not in TONE_INSTRUCTIONS:
+            continue
+        normalised.append(tone)
+
+    if len(normalised) > MAX_SELECTED_TONES:
+        raise ValueError(f"Choose no more than {MAX_SELECTED_TONES} tones.")
+
+    conflict = tone_conflict_message(normalised)
+    if conflict:
+        raise ValueError(conflict)
+    return normalised
+```
+
+In TonePickerDialog._toggle_tone(), immediately after appending a new tone,
+add immediate feedback while retaining _apply()'s final validation:
+
+```python
+                self.selected_order.append(tone)
+                conflict = tone_conflict_message(self.selected_order)
+                if conflict:
+                    self.selected_order.remove(tone)
+                    self.variables[tone].set(False)
+                    self.status_label.configure(
+                        text=conflict,
+                        text_color="#e06c75",
+                    )
+                    self.after(2400, self._refresh_status)
+                    return
+```
+
+Add Counter to the standard-library imports:
+
+```python
+from collections import Counter
+```
+
+Add the following module-level audit immediately before the British letter
+conventions section:
+
+```python
+_PROTECTED_REVISION_PATTERNS = {
+    "number, amount or percentage": re.compile(
+        r"(?<!\w)(?:£|€|\$)?\s?\d+(?:[,.]\d+)*"
+        r"(?:\s?(?:%|per cent))?(?!\w)",
+        re.IGNORECASE,
+    ),
+    "URL": re.compile(
+        r"\b(?:https?://|www\.)[^\s<>()\[\]{}\"']*"
+        r"[^\s<>()\[\]{}\"'.,;:!?]",
+        re.IGNORECASE,
+    ),
+    "email address": re.compile(
+        r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+        re.IGNORECASE,
+    ),
+    "Windows path": re.compile(
+        r"(?:\b[A-Z]:\\|\\\\)[^\r\n<>:\"|?*]+",
+        re.IGNORECASE,
+    ),
+    "quoted passage": re.compile(
+        r"(?:\"[^\"\n]+\"|“[^”\n]+”|"
+        r"(?<!\w)'[^'\n]{2,}'(?!\w)|‘[^’\n]+’)",
+    ),
+}
+
+
+def _summarise_inventory(counter, limit=3):
+    """Return a short, deterministic display of Counter contents."""
+    values = list(counter.elements())
+    shown = ", ".join(repr(value) for value in values[:limit])
+    if len(values) > limit:
+        shown += f", plus {len(values) - limit} more"
+    return shown
+
+
+def audit_revision_fidelity(original, revised):
+    """Return advisory warnings for changed protected-content inventories.
+
+    This is deliberately conservative and non-destructive. It directs human
+    attention; it does not claim to prove meaning preservation.
+    """
+    warnings = []
+    for label, pattern in _PROTECTED_REVISION_PATTERNS.items():
+        before = Counter(pattern.findall(original))
+        after = Counter(pattern.findall(revised))
+        missing = before - after
+        introduced = after - before
+        if not missing and not introduced:
+            continue
+
+        changes = []
+        if missing:
+            changes.append(f"missing {_summarise_inventory(missing)}")
+        if introduced:
+            changes.append(f"introduced {_summarise_inventory(introduced)}")
+        warnings.append(
+            f"Protected {label} content changed ({'; '.join(changes)}). "
+            "Check this change against the original before accepting it."
+        )
+    return warnings
+```
+
+In Scriptorium._on_success(), after restore_placeholders() and before the stale
+source warning, extend the existing warnings list:
+
+```python
+        warnings.extend(
+            audit_revision_fidelity(original, result["revised"])
+        )
+```
+
+
+-------------------------------------------------------------------------------
+3.4 Annotated Markdown, reading-time boundary and clipboard contention
+-------------------------------------------------------------------------------
+
+Add this builder immediately after build_markdown_diff():
+
+```python
+def build_annotated_markdown_diff(original, revised):
+    """Return a prose-readable Markdown review with semantic HTML changes."""
+    original_tokens = _tokenise(original)
+    revised_tokens = _tokenise(revised)
+    matcher = difflib.SequenceMatcher(
+        None,
+        original_tokens,
+        revised_tokens,
+        autojunk=False,
+    )
+    output = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        old_text = html.escape("".join(original_tokens[i1:i2]))
+        new_text = html.escape("".join(revised_tokens[j1:j2]))
+        if tag == "equal":
+            output.append(new_text)
+        elif tag == "delete":
+            output.append(f"<del>{old_text}</del>")
+        elif tag == "insert":
+            output.append(f"<strong>{new_text}</strong>")
+        else:
+            output.append(f"<del>{old_text}</del><strong>{new_text}</strong>")
+
+    return (
+        "# Scriptorium annotated revision\n\n"
+        "Deleted text is struck through; inserted text is bold.\n\n"
+        "<pre>" + "".join(output) + "</pre>\n"
+    )
+```
+
+Add this compact format dialogue beside TonePickerDialog/ShortcutsDialog:
+
+```python
+class DiffExportFormatDialog(ctk.CTkToplevel):
+    """Choose one of the two review-oriented Markdown representations."""
+
+    def __init__(self, master):
+        super().__init__(master)
+        self.result = None
+        self.title("Export diff")
+        self.geometry("430x210")
+        self.resizable(False, False)
+        self.transient(master)
+        self.grab_set()
+        bind_dialog_chrome(self, self.destroy)
+        self.after_idle(lambda: position_over_parent(self, master, 430, 210))
+
+        ctk.CTkLabel(
+            self,
+            text="Choose a Markdown review format",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).pack(anchor="w", padx=18, pady=(18, 4))
+        ctk.CTkLabel(
+            self,
+            text=(
+                "Unified diff suits source control. Annotated prose is easier "
+                "to read as an ordinary document."
+            ),
+            wraplength=390,
+            justify="left",
+            text_color="gray65",
+        ).pack(anchor="w", padx=18, pady=(0, 14))
+
+        buttons = ctk.CTkFrame(self, fg_color="transparent")
+        buttons.pack(fill="x", padx=18)
+        ctk.CTkButton(
+            buttons,
+            text="Unified diff",
+            command=lambda: self._choose("unified"),
+        ).pack(side="left", expand=True, fill="x", padx=(0, 4))
+        ctk.CTkButton(
+            buttons,
+            text="Annotated prose",
+            command=lambda: self._choose("annotated"),
+        ).pack(side="left", expand=True, fill="x", padx=(4, 0))
+
+    def _choose(self, value):
+        self.result = value
+        self.destroy()
+
+
+def choose_diff_export_format(master):
+    """Return 'unified', 'annotated' or None when the dialogue is closed."""
+    dialogue = DiffExportFormatDialog(master)
+    master.wait_window(dialogue)
+    return dialogue.result
+```
+
+In export_diff_file(), obtain the format before opening the save dialogue and
+select the builder after the path is chosen:
+
+```python
+        export_format = choose_diff_export_format(self)
+        if export_format is None:
+            return
+
+        # Keep the existing save dialogue and stale-revision guard.
+        if export_format == "annotated":
+            document = build_annotated_markdown_diff(
+                self._result_source,
+                self.last_result["revised"],
+            )
+        else:
+            document = build_markdown_diff(
+                self._result_source,
+                self.last_result["revised"],
+            )
+```
+
+Add math to the standard-library imports:
+
+```python
+import math
+```
+
+In reading_metrics(), replace its current integer rounding line with:
+
+```python
+    minutes = word_count / 200
+```
+
+In _refresh_status(), replace the current time_text assignment with:
+
+```python
+                time_text = (
+                    "under a minute"
+                    if minutes < 1
+                    else f"~{math.ceil(minutes)} min read"
+                )
+```
+
+Add this helper immediately above set_html_clipboard():
+
+```python
+def _open_clipboard_with_retries(user32, owner_hwnd, attempts=5):
+    """Open the global clipboard across brief, bounded ownership conflicts."""
+    for attempt in range(attempts):
+        ctypes.set_last_error(0)
+        if user32.OpenClipboard(owner_hwnd):
+            return
+        if attempt < attempts - 1:
+            # Total worst-case wait: 0.02 + 0.04 + 0.06 + 0.08 = 0.20s.
+            time.sleep(0.02 * (attempt + 1))
+    error_code = ctypes.get_last_error()
+    if error_code:
+        raise ctypes.WinError(error_code)
+    raise OSError("The Windows clipboard is currently in use.")
+```
+
+Inside set_html_clipboard(), replace:
+
+```python
+        if not user32.OpenClipboard(owner_hwnd):
+            raise ctypes.WinError()
+```
+
+with:
+
+```python
+        _open_clipboard_with_retries(user32, owner_hwnd)
+```
+
+
+-------------------------------------------------------------------------------
+3.5 Cancellable, response-reader-based retry transport
+-------------------------------------------------------------------------------
+
+Add this exception beside BackendError:
+
+```python
+class RequestCancelled(BackendError):
+    """Raised internally when the owning UI request has been cancelled."""
+```
+
+Replace _request_json_with_retries() with the three functions below. The HTTP
+classification and messages intentionally remain equivalent to v2.21:
+
+```python
+def _read_json_response(response, label):
+    """Consume one non-streaming HTTP response as a UTF-8 JSON value."""
+    raw_body = response.read()
+    try:
+        return json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise BackendError(
+            f"{label} returned a non-JSON response.\n\n"
+            f"(Parser detail: {exc})"
+        ) from exc
+
+
+def _wait_for_retry(delay, cancel_event):
+    """Wait for backoff, waking immediately if this request is cancelled."""
+    if cancel_event is None:
+        time.sleep(delay)
+        return
+    if cancel_event.wait(delay):
+        raise RequestCancelled("The request was cancelled.")
+
+
+def _request_with_retries(
+        request_factory, *, timeout, label, transient_statuses,
+        response_reader, unavailable_hint="", on_retry=None,
+        cancel_event=None):
+    """Open a fresh request per attempt and delegate response consumption.
+
+    response_reader must be side-effect-free while transparent retries are
+    enabled. A future visible stream reader must stop retrying once it has
+    published its first delta, otherwise a repeated attempt would duplicate
+    content already shown to the user.
+    """
+    last_network_error = None
+    for attempt in range(MAX_REQUEST_ATTEMPTS):
+        if cancel_event is not None and cancel_event.is_set():
+            raise RequestCancelled("The request was cancelled.")
+
+        try:
+            request = request_factory()
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return response_reader(response, label)
+        except RequestCancelled:
+            raise
+        except BackendError:
+            # A successful HTTP response which cannot be consumed is not a
+            # transient transport failure; repeating it wastes another call.
+            raise
+        except urllib.error.HTTPError as exc:
+            can_retry = (
+                exc.code in transient_statuses
+                and attempt < MAX_REQUEST_ATTEMPTS - 1
+            )
+            if not can_retry:
+                detail = exc.read().decode("utf-8", "replace")[:400]
+                request_id = (
+                    exc.headers.get("request-id", "") if exc.headers else ""
+                )
+                trace = f"\nRequest ID: {request_id}" if request_id else ""
+                raise BackendError(
+                    f"{label} returned an error ({exc.code}).\n\n"
+                    f"{detail}{trace}"
+                ) from exc
+
+            delay = _retry_delay(attempt, exc.headers)
+            exc.close()
+            if on_retry:
+                on_retry(
+                    f"{label} is temporarily unavailable; retrying in "
+                    f"{delay:.1f}s ({attempt + 2}/{MAX_REQUEST_ATTEMPTS})…"
+                )
+            _wait_for_retry(delay, cancel_event)
+        except (
+                urllib.error.URLError,
+                TimeoutError,
+                ConnectionError,
+                http.client.HTTPException,
+        ) as exc:
+            last_network_error = exc
+            if attempt >= MAX_REQUEST_ATTEMPTS - 1:
+                reason = getattr(exc, "reason", exc)
+                hint = f"\n\n{unavailable_hint}" if unavailable_hint else ""
+                raise BackendError(
+                    f"Could not reach {label}: {reason}{hint}"
+                ) from exc
+
+            delay = _retry_delay(attempt)
+            if on_retry:
+                on_retry(
+                    f"Connection to {label} was interrupted; retrying in "
+                    f"{delay:.1f}s ({attempt + 2}/{MAX_REQUEST_ATTEMPTS})…"
+                )
+            _wait_for_retry(delay, cancel_event)
+
+    raise BackendError(f"Could not reach {label}: {last_network_error}")
+
+
+def _request_json_with_retries(
+        request_factory, *, timeout, label, transient_statuses,
+        unavailable_hint="", on_retry=None, cancel_event=None):
+    """Compatibility wrapper for the current non-streaming JSON backends."""
+    return _request_with_retries(
+        request_factory,
+        timeout=timeout,
+        label=label,
+        transient_statuses=transient_statuses,
+        response_reader=_read_json_response,
+        unavailable_hint=unavailable_hint,
+        on_retry=on_retry,
+        cancel_event=cancel_event,
+    )
+```
+
+Replace call_anthropic(), call_ollama() and run_backend() with these complete
+definitions, which differ from v2.21 only by the optional event plumbing:
+
+```python
+def call_anthropic(
+        system_prompt, user_text, cfg, on_retry=None, cancel_event=None):
+    """Run one non-streaming Claude request through the shared transport."""
+    api_key = (
+        cfg.get("anthropic_api_key")
+        or os.environ.get("ANTHROPIC_API_KEY", "")
+    )
+    if not api_key:
+        raise BackendError(
+            "No Claude API key set. Open Settings and paste your key, or set "
+            "the ANTHROPIC_API_KEY environment variable.\n\nNote: this is a "
+            "pay-as-you-go API key from console.anthropic.com — it is "
+            "separate from a Claude.ai subscription."
+        )
+
+    body = json.dumps({
+        "model": cfg.get("anthropic_model", DEFAULT_ANTHROPIC_MODEL),
+        "max_tokens": 4096,
+        "system": system_prompt,
+        "messages": [{"role": "user", "content": user_text}],
+    }).encode("utf-8")
+
+    def request_factory():
+        return urllib.request.Request(
+            ANTHROPIC_URL,
+            data=body,
+            method="POST",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": ANTHROPIC_VERSION,
+                "content-type": "application/json",
+            },
+        )
+
+    payload = _request_json_with_retries(
+        request_factory,
+        timeout=120,
+        label="the Claude API",
+        transient_statuses={429, 500, 502, 503, 504, 529},
+        unavailable_hint="Check the network connection and try again.",
+        on_retry=on_retry,
+        cancel_event=cancel_event,
+    )
+
+    payload = _payload_object(payload, "The Claude API")
+    if payload.get("stop_reason") == "max_tokens":
+        raise BackendError(
+            "Claude stopped because the reply hit the token limit. Try a "
+            "shorter passage, or process the text in sections."
+        )
+
+    content = payload.get("content")
+    if not isinstance(content, list):
+        raise BackendError(
+            "The Claude API response did not contain a content list."
+        )
+    text = "".join(
+        block.get("text", "")
+        for block in content
+        if isinstance(block, dict)
+        and block.get("type") == "text"
+        and isinstance(block.get("text", ""), str)
+    )
+    if not text:
+        raise BackendError("The Claude API returned no text content.")
+    return _extract_json(text)
+
+
+def call_ollama(
+        system_prompt, user_text, cfg, on_retry=None, cancel_event=None):
+    """Run one non-streaming Ollama request through the shared transport."""
+    body = json.dumps({
+        "model": cfg.get("ollama_model", DEFAULT_OLLAMA_MODEL),
+        "stream": False,
+        "format": "json",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_text},
+        ],
+    }).encode("utf-8")
+
+    def request_factory():
+        return urllib.request.Request(
+            OLLAMA_URL,
+            data=body,
+            method="POST",
+            headers={"content-type": "application/json"},
+        )
+
+    # A missing local model is not transient; do not add 404 to this set.
+    payload = _request_json_with_retries(
+        request_factory,
+        timeout=300,
+        label="Ollama",
+        transient_statuses={429, 500, 502, 503, 504},
+        unavailable_hint=(
+            "Is Ollama running at localhost:11434? Start it with "
+            "'ollama serve' and pull a model first."
+        ),
+        on_retry=on_retry,
+        cancel_event=cancel_event,
+    )
+
+    payload = _payload_object(payload, "Ollama")
+    message = payload.get("message")
+    if not isinstance(message, dict):
+        raise BackendError("Ollama returned no message object.")
+    text = message.get("content")
+    if not isinstance(text, str) or not text.strip():
+        raise BackendError("Ollama returned no text content.")
+    return _extract_json(text)
+
+
+def run_backend(
+        system_prompt, user_text, cfg, on_retry=None, cancel_event=None):
+    """Dispatch to the configured backend without guessing its privacy mode."""
+    backend = cfg.get("backend")
+    if backend == "ollama":
+        return call_ollama(
+            system_prompt,
+            user_text,
+            cfg,
+            on_retry=on_retry,
+            cancel_event=cancel_event,
+        )
+    if backend == "anthropic":
+        return call_anthropic(
+            system_prompt,
+            user_text,
+            cfg,
+            on_retry=on_retry,
+            cancel_event=cancel_event,
+        )
+    raise BackendError(
+        f"Unrecognised backend {backend!r}. Open Settings and choose "
+        "Claude or Ollama."
+    )
+```
+
+In Scriptorium.__init__(), initialise request-scoped cancellation beside
+_request_id:
+
+```python
+        self._request_cancel_event = threading.Event()
+```
+
+In process(), immediately before incrementing _request_id, create and retain a
+new event for this worker:
+
+```python
+        self._request_cancel_event.set()
+        cancel_event = threading.Event()
+        self._request_cancel_event = cancel_event
+```
+
+Pass the captured event in worker():
+
+```python
+                result = run_backend(
+                    system_prompt,
+                    masked,
+                    cfg_snapshot,
+                    on_retry=lambda message: self._post_to_ui(
+                        self._on_retry_progress,
+                        request_id,
+                        message,
+                    ),
+                    cancel_event=cancel_event,
+                )
+```
+
+Finally, set the event at the start of _invalidate_inflight():
+
+```python
+    def _invalidate_inflight(self):
+        """Cancel retries, drop callbacks and re-enable the controls."""
+        self._request_cancel_event.set()
+        self._request_id += 1
+        if self.busy:
+            self._set_busy(False)
+```
+
+
+===============================================================================
+4. INSERTION MAP
+===============================================================================
+
+All line numbers refer to C:\Scriptorium\scriptorium.py v2.21 as inspected on
+2 September 2026. They will move after any earlier proposal is implemented;
+method and constant names are the authoritative anchors.
+
+Feature / snippet
+    Exact insertion or replacement context
+
+Explorer replacement confirmation
+    File: C:\Scriptorium\scriptorium.py
+    Class: Scriptorium
+    Replace: _load_file_path(), lines 3721-3753
+    Amend: _handle_dropped_paths(), final call at line 3973
+    Preserve unchanged: native declarations, lines 300-363;
+                        _enable_file_drops() through _disable_file_drops(),
+                        lines 3765-3992, except the one call above
+
+Preset repair diagnostics
+    File: C:\Scriptorium\scriptorium.py
+    Module level: add _record_config_issue() immediately above
+                  normalise_user_presets(), line 650
+    Replace: normalise_user_presets(), lines 650-679
+    Amend: normalise_config(), signature at line 791 and preset assignment at
+           line 837
+    Amend: load_config(), lines 843-869
+    Class: Scriptorium
+    Add: _maybe_warn_config_repairs() beside
+         _maybe_warn_unreadable_config(), line 3125
+    Call: __init__ after _maybe_warn_unreadable_config(), lines 2661-2663
+
+Immediate tone conflict feedback
+    File: C:\Scriptorium\scriptorium.py
+    Module level: add tone_conflict_message() between TONE_CONFLICTS and
+                  validate_tones(), lines 467-484
+    Amend: validate_tones() conflict block, lines 506-509
+    Class: TonePickerDialog
+    Amend: _toggle_tone() immediately after selected_order.append(),
+           lines 2023-2040
+
+Protected-content fidelity audit
+    File: C:\Scriptorium\scriptorium.py
+    Imports: add Counter among standard-library imports, lines 42-59
+    Module level: add _PROTECTED_REVISION_PATTERNS,
+                  _summarise_inventory() and audit_revision_fidelity()
+                  immediately before British letter conventions, line 1871
+    Class: Scriptorium
+    Amend: _on_success() after placeholder restoration and before stale-source
+           handling, lines 3398-3415
+
+Annotated Markdown export
+    File: C:\Scriptorium\scriptorium.py
+    Module level: add build_annotated_markdown_diff() immediately after
+                  build_markdown_diff(), lines 1552-1566
+    Class: DiffExportFormatDialog (new)
+    Add: beside TonePickerDialog/ShortcutsDialog, around lines 2074-2096
+    Class: Scriptorium
+    Amend: export_diff_file(), lines 3566-3597
+
+Reading-time correction
+    File: C:\Scriptorium\scriptorium.py
+    Imports: add math among standard-library imports, lines 42-59
+    Amend: reading_metrics(), minutes calculation at line 1794
+    Class: Scriptorium
+    Amend: _refresh_status(), time label at line 3108
+
+Clipboard contention retry
+    File: C:\Scriptorium\scriptorium.py
+    Module level: add _open_clipboard_with_retries() immediately before
+                  set_html_clipboard(), line 1676
+    Amend: set_html_clipboard(), OpenClipboard branch at lines 1712-1713
+    Preserve unchanged: GlobalAlloc/GlobalFree and ownership flags,
+                        lines 1636-1730
+
+Cancellable and streaming-ready retry transport
+    File: C:\Scriptorium\scriptorium.py
+    Module level: add RequestCancelled beside BackendError, line 1073
+    Replace: _request_json_with_retries() with _read_json_response(),
+             _wait_for_retry(), _request_with_retries() and compatibility
+             wrapper, lines 1198-1265
+    Amend: call_anthropic(), call_ollama() and run_backend(), lines 1268-1375
+    Class: Scriptorium
+    Add state: __init__ beside _request_id, lines 2613-2615
+    Amend: _invalidate_inflight(), lines 3300-3304
+    Amend: process() request ownership and worker call, lines 3355-3396
+
+Suggested verification location if implementation is authorised later
+    Create: C:\Scriptorium\tests\test_enhancement_hardening.py
+    Framework: standard-library unittest only
+    Keep pure tests (preset validation, tone conflicts, fidelity inventories,
+    Markdown building, retry classification) separate from Windows integration
+    checks (real HDROP, clipboard ownership, packaged executable lifecycle).
+
+
+End of notes_021.
