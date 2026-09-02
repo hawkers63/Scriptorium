@@ -6,6 +6,44 @@ Mark saying "lets get started").
 
 ---
 
+## 2026-09-02 (continued) — v2.17: readability metrics + keyboard-shortcut dialog (notes_019, items 1-2)
+
+Mark reviewed notes_019 (the fresh feature review Claude wrote as the
+enhancement-architect role, distinct from notes_016) and approved all five
+proposals: "Please proceed with the development of the five new features."
+Implementing in the risk order the note itself proposed, as separate
+versioned releases per this project's own standing convention rather than
+one grab-bag change.
+
+**v2.17 bundles the two lowest-risk items** (both pure UI, no prompt/model
+surface touched): Flesch-Reading-Ease-derived readability grade + reading
+time in the status bar (only shown at 20+ words, since fewer can't produce
+a meaningful score), and an F1-triggered `ShortcutsDialog` listing the eight
+keyboard bindings `_bind_shortcuts()` already registers but that were
+previously undiscoverable anywhere in the running app. Full task detail and
+acceptance evidence in `ROADMAP.md`'s v2.17 section.
+
+Ships ahead of v2.16 (the still-unstarted rich clipboard diff) in version
+number — v2.17 was simply ready first and carries none of v2.16's raw-Win32
+risk. `ROADMAP.md`'s "Current shipped version" line updated to 2.17,
+v2.18-v2.20+ noted as the remaining approved notes_019 items now in
+progress.
+
+**Verification**: `ast.parse()` clean; `reading_metrics()` checked directly
+against real easy/hard/empty/short text samples; a real `Scriptorium()`
+confirmed the status bar shows no metric below the 20-word floor and shows
+one above it; `_show_shortcuts()` (both called directly and via a real
+`<F1>` `event_generate`) confirmed to open exactly one `ShortcutsDialog`,
+no duplicates on repeat triggers. Real packaged `.exe` rebuilt
+(`FileVersion`/`ProductVersion` `2.17.0.0`), launched for real against the
+live config, alive and `Responding: True`. Real `scriptorium_config.json`
+confirmed byte-identical throughout.
+
+Continuing straight into the remaining three notes_019 items in the same
+session.
+
+---
+
 ## 2026-09-02 (continued) — v2.15.2: real hand-test confirms drag-and-drop; fixed a second, unrelated toolbar bug it also caught
 
 Mark did the one manual check flagged as needing a person: dragging a real

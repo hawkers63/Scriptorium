@@ -36,7 +36,7 @@ Dependencies
     Optional: install python-docx to import from and export to Word (.docx)
     files (`pip install python-docx`). Plain text and Markdown work without it.
 
-Author: built with Mark, August 2026. Version 2.15.
+Author: built with Mark, August 2026. Version 2.17.
 """
 
 import os
@@ -81,7 +81,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.15"
+APP_VERSION = "2.17"
 
 # A small shared palette (notes_017, v2.10) so the two text panes, the diff
 # tags and the notice banner read as one surface instead of drifting
@@ -1437,6 +1437,71 @@ def summarise_diff(original, revised):
     return ", ".join(clauses) if clauses else "no wording changes"
 
 
+def _count_syllables(word):
+    """Approximate syllable count via a vowel-group heuristic.
+
+    No stdlib syllable counter exists, and pulling in a third-party one
+    would break the standard-library-only constraint. A vowel-group
+    heuristic (count transitions into a vowel, with the standard silent-
+    trailing-"e" adjustment) is the conventional dependency-free
+    approximation for the Flesch formula below; it is not exact, but the
+    resulting grade label is advisory, not a precision instrument, and it
+    never affects the prompt or the revision itself.
+    """
+    word = word.lower().strip(".,!?;:'\"()")
+    if not word:
+        return 0
+    vowels = "aeiouy"
+    count = 0
+    previous_was_vowel = False
+    for char in word:
+        is_vowel = char in vowels
+        if is_vowel and not previous_was_vowel:
+            count += 1
+        previous_was_vowel = is_vowel
+    if word.endswith("e") and count > 1:
+        count -= 1
+    return max(count, 1)
+
+
+def reading_metrics(text):
+    """Return (grade_label, minutes) for the given text, or None if too short.
+
+    grade_label is a short Flesch Reading Ease description ("Fairly easy",
+    "Standard", etc.) rather than a bare score, matching this project's
+    existing preference for plain-language status text over raw statistics.
+    A handful of words cannot produce a stable score, so callers should only
+    use this once there is a reasonable amount of text (see the word-count
+    floor at the _refresh_status() call site).
+    """
+    words = text.split()
+    word_count = len(words)
+    if word_count == 0:
+        return None
+    sentence_count = max(text.count(".") + text.count("!") + text.count("?"), 1)
+    syllable_count = sum(_count_syllables(w) for w in words)
+
+    score = (206.835
+             - 1.015 * (word_count / sentence_count)
+             - 84.6 * (syllable_count / word_count))
+
+    if score >= 90:
+        label = "Very easy"
+    elif score >= 70:
+        label = "Fairly easy"
+    elif score >= 60:
+        label = "Standard"
+    elif score >= 50:
+        label = "Fairly difficult"
+    elif score >= 30:
+        label = "Difficult"
+    else:
+        label = "Very difficult"
+
+    minutes = max(round(word_count / 200), 1)
+    return label, minutes
+
+
 # --------------------------------------------------------------------------- #
 #  Placeholder protection
 # --------------------------------------------------------------------------- #
@@ -1712,6 +1777,51 @@ class TonePickerDialog(ctk.CTkToplevel):
             return
         self.on_apply(tones)
         self.destroy()
+
+
+# --------------------------------------------------------------------------- #
+#  Keyboard shortcuts reference
+# --------------------------------------------------------------------------- #
+# Kept as one explicit list rather than introspecting _bind_shortcuts()'s own
+# dict, since the dict's command values (bound methods) don't carry a
+# human-readable description -- this is the trade-off of a second place that
+# must be kept in step with that dict, made explicitly rather than silently.
+
+SHORTCUTS = [
+    ("Ctrl+Enter", "Process"),
+    ("Ctrl+I", "Import…"),
+    ("Ctrl+S", "Export…"),
+    ("Ctrl+Shift+A", "Accept"),
+    ("Esc", "Reject"),
+    ("Ctrl+Shift+C", "Copy revision"),
+    ("Ctrl+Shift+M", "Copy summary"),
+    ("Ctrl+Z", "Undo"),
+    ("F1", "Show this list"),
+]
+
+
+class ShortcutsDialog(ctk.CTkToplevel):
+    """Read-only reference for every keyboard shortcut Scriptorium binds."""
+
+    def __init__(self, master):
+        super().__init__(master)
+        self.title("Keyboard shortcuts")
+        self.geometry("340x360")
+        self.resizable(False, False)
+        bind_dialog_chrome(self, on_close=self.destroy)
+        position_over_parent(self, master, 340, 360)
+
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=16, pady=16)
+        for keys, action in SHORTCUTS:
+            row = ctk.CTkFrame(body, fg_color="transparent")
+            row.pack(fill="x", pady=4)
+            ctk.CTkLabel(row, text=keys, font=ctk.CTkFont(weight="bold"),
+                         width=130, anchor="w").pack(side="left")
+            ctk.CTkLabel(row, text=action, anchor="w").pack(side="left")
+
+        ctk.CTkButton(self, text="Close", width=90,
+                      command=self.destroy).pack(pady=(0, 16))
 
 
 # --------------------------------------------------------------------------- #
@@ -2137,9 +2247,13 @@ class Scriptorium(ctk.CTk):
             "<Control-Shift-C>": self.copy_revision,
             "<Control-Shift-M>": self.copy_change_summary,
             "<Control-z>": self.undo,
+            "<F1>": self._show_shortcuts,
         }
         for sequence, action in bindings.items():
             self.bind(sequence, lambda _event, command=action: command())
+
+    def _show_shortcuts(self):
+        ShortcutsDialog(self)
 
     def _build_toolbar(self):
         bar = ctk.CTkFrame(self, corner_radius=0)
@@ -2522,6 +2636,14 @@ class Scriptorium(ctk.CTk):
         words = len(original.split()) if original.strip() else 0
         msg = (f"Backend: {where}  —  {privacy}   |   "
                f"{words} words, {chars} characters")
+        # A handful of words cannot produce a stable Flesch score, hence the
+        # floor -- below it the label would look precise but be meaningless.
+        if words >= 20:
+            metrics = reading_metrics(original)
+            if metrics:
+                label, minutes = metrics
+                time_text = "under a minute" if minutes <= 1 else f"~{minutes} min read"
+                msg += f"   |   {label} · {time_text}"
         if self.last_result:
             revised = self.last_result["revised"]
             r_words = len(revised.split()) if revised.strip() else 0

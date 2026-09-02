@@ -4,11 +4,15 @@
 When Mark says "lets get started", that is the cue to open these three files
 before doing anything else.
 
-Current shipped version: **2.15** (v2.9 bug-fix pass, v2.10 visual/UX
+Current shipped version: **2.17** (v2.9 bug-fix pass, v2.10 visual/UX
 polish, v2.11 three-tone picker, v2.12 persisted user presets, v2.13 backend
-retry transport, v2.14 hand-testing fixes, v2.15 Explorer drag-and-drop — see
-those sections below). v2.16 (notes_016's remaining raw-Win32 item, the rich
-`CF_HTML` clipboard diff) is scoped but not yet implemented.
+retry transport, v2.14 hand-testing fixes, v2.15 Explorer drag-and-drop,
+v2.17 readability metrics + shortcuts reference — see those sections below).
+v2.16 (notes_016's remaining raw-Win32 item, the rich `CF_HTML` clipboard
+diff) is scoped but not yet implemented, shipped out of numeric order behind
+v2.17. v2.18-v2.20+ (notes_019's remaining feature proposals — a house-style
+avoid-list, a headless batch/CLI mode, an in-session revision history) are
+approved and in progress.
 
 Scope through v2.3 was drawn from twelve accumulated review notes
 (`notes/01_Active/notes_001.txt` – `notes_012.txt`), written independently by
@@ -1486,6 +1490,56 @@ offsets), so carries meaningful platform risk of its own even though it
 doesn't touch the same `WNDPROC`-subclassing surface as v2.15.
 
 No acceptance checklist yet — not started.
+
+---
+
+## v2.17 — Readability metrics + keyboard-shortcut reference ✅ shipped 2026-09-02
+
+**Goal:** the first two of five proposals from notes_019 (a fresh feature
+review, distinct from notes_016 — see that note for the other three and the
+reasoning behind each). Bundled together since both are the lowest-risk
+tier notes_019 identified: pure UI additions, no prompt/model surface
+touched, so [[mark_meaning_preservation_priority]] doesn't apply to either.
+Ships ahead of v2.16 in version order — v2.16 (the rich clipboard diff) is
+still scoped but not started; this pair was simply ready first and carries
+none of its platform risk.
+
+1. **Readability and reading-time metrics** (notes_019 §2.1) — `_count_syllables()`/
+   `reading_metrics()` (module level, near `summarise_diff()`) compute a
+   Flesch Reading Ease grade label and a 200wpm reading-time estimate from
+   the Original text already in memory; no new dependency (a vowel-group
+   syllable heuristic stands in for the syllable counter the standard
+   library doesn't have). Wired into `_refresh_status()`, appended to the
+   existing word/character count line, only once Original has at least 20
+   words — below that a score is not meaningful and would look precise
+   without being so.
+2. **Keyboard-shortcut reference dialog** (notes_019 §2.2) — `ShortcutsDialog`,
+   following the existing `TonePickerDialog`/`SettingsDialog` pattern
+   (`bind_dialog_chrome()`/`position_over_parent()`), lists the eight
+   bindings `_bind_shortcuts()` already registers (Ctrl+Enter, Ctrl+I,
+   Ctrl+S, Ctrl+Shift+A, Esc, Ctrl+Shift+C, Ctrl+Shift+M, Ctrl+Z) plus
+   itself (F1). None of these were discoverable anywhere in the running
+   app before this.
+
+### Acceptance checklist
+- [x] `reading_metrics()` returns a plausibly-different label for an easy
+      vs. a deliberately dense/polysyllabic real sample, `None` for empty
+      text, and does not raise on a two-word input. Verified directly
+      against the real function.
+- [x] The status bar shows no readability/reading-time text below 20 words,
+      and shows it (`"<label> · <time>"`) at or above that floor. Verified
+      against a real `Scriptorium()`/`original_box`/`_refresh_status()`
+      cycle at both word counts.
+- [x] `_show_shortcuts()` (called directly and via a real `<F1>`
+      `event_generate`) opens exactly one `ShortcutsDialog` titled "Keyboard
+      shortcuts"; closing it and re-triggering opens exactly one again (no
+      duplicate/leaked toplevels). Verified against the real widget tree.
+- [x] `ast.parse()` clean; a full construct/destroy cycle against a real
+      `Scriptorium()` completes with no exception. Real packaged `.exe`
+      rebuilt (`FileVersion`/`ProductVersion` `2.17.0.0`), launched for real
+      against the live config, alive and `Responding: True`. Real
+      `scriptorium_config.json` confirmed byte-identical throughout — every
+      test used an isolated temp config.
 
 ---
 
