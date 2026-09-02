@@ -56,6 +56,7 @@ import urllib.request
 import urllib.error
 import http.client
 import time
+from collections import Counter
 from datetime import timezone
 from email.utils import parsedate_to_datetime
 
@@ -84,7 +85,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.23"
+APP_VERSION = "2.24"
 
 # A small shared palette (notes_017, v2.10) so the two text panes, the diff
 # tags and the notice banner read as one surface instead of drifting
@@ -2007,6 +2008,83 @@ def restore_placeholders(text, mapping):
 
 
 # --------------------------------------------------------------------------- #
+#  Protected-content fidelity audit (advisory only, notes_021 §2.3/3.3)
+# --------------------------------------------------------------------------- #
+# The system prompt already tells the model not to alter numbers, URLs,
+# quoted material, paths etc. -- but a prompt instruction cannot guarantee
+# that. This is a deterministic, local, non-destructive second check: it
+# compares exact multisets of high-risk tokens before/after and flags a
+# changed inventory as a concrete attention cue. It never rewrites the
+# revision, never blocks Accept, and can produce false positives (a number
+# can legitimately move, or a plain regex can mismatch); the diff pane
+# remains the actual review surface, same as every other warning shown
+# through _show_ambiguities().
+
+_PROTECTED_REVISION_PATTERNS = {
+    "number, amount or percentage": re.compile(
+        r"(?<!\w)(?:£|€|\$)?\s?\d+(?:[,.]\d+)*(?:\s?(?:%|per cent))?(?!\w)",
+        re.IGNORECASE),
+    "URL": re.compile(
+        r"\b(?:https?://|www\.)[^\s<>()\[\]{}\"']*[^\s<>()\[\]{}\"'.,;:!?]",
+        re.IGNORECASE),
+    "email address": re.compile(
+        r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE),
+    # Stops at whitespace, not just \r\n -- the more permissive form (any
+    # non-illegal-filename character) greedily swallowed everything up to
+    # the next excluded character across an entire sentence when two path
+    # mentions shared a line, found while testing the "reordered but
+    # unchanged" case this audit is specifically meant not to flag. The
+    # split final-character class (mirroring the URL pattern above) trims
+    # a trailing sentence-ending '.', ',' etc. without excluding internal
+    # periods, so "C:\Data\out.txt." at a sentence's end still matches just
+    # the path, not the full stop after it.
+    "Windows path": re.compile(
+        r"(?:\b[A-Z]:\\|\\\\)[^\s<>:\"|?*]*[^\s<>:\"|?*.,;:!?]",
+        re.IGNORECASE),
+    "quoted passage": re.compile(
+        r'(?:"[^"\n]+"|“[^”\n]+”|'
+        r"(?<!\w)'[^'\n]{2,}'(?!\w)|‘[^’\n]+’)"),
+}
+
+
+def _summarise_inventory(counter, limit=3):
+    """Return a short, deterministic display of a Counter's contents."""
+    values = list(counter.elements())
+    shown = ", ".join(repr(value) for value in values[:limit])
+    if len(values) > limit:
+        shown += f", plus {len(values) - limit} more"
+    return shown
+
+
+def audit_revision_fidelity(original, revised):
+    """Return advisory warnings for a changed protected-content inventory.
+
+    Deliberately conservative: compares exact multisets (Counter, so a
+    duplicate figure in Original needs the same duplicate in Revised) per
+    category, and only warns when something genuinely disappeared or
+    appeared -- reordering within a category is not flagged. Directs human
+    attention; does not claim to prove meaning preservation.
+    """
+    warnings = []
+    for label, pattern in _PROTECTED_REVISION_PATTERNS.items():
+        before = Counter(pattern.findall(original))
+        after = Counter(pattern.findall(revised))
+        missing = before - after
+        introduced = after - before
+        if not missing and not introduced:
+            continue
+        changes = []
+        if missing:
+            changes.append(f"missing {_summarise_inventory(missing)}")
+        if introduced:
+            changes.append(f"introduced {_summarise_inventory(introduced)}")
+        warnings.append(
+            f"Protected {label} content changed ({'; '.join(changes)}). "
+            "Check this change against the original before accepting it.")
+    return warnings
+
+
+# --------------------------------------------------------------------------- #
 #  British letter conventions (advisory only)
 # --------------------------------------------------------------------------- #
 # A light, non-destructive check. If a letter opens with an impersonal or a
@@ -3641,6 +3719,13 @@ class Scriptorium(ctk.CTk):
         if ph_map:
             result["revised"], warnings = restore_placeholders(
                 result["revised"], ph_map)
+
+        # Deterministic, advisory-only check for a changed protected-content
+        # inventory (numbers, URLs, emails, paths, quotes) -- audits the
+        # fully restored text the user actually sees, not the masked model
+        # response, so a warning always refers to real placeholder values.
+        warnings.extend(
+            audit_revision_fidelity(original, result["revised"]))
 
         # If the source changed while we were working, this revision is for the
         # OLDER text — say so rather than pretend it matches what is on screen.

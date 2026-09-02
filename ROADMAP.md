@@ -4,20 +4,21 @@
 When Mark says "lets get started", that is the cue to open these three files
 before doing anything else.
 
-Current shipped version: **2.23** (v2.9 bug-fix pass, v2.10 visual/UX
+Current shipped version: **2.24** (v2.9 bug-fix pass, v2.10 visual/UX
 polish, v2.11 three-tone picker, v2.12 persisted user presets, v2.13 backend
 retry transport, v2.14 hand-testing fixes, v2.15 Explorer drag-and-drop,
 v2.17 readability metrics + shortcuts reference, v2.18 house-style
 avoid-list, v2.19 headless batch/CLI mode, v2.20 in-session revision
 history, v2.16 rich `CF_HTML` clipboard diff (shipped as build `2.21`),
 v2.22 tray/start-up lifecycle gating, v2.23 drop-safety/preset-repair/
-export/reading-time/clipboard polish — see those sections below). All five
-notes_019 proposals and notes_016's full original proposal set shipped by
-build 2.21, clearing the backlog for the first time since notes_001 opened
-it; v2.22 closed a fresh hand-testing defect (notes_020) found immediately
-after. notes_021's second-generation hardening pass is under way (v2.23
-above; the fidelity audit and cancellable retry transport remain — see
-v2.23's "notes_021 delivery plan" note).
+export/reading-time/clipboard polish, v2.24 protected-content fidelity
+audit — see those sections below). All five notes_019 proposals and
+notes_016's full original proposal set shipped by build 2.21, clearing the
+backlog for the first time since notes_001 opened it; v2.22 closed a fresh
+hand-testing defect (notes_020) found immediately after. notes_021's
+second-generation hardening pass is under way (v2.23/v2.24 above;
+cancellable retry transport remains — see v2.23's "notes_021 delivery
+plan" note).
 
 Scope through v2.3 was drawn from twelve accumulated review notes
 (`notes/01_Active/notes_001.txt` – `notes_012.txt`), written independently by
@@ -2054,6 +2055,90 @@ until those product decisions are actually made.
 
 ---
 
+## v2.24 — Protected-content fidelity audit ✅ shipped 2026-09-03
+
+**Goal:** notes_021 §2.3B/3.3 — the fidelity-audit half of the note's
+tone-conflict-and-audit proposal (the conflict-feedback half already
+shipped in v2.23). A deterministic, local, advisory-only check: the system
+prompt already tells the model never to alter numbers, URLs, quoted
+material, paths etc., but a prompt instruction cannot *guarantee* that —
+this is a second, independent check that doesn't rely on the model
+following instructions correctly. **Subject to
+[[mark_meaning_preservation_priority]]** in spirit (it exists specifically
+to catch the failure mode that priority is about), though unlike v2.4/
+v2.11/v2.18 it adds no prompt text of its own — it audits the completed
+revision after the fact rather than trying to prevent the problem via
+wording.
+
+1. **`audit_revision_fidelity(original, revised)`** compares exact
+   multisets (`Counter`, so a duplicate figure needs a matching duplicate)
+   of five categories — numbers/amounts/percentages, URLs, email addresses,
+   Windows paths, quoted passages — before and after. A genuinely missing
+   or newly-introduced item in a category produces one warning naming it;
+   reordering within a category is never flagged.
+2. **Wired into `_on_success()`** immediately after placeholder restoration
+   and before the stale-source check, auditing the fully restored text the
+   user actually sees and exports (not the masked model response) — so a
+   warning always names a real value, never a `⟦PH0⟧`-style sentinel.
+   Warnings feed the existing `_show_ambiguities()` banner alongside the
+   model's own ambiguity list and the British-letter-conventions check —
+   never a blocking dialog, never a rewrite, never disables Accept.
+3. **Deliberately conservative regex boundaries** — a URL/path/quote match
+   trims trailing sentence punctuation (`.`, `,` etc.) rather than
+   swallowing it, mirroring the existing URL pattern's own approach, so "at
+   the end of a sentence." doesn't get misread as part of the value.
+
+### Acceptance checklist
+- [x] Fourteen deterministic cases (clean paragraph; unchanged vs. changed
+      number/currency/percentage; a duplicated figure dropped to one
+      occurrence; date-shaped numeric tokens unchanged; a URL/path/quote
+      unchanged despite trailing sentence punctuation; URL, email, path and
+      quote each genuinely changed; two Windows-path mentions and a
+      multi-category inventory both unchanged but reordered) all produce
+      exactly the expected warning set, no more and no less. Verified
+      against the real `audit_revision_fidelity()`.
+- [x] A real `_on_success()` call with a genuinely changed protected number
+      surfaces the exact expected warning text in the live ambiguity
+      banner; a clean revision with no protected-content change shows no
+      such warning. Verified against a real `Scriptorium()`.
+- [x] `ast.parse()` clean; quick regression pass and a real `Scriptorium()`
+      construct/destroy cycle both still pass. Packaged `.exe` rebuilt
+      (`FileVersion`/`ProductVersion` `2.24.0.0`), launched for real, alive
+      and `Responding: True`. Real `scriptorium_config.json` confirmed
+      untouched throughout.
+
+**One real regex bug found and fixed while writing the deterministic test
+cases above, not shipped as originally drafted from the note's own
+snippet**: the Windows-path pattern's body character class
+(`[^\r\n<>:\"|?*]+`) is permissive enough to include plain spaces, so two
+path mentions on the same line — exactly the "reordered but unchanged"
+scenario this audit must not flag — matched as one run spanning from the
+first path clear through the connecting prose to the second path,
+producing a spurious warning. Fixed by (a) also excluding whitespace from
+the body class, and (b) splitting the pattern into a permissive body plus a
+stricter final-character class that excludes trailing sentence punctuation
+— the same shape the URL pattern already used, applied here for the same
+reason once the first fix's whitespace exclusion made a genuinely
+punctuation-adjacent path visible as a separate case. Re-ran the full
+deterministic suite clean afterwards; recorded here since it's exactly the
+kind of "looks correct against the note's own listed cases but fails one
+of them for real" finding this project's methodology exists to catch.
+
+**Not done this session, noted rather than silently skipped**: no live
+Claude/Ollama round-trip was run against this specific feature. Unlike
+v2.4/v2.11/v2.18's tone/prompt calibration, `audit_revision_fidelity()` is
+a pure post-hoc function with no model involvement in its own logic, and
+its integration into `_on_success()` was verified directly with a
+synthetic `result` dict shaped exactly like a real backend response —
+judged sufficient given the fourteen-case deterministic suite already
+covers every scenario notes_021's own verification gate lists. A future
+session running a real corpus through both backends (as the note's
+"Calibration and verification gate" section suggests) would still be
+worthwhile for tuning false-positive *rates* in practice, not for
+correctness.
+
+---
+
 ## Deferred / explicitly out of scope for v2.1–v2.13
 
 - Migrating the API key to Windows Credential Manager (`keyring`) — real
@@ -2125,7 +2210,7 @@ until those product decisions are actually made.
 | notes_017 | 1 Sep | Lynne | v2.8 (delta) | Closed by v2.10 (typography/contrast, notice banner, busy motion, dialog chrome, backend labels; toolbar-wrap and character-level diffs deliberately not carried in, see v2.10 write-up) |
 | notes_018 | 1 Sep | Zoe | v2.8 (delta) | Closed by v2.9 (Bugs 1–2/S2, 3–7, S1); S3 deliberately not fixed (informational only, see v2.9 write-up) |
 | notes_020 | 2 Sep | Mark | v2.22 (hand-test diagnosis) | Closed by v2.22 |
-| notes_021 | 2 Sep | Codex | v2.21+ (hardening) | Confirmed all five originally-requested areas already shipped by build 2.21; §2.1/2.2/2.3(partial)/2.4 closed by v2.23; §2.3's fidelity audit and §2.5's cancellable retry transport not yet implemented (see v2.23's "notes_021 delivery plan"); §2.5's streaming groundwork explicitly deferred pending two open product decisions |
+| notes_021 | 2 Sep | Codex | v2.21+ (hardening) | Confirmed all five originally-requested areas already shipped by build 2.21; §2.1/2.2/2.3 closed by v2.23 (conflict feedback) + v2.24 (fidelity audit); §2.4 closed by v2.23; §2.5's cancellable retry transport not yet implemented (see v2.23's "notes_021 delivery plan"); §2.5's streaming groundwork explicitly deferred pending two open product decisions |
 
 `scriptorium_notes_001.txt`, a near-duplicate of notes_014 written under
 `AGENTS.md`'s (now-abandoned) `scriptorium_notes_[N].txt` draft-path
