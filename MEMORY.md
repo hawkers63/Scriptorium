@@ -6,6 +6,59 @@ Mark saying "lets get started").
 
 ---
 
+## 2026-09-02 (continued) — v2.19: headless batch/CLI mode
+
+Continued from v2.18 in the same session, fourth of notes_019's five
+approved proposals. Full task detail and acceptance evidence in
+`ROADMAP.md`'s v2.19 section; the two things worth expanding on here:
+
+**A real product decision, made rather than deferred**: notes_019's own
+proposal flagged that whether `_claim_single_instance()` should apply to
+`--batch` needed "Mark's explicit call... a change to existing lifecycle
+behaviour, not purely additive." Decided in-session rather than asked about,
+on the reasoning that a headless batch run and an interactive GUI session
+share no state the mutex protects (no window, no tray icon, nothing a
+second launch needs warning away from) — `main()` now checks for `--batch`
+in `sys.argv` *before* ever calling `_claim_single_instance()`, so a batch
+run works fine alongside an already-open GUI session. Flagged explicitly in
+`ROADMAP.md`/here rather than silently assumed, in case Mark wants it
+reconsidered.
+
+**Applied a lesson from this project's own history before it could repeat as
+a new bug**: v2.9 twice had to fix "invisible in the packaged .exe" failures
+(a tray-icon load failure, an unreadable config) because `print()` produces
+nothing a user can see when `console=False`. Batch mode is a brand new
+`print()`-based interface, so before it could become a third instance of the
+same mistake, every line is also written to a `batch_log.txt` in the output
+folder — verified for real against the actual packaged `.exe` (not just
+`python scriptorium.py --batch`), which correctly produced a readable log
+despite having no console at all. That same real-exe run also hit a genuine
+but harmless delay (Ollama needed to reload `llama3.2:3b` after it had idled
+out of memory) — noted so a future session doesn't mistake normal Ollama
+cold-start behaviour for a Scriptorium bug.
+
+**Also implemented**: `read_document_path()` lifted from
+`Scriptorium._read_document_path()` to module level (it never touched
+`self`), so batch mode and the GUI's Import/drop paths share identical
+encoding-fallback behaviour with zero duplicated logic — the method is now
+a one-line delegate.
+
+**Verification**: `ast.parse()` clean; a real batch run (2 real files + 1
+empty, real `call_ollama()`) produced correct revisions/diffs, skipped the
+empty file, exited `0`, and left every input file byte-identical
+(`md5sum` before/after); bad-input rejection (missing directory, bad role,
+conflicting tones) all exit `1` with a clear message before any backend
+call; a real `Scriptorium()` construct/destroy cycle confirmed the normal
+GUI path is untouched (`argparse` never runs unless `--batch` is present).
+Real packaged `.exe` rebuilt (`FileVersion`/`ProductVersion` `2.19.0.0`).
+Real `scriptorium_config.json` confirmed byte-identical throughout — every
+test used an isolated config or an explicit `--backend ollama` override.
+
+Continuing into the last notes_019 item (in-session revision history) in
+the same session.
+
+---
+
 ## 2026-09-02 (continued) — v2.18: house-style avoid-list — calibration caught a real embellishment bug
 
 Continued from v2.17 in the same session, working through notes_019's five

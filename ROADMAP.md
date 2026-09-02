@@ -4,15 +4,15 @@
 When Mark says "lets get started", that is the cue to open these three files
 before doing anything else.
 
-Current shipped version: **2.18** (v2.9 bug-fix pass, v2.10 visual/UX
+Current shipped version: **2.19** (v2.9 bug-fix pass, v2.10 visual/UX
 polish, v2.11 three-tone picker, v2.12 persisted user presets, v2.13 backend
 retry transport, v2.14 hand-testing fixes, v2.15 Explorer drag-and-drop,
 v2.17 readability metrics + shortcuts reference, v2.18 house-style
-avoid-list — see those sections below). v2.16 (notes_016's remaining
-raw-Win32 item, the rich `CF_HTML` clipboard diff) is scoped but not yet
-implemented, shipped out of numeric order behind v2.17/v2.18. v2.19-v2.20+
-(notes_019's remaining feature proposals — a headless batch/CLI mode, an
-in-session revision history) are approved and in progress.
+avoid-list, v2.19 headless batch/CLI mode — see those sections below). v2.16
+(notes_016's remaining raw-Win32 item, the rich `CF_HTML` clipboard diff) is
+scoped but not yet implemented, shipped out of numeric order behind
+v2.17-v2.19. v2.20+ (notes_019's last feature proposal, an in-session
+revision history) is approved and in progress.
 
 Scope through v2.3 was drawn from twelve accumulated review notes
 (`notes/01_Active/notes_001.txt` – `notes_012.txt`), written independently by
@@ -1622,6 +1622,82 @@ self-aware behaviour this feature depends on.
       `scriptorium_config.json` confirmed byte-identical throughout — every
       test (including calibration) used an isolated temp config; Ollama
       calls never touch `CONFIG_PATH`.
+
+---
+
+## v2.19 — Headless batch/CLI mode ✅ shipped 2026-09-02
+
+**Goal:** notes_019 §2.4 — point Scriptorium at a folder of documents and a
+Mode/Strength/Role/Tone combination, get suggested revisions and diffs back
+for each, no GUI. Aimed at a different use case than the interactive app:
+someone with many documents wanting one combination applied to all of them.
+
+1. **Shared loader lifted to module level** — `read_document_path()` (near
+   `write_docx()`) is the exact logic `Scriptorium._read_document_path()`
+   already had, moved out since it never touched `self`; the method is now
+   a one-line delegate so the GUI's Import/drop paths and batch mode share
+   identical encoding fallback behaviour.
+2. **`_run_batch_mode()`** (before `main()`) — `argparse`-driven:
+   `--batch INPUT_DIR --out OUTPUT_DIR [--mode] [--strength] [--role]
+   [--tones a,b] [--backend]`. Loads the existing config via `load_config()`
+   for anything not overridden on the command line (API key, models,
+   `house_style_avoid` all apply exactly as in the GUI); an invalid
+   role/tone combination is rejected the same way the GUI rejects one
+   (`validate_tones()`, the same `ROLES` check), never silently clamped.
+   Synchronous, no worker thread or Tk — there is no window to keep
+   responsive. For each supported file (`.txt`/`.md`/`.docx`, alphabetical):
+   masks placeholders exactly as `process()` does, calls the same
+   `build_system_prompt()`/`run_backend()`, restores placeholders, then
+   writes `<name>.revised.<ext>` and `<name>.diff.txt` (from
+   `summarise_diff()` plus any ambiguities/note) into `OUTPUT_DIR` — **never
+   overwrites the input**, and never "accepts" anything automatically; the
+   two-file output is this mode's equivalent of the GUI's Original/
+   Suggested-revision split, so reviewing before acting on it is still the
+   only path, just via two files instead of an Accept button. One bad file
+   is logged and skipped, not fatal to the rest of the run. A
+   `batch_log.txt` is written into `OUTPUT_DIR` alongside `print()`,
+   specifically because `print()` is invisible in the packaged `.exe`
+   (`console=False`) — the same lesson v2.9's tray-icon-failure fix and
+   v2.9's unreadable-config surfacing already learned, applied here before
+   it could repeat as a fresh "silent failure" bug in a new feature.
+3. **Single-instance mutex deliberately skipped for `--batch`** — checked in
+   `main()` before `_claim_single_instance()` is ever called. Product
+   decision, made rather than deferred: a headless batch run and an
+   interactive GUI session share no state a mutex is meant to protect (no
+   window, no tray icon, nothing a second launch needs warning away from),
+   so treating them as "the same instance" would only block a batch run
+   from working alongside an already-open GUI session for no real benefit.
+
+### Acceptance checklist
+- [x] A real batch run (2 files + 1 deliberately empty file, real
+      `call_ollama()`) correctly skips the empty file, produces
+      `<name>.revised.<ext>`/`<name>.diff.txt` for the other two with
+      accurate content and diff summaries, writes a complete
+      `batch_log.txt`, exits `0`, and leaves every input file
+      byte-identical (`md5sum` before/after). Verified for real, not
+      mocked.
+- [x] Bad inputs are rejected with a clear message and exit code `1`
+      *before* any backend call: a non-existent input directory, an
+      unrecognised `--role`, and a genuinely conflicting `--tones` pair
+      (the same `validate_tones()` rejection the GUI shows). Verified
+      directly against `_run_batch_mode()`.
+- [x] `--batch` works identically from source (`python scriptorium.py
+      --batch ...`) and the packaged, console-less `.exe` — the real
+      packaged build was run against a real file and produced correct
+      output and a readable `batch_log.txt` despite `console=False`
+      making `print()` alone invisible. (The one real-world hitch hit
+      during this check — Ollama taking noticeably longer than usual
+      because the model had been idled out of memory and needed
+      reloading — is normal Ollama behaviour, not a Scriptorium bug.)
+- [x] A normal GUI launch (no `--batch` in `sys.argv`) is provably
+      unaffected: `argparse` is never invoked unless `--batch` is present,
+      confirmed by a real `Scriptorium()` construct/destroy cycle after
+      this change, identical to every prior such check this session.
+- [x] `ast.parse()` clean. Real packaged `.exe` rebuilt (`FileVersion`/
+      `ProductVersion` `2.19.0.0`). Real `scriptorium_config.json`
+      confirmed byte-identical throughout — every test used an isolated
+      temp config or explicit `--backend ollama` override, never the real
+      config's own `anthropic` default.
 
 ---
 

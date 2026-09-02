@@ -36,7 +36,7 @@ Dependencies
     Optional: install python-docx to import from and export to Word (.docx)
     files (`pip install python-docx`). Plain text and Markdown work without it.
 
-Author: built with Mark, August 2026. Version 2.18.
+Author: built with Mark, August 2026. Version 2.19.
 """
 
 import os
@@ -44,6 +44,7 @@ import sys
 import re
 import json
 import secrets
+import argparse
 import threading
 import difflib
 import winreg
@@ -81,7 +82,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.18"
+APP_VERSION = "2.19"
 
 # A small shared palette (notes_017, v2.10) so the two text panes, the diff
 # tags and the notice banner read as one surface instead of drifting
@@ -1430,6 +1431,31 @@ def write_docx(path, text):
     for line in text.split("\n"):
         document.add_paragraph(line)
     document.save(path)
+
+
+def read_document_path(path):
+    """Return a supported document's text. Raises on any failure.
+
+    Module-level (not a Scriptorium method, despite Scriptorium._read_document_path
+    delegating to it) specifically so batch/CLI mode (--batch, see main())
+    can reuse the exact same encoding fallback the GUI's Import dialog and
+    Explorer drop both already go through, without needing a live
+    Scriptorium instance. Extension-agnostic by design -- the GUI's own
+    Import dialog offers an "All files" filter and has always accepted
+    whatever the user picks (as text, unless it's .docx); batch mode's own
+    directory scan applies its own narrower filter before ever calling this.
+    """
+    if path.lower().endswith(".docx"):
+        return read_docx(path)
+    try:
+        # utf-8-sig handles both a BOM-prefixed and a plain UTF-8 file,
+        # stripping the BOM either way instead of leaving a stray ﻿ in
+        # the text sent to the backend.
+        with open(path, "r", encoding="utf-8-sig") as fh:
+            return fh.read()
+    except UnicodeDecodeError:
+        with open(path, "r", encoding="cp1252") as fh:
+            return fh.read()
 
 
 # --------------------------------------------------------------------------- #
@@ -3307,26 +3333,12 @@ class Scriptorium(ctk.CTk):
     def _read_document_path(self, path):
         """Return a supported document's text. Raises on any failure.
 
-        Extension-agnostic by design -- import_file()'s own dialog already
-        offers an "All files" filter and has always accepted whatever the
-        user picks (as text, unless it's .docx), so this preserves that
-        exact existing behaviour. Drops are gated separately in
-        _handle_dropped_paths(), which is narrower on purpose: a drop is a
-        much lower-friction action than deliberately choosing a file in a
-        dialog, so it only accepts the three document types Scriptorium
-        actually knows how to read.
+        Thin delegate to the module-level read_document_path() (v2.19),
+        which batch/CLI mode also calls directly without needing a live
+        Scriptorium instance. Kept as a method too since every existing
+        caller here (_load_file_path()) already calls it as one.
         """
-        if path.lower().endswith(".docx"):
-            return read_docx(path)
-        try:
-            # utf-8-sig handles both a BOM-prefixed and a plain UTF-8 file,
-            # stripping the BOM either way instead of leaving a stray ﻿ in
-            # the text sent to the backend.
-            with open(path, "r", encoding="utf-8-sig") as fh:
-                return fh.read()
-        except UnicodeDecodeError:
-            with open(path, "r", encoding="cp1252") as fh:
-                return fh.read()
+        return read_document_path(path)
 
     def _load_file_path(self, path):
         """Load one path into Original through the normal undo/state boundary.
@@ -3809,7 +3821,168 @@ class Scriptorium(ctk.CTk):
         self._post_to_ui(self._quit_app)
 
 
+BATCH_SUFFIXES = (".txt", ".md", ".docx")
+
+
+def _run_batch_mode(argv):
+    """Process every supported document in a folder, headlessly, no GUI.
+
+    notes_019 §2.4. Deliberately synchronous (no worker thread, no Tk) --
+    there is no window to keep responsive, and a batch run's own console
+    output (or, lacking one, batch_log.txt -- print() is invisible in the
+    packaged .exe, the same lesson v2.9's tray-icon fix already learned)
+    is the only feedback loop that matters here.
+
+    Never overwrites an input file, and never silently "accepts" a
+    revision: each input produces a <name>.revised.<ext> and a
+    <name>.diff.txt side by side, which is this mode's equivalent of the
+    GUI's Original/Suggested-revision split -- review still happens, just
+    by reading two files instead of clicking Accept.
+
+    Returns a process exit code (0 all succeeded, 1 at least one failed).
+    """
+    parser = argparse.ArgumentParser(
+        prog="scriptorium.py --batch",
+        description="Process every .txt/.md/.docx file in a folder without "
+                    "opening the GUI.")
+    parser.add_argument("--batch", metavar="INPUT_DIR", required=True,
+                        help="Folder of documents to process.")
+    parser.add_argument("--out", metavar="OUTPUT_DIR", required=True,
+                        help="Folder to write <name>.revised.<ext> and "
+                             "<name>.diff.txt into. Created if missing.")
+    parser.add_argument("--mode", choices=MODES)
+    parser.add_argument("--strength", choices=STRENGTHS)
+    parser.add_argument("--role", default=None)
+    parser.add_argument("--tones", default=None,
+                        help="Comma-separated, e.g. Concise,Detailed.")
+    parser.add_argument("--backend", choices=("anthropic", "ollama"))
+    args = parser.parse_args(argv)
+
+    cfg = load_config()
+    if args.mode:
+        cfg["default_mode"] = args.mode
+    if args.strength:
+        cfg["default_strength"] = args.strength
+    if args.role:
+        if args.role != "(none)" and args.role not in ROLES:
+            print(f"error: unrecognised role {args.role!r}", file=sys.stderr)
+            return 1
+        cfg["default_role"] = args.role
+    if args.backend:
+        cfg["backend"] = args.backend
+    tones = [t.strip() for t in args.tones.split(",")] if args.tones else \
+        cfg.get("default_tones", [])
+    try:
+        tones = validate_tones(tones)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    input_dir = args.batch
+    if not os.path.isdir(input_dir):
+        print(f"error: not a directory: {input_dir}", file=sys.stderr)
+        return 1
+    os.makedirs(args.out, exist_ok=True)
+    log_path = os.path.join(args.out, "batch_log.txt")
+
+    inputs = sorted(
+        entry for entry in os.listdir(input_dir)
+        if entry.lower().endswith(BATCH_SUFFIXES)
+        and os.path.isfile(os.path.join(input_dir, entry)))
+    if not inputs:
+        print(f"No .txt/.md/.docx files found in {input_dir}")
+        return 0
+
+    had_failure = False
+    with open(log_path, "w", encoding="utf-8") as log:
+        def emit(line):
+            print(line)
+            log.write(line + "\n")
+            log.flush()
+
+        emit(f"Scriptorium {APP_VERSION} batch run: {len(inputs)} file(s) "
+             f"from {input_dir} -> {args.out}")
+        emit(f"mode={cfg['default_mode']} strength={cfg['default_strength']} "
+             f"role={cfg.get('default_role', '(none)')} tones={tones or 'none'} "
+             f"backend={cfg.get('backend')}")
+
+        for name in inputs:
+            src_path = os.path.join(input_dir, name)
+            stem, suffix = os.path.splitext(name)
+            try:
+                original = read_document_path(src_path)
+            except Exception as exc:  # noqa: BLE001 -- report and continue
+                emit(f"[FAIL] {name}: could not read ({exc})")
+                had_failure = True
+                continue
+
+            if not original.strip():
+                emit(f"[SKIP] {name}: empty")
+                continue
+
+            if cfg.get("protect_placeholders", True):
+                masked, ph_map = mask_placeholders(original)
+            else:
+                masked, ph_map = original, []
+
+            try:
+                system_prompt = build_system_prompt(
+                    cfg["default_mode"], cfg["default_strength"], tones,
+                    cfg.get("default_role", "(none)"),
+                    protect_tokens=bool(ph_map),
+                    avoid_words=tuple(cfg.get("house_style_avoid", [])))
+                result = run_backend(system_prompt, masked, cfg)
+            except (BackendError, ValueError) as exc:
+                emit(f"[FAIL] {name}: {exc}")
+                had_failure = True
+                continue
+            except Exception as exc:  # noqa: BLE001 -- one bad file must not stop the batch
+                emit(f"[FAIL] {name}: unexpected error ({exc})")
+                had_failure = True
+                continue
+
+            revised = result.get("revised", "")
+            if ph_map:
+                revised, warnings = restore_placeholders(revised, ph_map)
+                for warning in warnings:
+                    emit(f"[WARN] {name}: {warning}")
+
+            revised_path = os.path.join(args.out, f"{stem}.revised{suffix}")
+            diff_path = os.path.join(args.out, f"{stem}.diff.txt")
+            try:
+                if suffix.lower() == ".docx":
+                    write_docx(revised_path, revised)
+                else:
+                    with open(revised_path, "w", encoding="utf-8") as fh:
+                        fh.write(revised)
+                with open(diff_path, "w", encoding="utf-8") as fh:
+                    fh.write(summarise_diff(original, revised) + "\n")
+                    for ambiguity in result.get("ambiguities", []):
+                        fh.write(f"ambiguity: {ambiguity}\n")
+                    note = result.get("note", "")
+                    if note:
+                        fh.write(f"note: {note}\n")
+            except OSError as exc:
+                emit(f"[FAIL] {name}: could not write output ({exc})")
+                had_failure = True
+                continue
+
+            emit(f"[OK] {name} -> {os.path.basename(revised_path)}, "
+                 f"{os.path.basename(diff_path)}")
+
+        emit("Done, with failures." if had_failure else "Done.")
+
+    return 1 if had_failure else 0
+
+
 def main():
+    # Checked before anything else, including the single-instance mutex: a
+    # batch run and an interactive GUI session aren't meaningfully "the same
+    # instance" (there's no window, no tray icon, nothing a second launch
+    # would need to be warned away from), so this never claims or waits on
+    # that mutex at all.
+    if "--batch" in sys.argv[1:]:
+        sys.exit(_run_batch_mode(sys.argv[1:]))
     if not _claim_single_instance():
         _signal_existing_instance()
         return
