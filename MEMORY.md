@@ -6,6 +6,77 @@ Mark saying "lets get started").
 
 ---
 
+## 2026-09-02 (continued) — v2.15 hand-testing: found and fixed a real crash the initial push missed
+
+Mark's next instruction after the v2.14/v2.15 push-and-pause was "hand-test
+v2.14/v2.15 on the real exe before v2.16" — exactly the right call, since it
+caught something the shipped v2.15 (below) did not: a **genuine fatal crash**
+on a real cross-process drop, not a cosmetic issue. Full technical detail and
+the fix are in `ROADMAP.md`'s v2.15 section (the "Found and fixed after the
+initial push" note); the process worth recording here since it's a real
+lesson about this project's own verification discipline, not just the bug:
+
+**The v2.15 acceptance checklist's own "verified end-to-end" claim was true
+but incomplete** — it tested `SendMessageW` called *from within the same
+process* as the target window, which is not a genuine cross-process drop and
+did not exercise the actual failure mode. Hand-testing against the real
+packaged `.exe`, sending a real `WM_DROPFILES` from a genuinely separate
+process (PowerShell, standing in for Explorer), reproducibly killed the
+target process with `Fatal Python error: PyEval_RestoreThread: ... GIL is
+released ... thread state is NULL` — every single time, five times running,
+each against a completely clean process list (ruling out a leftover-process
+confound before concluding it was real). The crash surfaced on the
+*single-instance restore-listener* thread (`_watch()`), which has nothing to
+do with drag-and-drop directly — a classic "corruption manifests somewhere
+else" native-level bug, which is exactly why it took a systematic
+clean-room reproduction (kill everything, launch one instance, confirm it's
+alone, *then* drop) rather than a quick read of the traceback to actually
+pin down.
+
+**Root cause, and why it's notable**: `_capture_file_drop()` — both in
+notes_016's own reference snippet and the version shipped here — called back
+into Tk (`self.after_idle(...)`, and in one intermediate attempt
+`winfo_containing()` directly) *synchronously from inside the native window
+procedure*. This is a flaw in the **reviewed design itself**, not something
+introduced while adapting it — worth remembering next time a "reviewed,
+not improvised" design is trusted for a high-risk Win32 feature: reviewed
+still means verify the actual runtime behaviour, especially anything
+involving Tcl/Tk re-entrancy, which is exactly the kind of thing a design
+review on paper is least likely to catch.
+
+**Fix**: the window procedure now touches only ctypes/Win32 state plus a
+plain Python list; a new `_poll_dropped_files()`, scheduled via an ordinary
+`self.after(100, ...)` call made from *outside* the window procedure (never
+nested inside it), is the only thing that ever calls back into Tk for a
+drop. Re-verified clean across repeated real cross-process drops (including
+deliberately bad ones) with zero crashes, plus a 15-second idle control run
+and the original same-process happy-path test, both still passing.
+
+**A genuine, disclosed verification gap, not swept under the rug**: chasing
+this down further surfaced a second, more fundamental limit —
+a hand-rolled `HDROP` built via `GlobalAlloc` in an external test process and
+delivered via a raw `SendMessageW` cannot actually be read by the target
+(`ERROR_INVALID_HANDLE`), because `GlobalAlloc` handles are process-private
+in modern Windows; a real Explorer drop only works because the OS's own
+OLE/`DragAcceptFiles` compatibility shim re-allocates the `HDROP` inside the
+target process before delivery, which a synthetic cross-process message
+bypasses entirely. This means the crash fix and the hit-test/file-load logic
+are both verified with high confidence, but a genuine OS-mediated
+Explorer-to-Scriptorium drop landing content correctly has **not** been
+independently confirmed — flagged explicitly in `ROADMAP.md` as needing a
+real person to drag one real file, rather than claimed as done on the
+strength of everything-but-that being green.
+
+Patched build rebuilt as **2.15.1.0** (`version_info.txt` only —
+`APP_VERSION` stays the display string `"2.15"`, since this fixes the same
+feature rather than shipping a new one) specifically so it's distinguishable
+from the original `2.15.0.0` that was pushed with the crash still in it.
+`ROADMAP.md`'s v2.15 section updated in place with the incident, the fix, and
+the disclosed gap; not a new dated section, since this is the same release
+being corrected, not a new one.
+
+---
+
 ## 2026-09-02 (continued) — v2.15: Explorer drag-and-drop, verified with a real synthetic WM_DROPFILES message
 
 Continued from v2.14 in the same session. Mark's original instruction for

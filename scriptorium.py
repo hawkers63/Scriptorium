@@ -2061,6 +2061,8 @@ class Scriptorium(ctk.CTk):
         self._drop_hwnd = None
         self._drop_old_wndproc = None
         self._drop_wndproc = None
+        self._drop_poll_job = None
+        self._pending_drop_events = []
         self._start_restore_listener()
 
         ctk.set_appearance_mode("dark")
@@ -3119,10 +3121,15 @@ class Scriptorium(ctk.CTk):
         @WNDPROC
         def window_proc(message_hwnd, message, wparam, lparam):
             if message == WM_DROPFILES:
+                # No Tcl/Tk call of any kind belongs in this function, not
+                # even after_idle() to schedule one -- see
+                # _capture_file_drop()'s docstring for why. Any exception
+                # here is recorded the same plain-Python way and picked up
+                # by the same poller.
                 try:
                     self._capture_file_drop(message_hwnd, wparam)
                 except Exception as exc:  # Never unwind through a Win32 callback.
-                    self.after_idle(self._show_drop_error, str(exc))
+                    self._pending_drop_events.append(("error", str(exc)))
                 return 0
             return _call_window_proc(
                 self._drop_old_wndproc,
@@ -3156,60 +3163,100 @@ class Scriptorium(ctk.CTk):
 
         self._drop_old_wndproc = old_proc
         _shell32.DragAcceptFiles(hwnd, True)
+        # Started from ordinary code (not from inside the WNDPROC), so this
+        # first after() call is a perfectly normal Tcl invocation; it just
+        # keeps rescheduling itself for the life of the window.
+        self._drop_poll_job = self.after(100, self._poll_dropped_files)
 
     def _capture_file_drop(self, hwnd, drop_handle):
-        """Copy paths out of HDROP, then defer all Tk/file work.
+        """Copy paths and the drop point out of HDROP. No Tk/Tcl calls here.
 
-        Runs on the native window procedure, not a Tk callback -- this must
-        do only path extraction and hit-testing (no Tk widget mutation, no
-        file reading) and hand everything else to after_idle() once it
-        returns, to avoid re-entrant Tk work inside a Win32 window
-        procedure.
+        Runs on the native window procedure, not a Tk callback -- and,
+        confirmed the hard way by hand-testing, that is a stricter
+        requirement than it sounds: *no Tcl/Tk call of any kind* may happen
+        synchronously inside this call stack, not even something as
+        innocuous-looking as after_idle() to merely schedule work for later.
+        Windows delivers WM_DROPFILES (even from a same-machine, same-thread
+        drop) by dispatching it through Tcl's own Windows notifier, so this
+        function runs nested inside Tcl's own C-level message pump; calling
+        back into the interpreter from there -- to schedule a callback, or
+        to hit-test via winfo_containing(), both tried during development --
+        does not fail at the call site. It corrupts interpreter state that
+        surfaces moments later as a fatal "PyEval_RestoreThread ... thread
+        state is NULL" crash on a completely unrelated background thread
+        (this app's single-instance restore listener, blocked in an
+        unrelated WaitForSingleObject call) -- reproduced repeatably against
+        the real packaged .exe and the real source run alike before this was
+        found. The fix: this function touches only ctypes/Win32 state and a
+        plain Python list; _poll_dropped_files(), scheduled independently via
+        a normal self.after() (started from ordinary code, never from inside
+        this callback), is the only thing that ever calls back into Tk for a
+        drop, safely outside any WNDPROC call stack.
         """
         paths = []
-        over_original = False
         point = wintypes.POINT()
+        got_point = False
         try:
             if _shell32.DragQueryPoint(drop_handle, ctypes.byref(point)):
                 if _user32.ClientToScreen(hwnd, ctypes.byref(point)):
-                    over_original = self._point_is_over_original(
-                        point.x,
-                        point.y,
-                    )
+                    got_point = True
 
-            if over_original:
-                count = _shell32.DragQueryFileW(
+            count = _shell32.DragQueryFileW(
+                drop_handle,
+                DROP_FILE_COUNT,
+                None,
+                0,
+            )
+            for index in range(count):
+                length = _shell32.DragQueryFileW(
                     drop_handle,
-                    DROP_FILE_COUNT,
+                    index,
                     None,
                     0,
                 )
-                for index in range(count):
-                    length = _shell32.DragQueryFileW(
-                        drop_handle,
-                        index,
-                        None,
-                        0,
-                    )
-                    buffer = ctypes.create_unicode_buffer(length + 1)
-                    _shell32.DragQueryFileW(
-                        drop_handle,
-                        index,
-                        buffer,
-                        len(buffer),
-                    )
-                    paths.append(buffer.value)
+                buffer = ctypes.create_unicode_buffer(length + 1)
+                _shell32.DragQueryFileW(
+                    drop_handle,
+                    index,
+                    buffer,
+                    len(buffer),
+                )
+                paths.append(buffer.value)
         finally:
             # Windows owns HDROP; every processed message must release it.
             _shell32.DragFinish(drop_handle)
 
-        if over_original:
-            self.after_idle(self._handle_dropped_paths, paths)
+        if got_point:
+            self._pending_drop_events.append(("drop", point.x, point.y, paths))
         else:
-            self.after_idle(
-                self._refresh_status,
-                "drop files onto the Original pane",
-            )
+            self._pending_drop_events.append(
+                ("status", "could not read where the file was dropped"))
+
+    def _poll_dropped_files(self):
+        """Drain drop events queued by the WNDPROC, safely on Tk's own loop.
+
+        This -- not after_idle() from inside the window procedure -- is the
+        only place a completed drop actually touches Tk. See
+        _capture_file_drop()'s docstring for why that split is load-bearing,
+        not just tidy. A 100ms poll is imperceptible for a drag-and-drop
+        result and keeps this independent of exactly when/whether Tcl's
+        Windows notifier would otherwise give idle callbacks a turn during
+        native message dispatch.
+        """
+        while self._pending_drop_events:
+            event = self._pending_drop_events.pop(0)
+            kind = event[0]
+            if kind == "drop":
+                _, screen_x, screen_y, paths = event
+                if self._point_is_over_original(screen_x, screen_y):
+                    self._handle_dropped_paths(paths)
+                else:
+                    self._refresh_status("drop files onto the Original pane")
+            elif kind == "status":
+                self._refresh_status(event[1])
+            elif kind == "error":
+                self._show_drop_error(event[1])
+        self._drop_poll_job = self.after(100, self._poll_dropped_files)
 
     def _show_drop_error(self, detail):
         """Report a native drop failure after the window procedure returns."""
@@ -3265,6 +3312,10 @@ class Scriptorium(ctk.CTk):
 
     def _disable_file_drops(self):
         """Remove the subclass before Tk destroys the native window."""
+        if self._drop_poll_job is not None:
+            self.after_cancel(self._drop_poll_job)
+            self._drop_poll_job = None
+
         if self._drop_hwnd is None or self._drop_old_wndproc is None:
             return
 

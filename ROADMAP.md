@@ -1325,18 +1325,13 @@ error-message wording rather than the note's own slightly different phrasing.
 
 ### Acceptance checklist
 - [x] A real drop lands the file's actual content in Original, indistinguishable
-      from Import. Verified with a genuinely synthetic-but-real `WM_DROPFILES`
-      message: a real `DROPFILES` structure built in `GlobalAlloc`'d memory
-      (test-harness-only Win32 code, not shipped) with a real temp `.txt`
-      file's path, `ScreenToClient()`'d against `original_box`'s actual
-      on-screen centre, sent via `SendMessageW()` directly to the live,
-      already-subclassed `_drop_hwnd` — exercising the *actual* installed
-      window procedure end-to-end, not a direct Python call standing in for
-      it. Result: `SendMessageW` returned 0 (our handler's own return value,
-      confirming the subclass really intercepted the message rather than
-      falling through to the original procedure), the real file's exact
-      content landed in `original_box`, and the status bar correctly showed
-      the new word/character count.
+      from Import. Verified against a real `DROPFILES` structure with a real
+      temp `.txt` file's path, sent via `SendMessageW()` to the live,
+      already-subclassed `_drop_hwnd`: the actual installed window procedure
+      ran end-to-end, the real file's exact content landed in `original_box`,
+      and the status bar correctly showed the new word/character count. (This
+      first pass tested same-process only — see the "found and fixed after
+      the initial push" note below for why that mattered.)
 - [x] The window remains fully responsive after subclassing. Verified: `self.title(...)`
       calls before and after the `SendMessageW` both succeeded with no error,
       confirming `CallWindowProcW` forwarding doesn't break ordinary window
@@ -1360,12 +1355,82 @@ error-message wording rather than the note's own slightly different phrasing.
       dialogs as before, with `original_box` left untouched on every failure
       path. Verified directly, including a real missing-file `OSError`
       surfacing its exact message text.
-- [x] `ast.parse()` clean; real packaged `.exe` rebuilt (`FileVersion`/
-      `ProductVersion` confirmed `2.15.0.0`), launched for real against the
-      live config (both processes alive, `Responding: True`, correctly
-      hidden per `start_minimised`), no startup crash from the new ctypes
+- [x] `ast.parse()` clean; real packaged `.exe` rebuilt, launched for real
+      against the live config, no startup crash from the new ctypes
       declarations. Real `scriptorium_config.json` confirmed byte-identical
       throughout — every drag-and-drop test used an isolated temp config.
+
+**Found and fixed after the initial push — a real fatal crash, not a
+cosmetic bug.** Mark asked for a hand-test pass across v2.14/v2.15 before
+starting v2.16, which is what actually caught this: the acceptance checklist
+above was verified with `SendMessageW` called *from within the same process*
+as the target window (a Python script importing `scriptorium` and calling
+`SendMessageW` on its own window). That is not equivalent to a genuine
+cross-process drop, and it did not exercise the actual bug. Sending a real
+`WM_DROPFILES` from a **separate** process (PowerShell, standing in for
+Explorer) reproducibly killed the target process outright — reproduced five
+times running, against both the packaged `.exe` and a plain source run, with
+a completely clean process list beforehand each time (ruling out any
+leftover-process confound):
+```
+Fatal Python error: PyEval_RestoreThread: the function must be called with
+the GIL held, but the GIL is released (the current Python thread state is
+NULL)
+```
+— always on the *single-instance restore-listener* background thread
+(`_watch()`, blocked in an unrelated `WaitForSingleObject`), a thread with no
+direct connection to drag-and-drop at all. **Root cause**: the original
+`_capture_file_drop()` (both this note's own snippet and the first cut
+shipped here) called `self.after_idle(...)` — and, in an intermediate
+attempt, `winfo_containing()` for hit-testing — *synchronously inside the
+native window procedure*. Windows dispatches even a same-machine
+`WM_DROPFILES` through Tcl's own Windows notifier, so the window procedure
+runs nested inside Tcl's C-level message pump; calling back into the
+interpreter from there — even via something as innocuous-looking as
+scheduling a callback — is a form of re-entrancy Tcl does not expect, and it
+corrupts interpreter state that only surfaces as a crash somewhere else
+moments later. This is a flaw in the reviewed design's own reference
+implementation, not something introduced by adapting it here. **Fix**:
+`_capture_file_drop()` now touches *only* ctypes/Win32 state and a plain
+Python list (`self._pending_drop_events`); a new `_poll_dropped_files()`,
+scheduled via an ordinary `self.after(100, ...)` call *from outside* the
+window procedure (never nested inside it) and re-arming itself each cycle,
+is the only thing that ever calls back into Tk for a drop. Re-verified
+against a completely clean process each time: the crash no longer reproduces
+across repeated real cross-process drops (including ones with a bad point),
+survives an idle control run, and the same-process happy-path test above
+still passes unchanged against the new code.
+
+**One verification gap deliberately left open, flagged rather than
+papered over**: constructing a fully faithful synthetic cross-process drop
+turned out to be harder than expected. A hand-rolled `HDROP` built via plain
+`GlobalAlloc` in an external process and sent with a raw `SendMessageW`
+consistently fails inside `DragQueryPoint`/`DragQueryFileW` with
+`ERROR_INVALID_HANDLE` (6) — because in modern per-process-heap Windows, a
+`GlobalAlloc(GMEM_MOVEABLE)` handle is only meaningful within the process
+that allocated it. A genuine Explorer drop works because Explorer's OLE-based
+drag source and the OS's own `DragAcceptFiles` compatibility shim handle the
+cross-process hand-off (re-allocating a target-process-local `HDROP`) before
+`WM_DROPFILES` is ever delivered — infrastructure a hand-rolled test message
+from an unrelated process bypasses entirely, which is *why* it hits this
+error rather than a defect in Scriptorium's own code. Net effect: the crash
+fix is verified with high confidence (many repeated real cross-process
+message deliveries, including this exact failure path, none of them crash);
+the underlying hit-test/file-load logic is verified with high confidence
+(same-process test, unaffected by this gap); what is **not** independently
+verified is a genuine OS-mediated Explorer→Scriptorium drop landing content
+correctly end to end. That specific step needs a person: drag one real
+`.txt`/`.md`/`.docx` file from an actual Explorer window onto Original.
+Everything the tooling here could reach has been exercised; this last step
+could not be simulated without either a real drag or reverse-engineering
+the OLE compatibility shim's own re-marshalling, neither of which was worth
+doing versus just asking for the one manual check.
+
+Rebuilt as `2.15.1.0` (`filevers`/`FileVersion`/`ProductVersion` in
+`version_info.txt`) specifically so this corrected build is distinguishable
+from the original `2.15.0.0` that shipped with the crash — `APP_VERSION` in
+`scriptorium.py` stays the display string `"2.15"`, this was a fix to the
+same feature, not a new one.
 
 **Deferred to v2.16**: notes_016 §2.4/3.5's Markdown diff export and rich
 `CF_HTML` clipboard diff (the note's other raw-Win32 item, a separate
