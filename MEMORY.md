@@ -351,10 +351,81 @@ v2.13+; "Current shipped version" updated to 2.12; `README.md` gained its
 first-ever preset feature bullet (built-in presets existed since v2.3 but
 were apparently never documented).
 
-Next session: v2.13+ (backend retry transport first — moderate risk, no
-Win32/ctypes; then the two raw-Win32 items, Explorer drag-and-drop and the
-rich `CF_HTML` clipboard diff, last) whenever Mark is ready — fully scoped
-in `ROADMAP.md`, nothing implemented yet.
+Mark then explicitly approved pushing and continuing with retry transport
+in the same message. Continued straight into v2.13 — see the entry below.
+
+---
+
+## 2026-09-02 (continued) — v2.13 (backend retry transport) implemented
+
+Continued from v2.12 in the same session on Mark's "continue with retry
+transport". Full task list and acceptance evidence in `ROADMAP.md`'s v2.13
+section; two things worth recording here:
+
+**Found and fixed a genuinely stale docstring while implementing this**,
+not from a review note: `run_backend()`'s docstring still claimed
+"load_config() already normalises 'backend' to 'anthropic'/'ollama'" —
+true before this session's own v2.9 Suspicion S1 fix, false after it (that
+fix deliberately *stopped* clamping `backend`, specifically so this
+function's `else` branch becomes reachable for a genuinely invalid stored
+value). Would have been touched regardless since this session added the
+`on_retry` parameter to the same function; corrected the stale claim while
+already there rather than leaving it to keep misleading the next reader.
+
+**Followed notes_016's own suggested verification approach almost exactly**:
+fault-inject via a monkeypatched `urllib.request.urlopen`, not a live flaky
+connection (the note's own matrix suggests exactly this: "Fault-inject 429
+with numeric and HTTP-date Retry-After headers", "Simulate DNS failure,
+connection reset, timeout and truncated response"). Wrote two isolated test
+scripts (retry-delay/HTTP-date math and the transport's control flow in
+one; `call_anthropic`/`call_ollama`/`run_backend`/`_on_retry_progress`
+integration in the other) covering: immediate success, recovery after N
+transient failures, exhausting all attempts on a persistent transient
+failure, a non-transient status (401) failing with zero retries, both
+`Retry-After` forms (numeric and HTTP-date, including clamping an
+out-of-range value), a non-JSON 200 body correctly *not* retried (retrying
+an identical malformed body would just fail identically again), the
+`request-id` response header surfacing in the final error, and
+`_on_retry_progress()`'s stale-request/not-busy guard. Then, matching this
+project's own "verify against real objects, not just mocks" discipline
+elsewhere, ran one actual (not mocked) `call_ollama()` round-trip against a
+live local Ollama instance to confirm the refactored transport didn't
+silently change real request/response handling — it hadn't; same clean
+result as before, `retries needed: 0`.
+
+**Explicitly not attempted, flagged rather than silently assumed
+equivalent**: a genuine dropped/throttled network connection against the
+real OS network stack (as opposed to a monkeypatched `urlopen` raising the
+same exception types). Judged the fault-injection coverage sufficient
+since `URLError`/`ConnectionError`/`http.client.HTTPException` all funnel
+through the identical retry branch regardless of what triggered them, so
+recreating the trigger itself wouldn't exercise any code path the mocked
+tests don't already cover — but recorded as a known testing-depth
+limitation in `ROADMAP.md` rather than left implicit.
+
+**Verification**: `ast.parse()` clean; 27 fault-injection checks + 9
+integration checks, all pass; full v2.9–v2.12 regression suites re-run
+together, all still pass; a real `Scriptorium()` construct/destroy cycle
+clean. Packaged `.exe` rebuilt, `FileVersion`/`ProductVersion` confirmed
+`2.13.0.0`, launched for real, alive and `Responding: True`. Real
+`scriptorium_config.json` confirmed untouched throughout (unchanged mtime)
+— the one real Ollama call didn't touch it either, since `call_ollama()`
+takes `cfg` as a plain dict, never reads or writes `CONFIG_PATH` itself.
+Ollama started for the smoke test, stopped again immediately after.
+
+`ROADMAP.md` restructured again: v2.13 is its own shipped section (retry
+transport only); the remaining two notes_016 proposals (both raw-Win32)
+renumbered to v2.14+; "Current shipped version" updated to 2.13.
+
+Next session: v2.14+ — both remaining items are raw-Win32 (window-procedure
+subclassing for Explorer drag-and-drop, hand-rolled `CF_HTML` clipboard
+transfer for the rich diff copy) and, per this project's own history, need
+the most hand-testing and carry the highest single-bug blast radius of
+anything left in the backlog. Worth explicitly confirming with Mark how
+much of this session's remaining budget/appetite he wants to spend on that
+risk level before diving in, rather than assuming the same "keep going"
+default that carried v2.9 through v2.13. Fully scoped in `ROADMAP.md`
+either way, nothing implemented yet.
 
 ---
 

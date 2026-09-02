@@ -4,12 +4,12 @@
 When Mark says "lets get started", that is the cue to open these three files
 before doing anything else.
 
-Current shipped version: **2.12** (v2.9 bug-fix pass, v2.10 visual/UX
-polish, v2.11 three-tone picker, v2.12 persisted user presets — all four
-against the review notes that opened this session; see those sections
-below). v2.13+ (notes_016's remaining three architecture proposals, in
-ascending risk order) is scoped but not yet implemented. Drag-and-drop
-import remains deliberately deferred pending v2.13+, see "Deferred" below.
+Current shipped version: **2.13** (v2.9 bug-fix pass, v2.10 visual/UX
+polish, v2.11 three-tone picker, v2.12 persisted user presets, v2.13 backend
+retry transport — all five against the review notes that opened this
+session; see those sections below). v2.14+ (notes_016's remaining two
+Win32-heavy proposals) is scoped but not yet implemented. Drag-and-drop
+import remains deliberately deferred pending v2.14+, see "Deferred" below.
 
 Scope through v2.3 was drawn from twelve accumulated review notes
 (`notes/01_Active/notes_001.txt` – `notes_012.txt`), written independently by
@@ -661,7 +661,7 @@ UI/UX visual audit; notes_018 Zoe — a fresh static bug hunt against v2.8).
 Rather than one grab-bag release, the work was split: this version closes
 every concrete, confirmed bug notes_018 found (all low individual risk, all
 worth fixing on their own merits); notes_017's visual polish and notes_016's
-five architecture proposals are scoped separately below (v2.10, v2.11/v2.12/v2.13+) since
+five architecture proposals are scoped separately below (v2.10, v2.11/v2.12/v2.13/v2.14+) since
 bundling correctness fixes with new-feature/visual work would make either
 harder to verify in isolation.
 
@@ -1072,34 +1072,128 @@ confirmations (the tone-picker limit flash).
 
 ---
 
-## v2.13+ — Remaining notes_016 architecture proposals (scoped, not yet implemented)
+## v2.13 — Backend retry transport ✅ shipped 2026-09-02
 
-**Goal:** notes_016's remaining three proposals, sequenced by risk — the
-two raw-Win32 items (window-procedure subclassing, hand-rolled `CF_HTML`
-clipboard transfer) last, since this project's own history shows Win32-level
+**Goal:** notes_016 §2.5/3.6 — a shared retry seam beneath both
+`call_anthropic()` and `call_ollama()` for genuinely transient failures
+(dropped connections, a handful of server-side "try again" HTTP statuses),
+bounded so it can't retry forever or hide a real, non-transient error.
+Moderate risk (touches the request path both backends share) but no
+Win32/ctypes involved — pure Python stdlib.
+
+1. `_request_json_with_retries()` — takes a `request_factory` callable (not
+   a pre-built `Request`, since a POST body already sent by a failed
+   attempt can't be replayed) and opens a fresh request per attempt.
+   `MAX_REQUEST_ATTEMPTS = 3` (two retries), `BASE_RETRY_DELAY = 0.75`s
+   exponential backoff with up to 250ms jitter, capped at
+   `MAX_RETRY_DELAY = 10`s; `Retry-After` (numeric seconds or an HTTP-date)
+   honoured and capped at `MAX_RETRY_AFTER = 30`s when present, overriding
+   the exponential schedule.
+2. Retried: `urllib.error.URLError`, `TimeoutError`, `ConnectionError`,
+   `http.client.HTTPException`, and HTTP 429/500/502/503/504/529 for Claude
+   or 429/500/502/503/504 for Ollama (Ollama's 404 — an unpulled model — is
+   deliberately excluded: retrying the identical request would fail
+   identically every time). `HTTPError` checked before the more general
+   `URLError` it subclasses. Not retried: any other HTTP status (auth,
+   malformed request, missing model), and a 200 response that isn't valid
+   JSON — retrying an identical request wouldn't fix a body that will
+   never parse.
+3. `call_anthropic()`/`call_ollama()` refactored so the raw
+   urlopen/HTTPError/URLError/TimeoutError handling moves into the shared
+   helper; each backend's own JSON-body construction and response
+   interpretation (`_payload_object()`, `stop_reason` check for Claude,
+   `_extract_json()`) is unchanged. Both gain an `on_retry=None` parameter;
+   `run_backend()` forwards it to whichever backend is configured.
+4. `Scriptorium._on_retry_progress(request_id, message)` shows a retry
+   status via the existing `_refresh_status(extra=...)` mechanism (same
+   pattern as the existing "contacting the model…" busy note), but only
+   while `request_id` still matches the live `self._request_id` **and**
+   `self.busy` — deliberately does *not* go through `_claim_request()`,
+   since this is a progress update mid-request, not its completion.
+   `process()`'s worker wires it in via the existing `_post_to_ui()`
+   cross-thread hop.
+5. Anthropic's `request-id` response header, when present, is appended to
+   the final error message so a real support case is traceable.
+
+**One stale-docstring fix along the way**: `run_backend()`'s own docstring
+still claimed "`load_config()` already normalises 'backend' to
+'anthropic'/'ollama'" — true before v2.9's Suspicion S1 fix, false after
+it (that fix deliberately stopped clamping `backend`, precisely so this
+function's `else` branch is reachable). Corrected while already touching
+this function rather than left to rot further.
+
+### Acceptance checklist
+- [x] `_retry_after_seconds()` parses a numeric value and an HTTP-date,
+      clamps a negative value to 0 and an oversized one to
+      `MAX_RETRY_AFTER`, and returns `None` for garbage or a missing
+      header. `_retry_delay()` uses `Retry-After` when present, otherwise
+      increasing bounded exponential backoff.
+- [x] Fault-injected 429/500/502/503/504/529 (Claude) and 429/500/502/503/504
+      (Ollama) via a monkeypatched `urllib.request.urlopen`: recovers within
+      `MAX_REQUEST_ATTEMPTS` when a later attempt would succeed; exhausts
+      all attempts and raises a specific `BackendError` (never an uncaught
+      exception) when it wouldn't. Verified against the real
+      `_request_json_with_retries()`, not a reimplementation.
+- [x] A non-transient status (401 tested) fails immediately on the first
+      attempt, no sleep, no retry.
+- [x] Simulated connection reset (`URLError`) and persistent `TimeoutError`
+      both retried, both eventually raise a `BackendError` carrying the
+      caller-supplied `unavailable_hint` when they don't recover.
+- [x] A 200 response that isn't valid JSON is not retried — confirmed only
+      one `urlopen` attempt occurs.
+- [x] `request-id` response header surfaces in the final error message when
+      present.
+- [x] `call_anthropic()`/`call_ollama()`/`run_backend()` all correctly
+      forward `on_retry`; an invalid backend string still raises
+      `BackendError` regardless. Verified end to end, including one real
+      (not mocked) `call_ollama()` round-trip against a live local Ollama
+      instance to confirm the refactor didn't change real request/response
+      handling, only the retry wrapper around it.
+- [x] `Scriptorium._on_retry_progress()` updates the status bar only when
+      `request_id` matches the current request *and* the app is still
+      busy; a stale request_id or a no-longer-busy state is silently
+      ignored (confirmed both cases directly, not just the happy path).
+- [x] `ast.parse()` clean; full v2.9–v2.12 regression suites re-run
+      together, all still pass; a real `Scriptorium()` construct/destroy
+      cycle clean. Packaged `.exe` rebuilt, `FileVersion`/`ProductVersion`
+      confirmed `2.13.0.0`, launched for real, alive and `Responding: True`.
+      Real `scriptorium_config.json` confirmed untouched throughout.
+
+**Not attempted this session** (would need genuinely dropping/throttling a
+live connection, not just monkeypatching `urlopen`): a real DNS-failure or
+mid-transfer connection-reset scenario against the actual network stack.
+The fault-injection coverage above exercises the same code paths those
+scenarios would hit (`URLError`/`ConnectionError`/`http.client.HTTPException`
+all funnel through the identical retry branch), so this is judged
+sufficient rather than a gap requiring a follow-up session — flagged here
+for transparency rather than silently assumed equivalent.
+
+---
+
+## v2.14+ — Remaining notes_016 architecture proposals (scoped, not yet implemented)
+
+**Goal:** notes_016's remaining two proposals — both raw-Win32
+(window-procedure subclassing, hand-rolled `CF_HTML` clipboard transfer),
+sequenced together since this project's own history shows Win32-level
 features need the most hand-testing and carry the highest single-bug blast
 radius (a bad `WNDPROC` can hang or crash the whole app, not just one
 feature).
 
-1. **Backend retry transport** (notes_016 §2.5/3.6) — `_request_json_with_retries()`
-   beneath `call_anthropic()`/`call_ollama()`, bounded exponential backoff,
-   `Retry-After` handling. Moderate risk (touches the request path both
-   backends share) but no Win32/ctypes involved.
-2. **Explorer drag-and-drop** (notes_016 §2.1/3.2) — unlike notes_014/015's
+1. **Explorer drag-and-drop** (notes_016 §2.1/3.2) — unlike notes_014/015's
    incomplete `DragAcceptFiles`-only proposal (deferred after v2.7, see
    below), this note supplies the full `WM_DROPFILES` `WNDPROC` subclass.
    Legitimate now, but the highest platform risk in the backlog — needs
    dedicated hand-testing per notes_016's own verification matrix (§5)
    before it ships.
-3. **Markdown diff export + rich `CF_HTML` clipboard diff** (notes_016
+2. **Markdown diff export + rich `CF_HTML` clipboard diff** (notes_016
    §2.4/3.5) — the other raw-Win32 item (manual `GlobalAlloc`/clipboard
-   transaction); sequenced last for the same reason as drag-and-drop.
+   transaction); sequenced together with drag-and-drop for the same reason.
 
 No acceptance checklist yet — not started this session.
 
 ---
 
-## Deferred / explicitly out of scope for v2.1–v2.12
+## Deferred / explicitly out of scope for v2.1–v2.13
 
 - Migrating the API key to Windows Credential Manager (`keyring`) — real
   architectural change, correctly flagged as out-of-scope by every note
@@ -1145,7 +1239,7 @@ No acceptance checklist yet — not started this session.
   file is actually dropped. Revisit as its own properly-scoped session
   (real Win32 message-loop subclassing, needs hand-testing) rather than
   guessing at it inside v2.7. **Superseded 2026-09-02**: notes_016 supplies
-  the missing `WM_DROPFILES` subclass; now scoped as v2.13+ item 2 above,
+  the missing `WM_DROPFILES` subclass; now scoped as v2.14+ item 1 above,
   no longer blocked on an incomplete proposal.
 
 ---
@@ -1166,7 +1260,7 @@ No acceptance checklist yet — not started this session.
 | notes_013 | 31 Aug | Mark / Codex | v2.3 | Closed by v2.4 |
 | notes_014 | 1 Sep | Gale | v2.5 (delta) | Closed by v2.6 (icon/single-instance) and v2.7 (always-on-top, change summary); drag-and-drop deferred, superseded by notes_016 (see "Deferred") |
 | notes_015 | 1 Sep | Antigravity | v2.5 (delta) | Closed by v2.6; its S1 "Confirmed" and S2 "Addressed" verdicts did not hold up against live re-testing — see v2.6 write-up |
-| notes_016 | 1 Sep | Mark / Codex | v2.9+ (architecture) | Three-tone picker closed by v2.11 (found and fixed real embellishment bugs beyond what the note itself proposed); user presets closed by v2.12 (one deliberate deviation from the note's own dialog-ownership design — see that section); retry transport, drag-and-drop, rich clipboard scoped as v2.13+, not yet implemented |
+| notes_016 | 1 Sep | Mark / Codex | v2.9+ (architecture) | Three-tone picker closed by v2.11 (found and fixed real embellishment bugs); user presets closed by v2.12 (one deliberate dialog-ownership deviation); retry transport closed by v2.13 (one stale-docstring fix noticed and corrected along the way); drag-and-drop and rich clipboard scoped as v2.14+, not yet implemented |
 | notes_017 | 1 Sep | Lynne | v2.8 (delta) | Closed by v2.10 (typography/contrast, notice banner, busy motion, dialog chrome, backend labels; toolbar-wrap and character-level diffs deliberately not carried in, see v2.10 write-up) |
 | notes_018 | 1 Sep | Zoe | v2.8 (delta) | Closed by v2.9 (Bugs 1–2/S2, 3–7, S1); S3 deliberately not fixed (informational only, see v2.9 write-up) |
 

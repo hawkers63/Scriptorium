@@ -36,7 +36,7 @@ Dependencies
     Optional: install python-docx to import from and export to Word (.docx)
     files (`pip install python-docx`). Plain text and Markdown work without it.
 
-Author: built with Mark, August 2026. Version 2.12.
+Author: built with Mark, August 2026. Version 2.13.
 """
 
 import os
@@ -51,6 +51,10 @@ import ctypes
 from ctypes import wintypes
 import urllib.request
 import urllib.error
+import http.client
+import time
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -77,7 +81,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.12"
+APP_VERSION = "2.13"
 
 # A small shared palette (notes_017, v2.10) so the two text panes, the diff
 # tags and the notice banner read as one surface instead of drifting
@@ -991,7 +995,127 @@ def _extract_json(text):
     return data
 
 
-def call_anthropic(system_prompt, user_text, cfg):
+# --------------------------------------------------------------------------- #
+#  Retry transport (notes_016 §2.5/3.6)
+# --------------------------------------------------------------------------- #
+# Bounded retries for genuinely transient failures only -- connection drops
+# and a handful of server-side "try again" HTTP statuses. Never retried:
+# auth/permission errors, a malformed request, a missing model, or a
+# response that came back but didn't parse -- retrying those would just
+# waste the same 120/300-second timeout a second and third time for a
+# failure that will not change.
+MAX_REQUEST_ATTEMPTS = 3
+BASE_RETRY_DELAY = 0.75
+MAX_RETRY_DELAY = 10.0
+MAX_RETRY_AFTER = 30.0
+
+
+def _retry_after_seconds(headers):
+    """Return a bounded Retry-After delay in seconds, or None if unusable.
+
+    Retry-After is either an integer seconds count or an HTTP-date; both
+    are valid per RFC 9110. A naive (timezone-less) HTTP-date is treated as
+    UTC, which is what the HTTP date format actually specifies.
+    """
+    value = headers.get("Retry-After") if headers else None
+    if not value:
+        return None
+    try:
+        delay = float(value)
+    except (TypeError, ValueError):
+        try:
+            retry_at = parsedate_to_datetime(value)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            delay = retry_at.timestamp() - time.time()
+        except (TypeError, ValueError, OverflowError):
+            return None
+    return max(0.0, min(delay, MAX_RETRY_AFTER))
+
+
+def _retry_delay(failure_index, headers=None):
+    """Return the server's Retry-After if present, else bounded exponential
+    backoff with a little jitter so concurrent retries don't lock-step.
+    """
+    retry_after = _retry_after_seconds(headers)
+    if retry_after is not None:
+        return retry_after
+    exponential = BASE_RETRY_DELAY * (2 ** failure_index)
+    jitter = secrets.randbelow(251) / 1000  # up to 250ms
+    return min(exponential + jitter, MAX_RETRY_DELAY)
+
+
+def _request_json_with_retries(request_factory, *, timeout, label,
+                               transient_statuses, unavailable_hint="",
+                               on_retry=None):
+    """Open a fresh urllib request per attempt and return decoded JSON.
+
+    request_factory is a callable, not a pre-built Request: a POST body
+    already consumed by a failed attempt cannot be replayed, so each retry
+    needs its own fresh Request object. This also means a future streaming
+    reader can reuse this same transport boundary without either backend
+    function's payload construction changing.
+
+    Runs on whatever thread calls it (process()'s worker, never the Tk
+    thread), including the retry sleeps -- the UI stays responsive because
+    nothing here touches Tk directly; on_retry is the caller's own
+    thread-safe hop back to the UI thread.
+    """
+    last_network_error = None
+    for attempt in range(MAX_REQUEST_ATTEMPTS):
+        try:
+            request = request_factory()
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                raw_body = response.read()
+            try:
+                return json.loads(raw_body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                # A 200 that isn't valid JSON is not transient -- retrying
+                # the exact same request would just get the exact same body.
+                raise BackendError(
+                    f"{label} returned a non-JSON response.\n\n"
+                    f"(Parser detail: {exc})") from exc
+        except urllib.error.HTTPError as exc:
+            # HTTPError is a subclass of URLError and must be checked first.
+            can_retry = (exc.code in transient_statuses
+                        and attempt < MAX_REQUEST_ATTEMPTS - 1)
+            if not can_retry:
+                detail = exc.read().decode("utf-8", "replace")[:400]
+                request_id = exc.headers.get("request-id", "") if exc.headers else ""
+                trace = f"\nRequest ID: {request_id}" if request_id else ""
+                raise BackendError(
+                    f"{label} returned an error ({exc.code}).\n\n{detail}{trace}"
+                ) from exc
+
+            delay = _retry_delay(attempt, exc.headers)
+            exc.close()
+            if on_retry:
+                on_retry(
+                    f"{label} is temporarily unavailable; retrying in "
+                    f"{delay:.1f}s ({attempt + 2}/{MAX_REQUEST_ATTEMPTS})…")
+            time.sleep(delay)
+        except (urllib.error.URLError, TimeoutError, ConnectionError,
+               http.client.HTTPException) as exc:
+            last_network_error = exc
+            if attempt >= MAX_REQUEST_ATTEMPTS - 1:
+                reason = getattr(exc, "reason", exc)
+                hint = f"\n\n{unavailable_hint}" if unavailable_hint else ""
+                raise BackendError(
+                    f"Could not reach {label}: {reason}{hint}") from exc
+
+            delay = _retry_delay(attempt)
+            if on_retry:
+                on_retry(
+                    f"Connection to {label} was interrupted; retrying in "
+                    f"{delay:.1f}s ({attempt + 2}/{MAX_REQUEST_ATTEMPTS})…")
+            time.sleep(delay)
+
+    # Every branch above returns or raises; this only guards a future edit
+    # that adds a path which falls through the loop without doing either.
+    raise BackendError(f"Could not reach {label}: {last_network_error}")
+
+
+def call_anthropic(system_prompt, user_text, cfg, on_retry=None):
     api_key = cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         raise BackendError(
@@ -1007,30 +1131,21 @@ def call_anthropic(system_prompt, user_text, cfg):
         "messages": [{"role": "user", "content": user_text}],
     }).encode("utf-8")
 
-    req = urllib.request.Request(
-        ANTHROPIC_URL, data=body, method="POST",
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": ANTHROPIC_VERSION,
-            "content-type": "application/json",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace")[:400]
-        raise BackendError(f"Claude API error {exc.code}.\n\n{detail}")
-    except urllib.error.URLError as exc:
-        raise BackendError(f"Network error reaching the Claude API: {exc.reason}")
-    except TimeoutError:
-        raise BackendError(
-            "The request to Claude timed out. Try a shorter passage, or "
-            "check your network connection.")
-    except json.JSONDecodeError as exc:
-        raise BackendError(
-            "The Claude API returned a non-JSON body.\n\n"
-            f"(Parser detail: {exc})")
+    def request_factory():
+        return urllib.request.Request(
+            ANTHROPIC_URL, data=body, method="POST",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": ANTHROPIC_VERSION,
+                "content-type": "application/json",
+            },
+        )
+
+    payload = _request_json_with_retries(
+        request_factory, timeout=120, label="the Claude API",
+        transient_statuses={429, 500, 502, 503, 504, 529},
+        unavailable_hint="Check the network connection and try again.",
+        on_retry=on_retry)
 
     payload = _payload_object(payload, "The Claude API")
     if payload.get("stop_reason") == "max_tokens":
@@ -1054,7 +1169,7 @@ def call_anthropic(system_prompt, user_text, cfg):
     return _extract_json(text)
 
 
-def call_ollama(system_prompt, user_text, cfg):
+def call_ollama(system_prompt, user_text, cfg, on_retry=None):
     body = json.dumps({
         "model": cfg.get("ollama_model", DEFAULT_OLLAMA_MODEL),
         "stream": False,
@@ -1065,31 +1180,21 @@ def call_ollama(system_prompt, user_text, cfg):
         ],
     }).encode("utf-8")
 
-    req = urllib.request.Request(
-        OLLAMA_URL, data=body, method="POST",
-        headers={"content-type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        # HTTPError is a subclass of URLError, so it must be caught first — e.g.
-        # a 404 when the named model has not been pulled.
-        detail = exc.read().decode("utf-8", "replace")[:400]
-        raise BackendError(f"Ollama returned an error ({exc.code}).\n\n{detail}")
-    except urllib.error.URLError as exc:
-        raise BackendError(
-            "Could not reach Ollama at localhost:11434. Is it running? "
-            f"Start it with 'ollama serve' and pull a model first.\n\n({exc.reason})"
+    def request_factory():
+        return urllib.request.Request(
+            OLLAMA_URL, data=body, method="POST",
+            headers={"content-type": "application/json"},
         )
-    except TimeoutError:
-        raise BackendError(
-            "Ollama timed out. Try a shorter passage, or a smaller/faster "
-            "model.")
-    except json.JSONDecodeError as exc:
-        raise BackendError(
-            "Ollama returned a non-JSON body.\n\n"
-            f"(Parser detail: {exc})")
+
+    # 404 (model not pulled) is deliberately not in transient_statuses --
+    # retrying the identical request would fail identically every time.
+    payload = _request_json_with_retries(
+        request_factory, timeout=300, label="Ollama",
+        transient_statuses={429, 500, 502, 503, 504},
+        unavailable_hint=(
+            "Is Ollama running at localhost:11434? Start it with "
+            "'ollama serve' and pull a model first."),
+        on_retry=on_retry)
 
     payload = _payload_object(payload, "Ollama")
     message = payload.get("message")
@@ -1101,19 +1206,20 @@ def call_ollama(system_prompt, user_text, cfg):
     return _extract_json(text)
 
 
-def run_backend(system_prompt, user_text, cfg):
-    """Dispatch to the configured backend. An unrecognised value is an error,
-    not a silent fall-through to Claude — load_config() already normalises
-    "backend" to "anthropic"/"ollama", so reaching the else branch here means
-    cfg was built or edited some other way, and defaulting to the cloud
-    backend would let the status bar's privacy claim disagree with what
-    actually happens to the text.
+def run_backend(system_prompt, user_text, cfg, on_retry=None):
+    """Dispatch to the configured backend. An unrecognised value is an
+    error, not a silent fall-through to Claude: normalise_config()
+    deliberately leaves an invalid "backend" string alone rather than
+    clamping it to a guess (v2.9, see its comment there), specifically so
+    this branch is reachable and the status bar's privacy claim can never
+    disagree with what actually happens to the text. on_retry, if given, is
+    forwarded to the chosen backend's own retry transport.
     """
     backend = cfg.get("backend")
     if backend == "ollama":
-        return call_ollama(system_prompt, user_text, cfg)
+        return call_ollama(system_prompt, user_text, cfg, on_retry=on_retry)
     if backend == "anthropic":
-        return call_anthropic(system_prompt, user_text, cfg)
+        return call_anthropic(system_prompt, user_text, cfg, on_retry=on_retry)
     raise BackendError(
         f"Unrecognised backend {backend!r}. Open Settings and choose "
         "Claude or Ollama.")
@@ -2566,7 +2672,10 @@ class Scriptorium(ctk.CTk):
 
         def worker():
             try:
-                result = run_backend(system_prompt, masked, cfg_snapshot)
+                result = run_backend(
+                    system_prompt, masked, cfg_snapshot,
+                    on_retry=lambda message: self._post_to_ui(
+                        self._on_retry_progress, request_id, message))
             except BackendError as exc:
                 self._post_to_ui(self._on_error, request_id, str(exc))
             except Exception as exc:  # noqa: BLE001 — surface anything unexpected
@@ -2619,6 +2728,18 @@ class Scriptorium(ctk.CTk):
             return
         self._refresh_status("error")
         messagebox.showerror("Could not process", message)
+
+    def _on_retry_progress(self, request_id, message):
+        """Show a retry-in-progress status, but only for the request that's
+        still current -- a superseded or cancelled request's worker thread
+        keeps sleeping harmlessly (see _request_json_with_retries()), but
+        its progress updates must not overwrite the UI for whatever the
+        user has moved on to. Deliberately does NOT go through
+        _claim_request(): this is a progress update mid-request, not its
+        completion, so busy must stay True and the request must stay owned.
+        """
+        if request_id == self._request_id and self.busy:
+            self._refresh_status(message)
 
     def _revision_is_stale(self):
         """True if the original box no longer matches the live revision."""
