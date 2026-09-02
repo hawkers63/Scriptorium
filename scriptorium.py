@@ -36,13 +36,14 @@ Dependencies
     Optional: install python-docx to import from and export to Word (.docx)
     files (`pip install python-docx`). Plain text and Markdown work without it.
 
-Author: built with Mark, August 2026. Version 2.20.
+Author: built with Mark, August 2026. Version 2.21.
 """
 
 import os
 import sys
 import re
 import json
+import html
 import secrets
 import argparse
 import threading
@@ -82,7 +83,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.20"
+APP_VERSION = "2.21"
 
 # A small shared palette (notes_017, v2.10) so the two text panes, the diff
 # tags and the notice banner read as one surface instead of drifting
@@ -1530,6 +1531,205 @@ def summarise_diff(original, revised):
     return ", ".join(clauses) if clauses else "no wording changes"
 
 
+# --------------------------------------------------------------------------- #
+#  Markdown diff export and rich (HTML) clipboard diff
+# --------------------------------------------------------------------------- #
+# notes_016 §2.4/3.5. The other raw-Win32 item from that review (manual
+# GlobalAlloc/clipboard transaction, CF_HTML byte-offset header) -- carries
+# real platform risk of its own, though a different kind from v2.15's
+# WNDPROC subclass: clipboard data is always meant for another application
+# to consume, so (per the lesson v2.15's crash taught about cross-process
+# delivery) the only verification that actually counts is reading the
+# published formats back and confirming a real rich-text consumer renders
+# them correctly -- not just trusting the byte-offset arithmetic looks right.
+
+def _safe_markdown_fence(body):
+    """Return a backtick fence longer than any run already inside body."""
+    longest = max((len(run) for run in re.findall(r"`+", body)), default=0)
+    return "`" * max(3, longest + 1)
+
+
+def build_markdown_diff(original, revised):
+    """Return a portable Markdown document containing a unified text diff."""
+    diff_lines = difflib.unified_diff(
+        original.splitlines(),
+        revised.splitlines(),
+        fromfile="Original",
+        tofile="Suggested revision",
+        lineterm="",
+    )
+    body = "\n".join(diff_lines) or "(no wording changes)"
+    fence = _safe_markdown_fence(body)
+    return (
+        "# Scriptorium revision diff\n\n"
+        f"{fence}diff\n{body}\n{fence}\n"
+    )
+
+
+def build_html_diff(original, revised):
+    """Return one valid HTML fragment with review-style insert/delete spans.
+
+    Reuses _tokenise()/SequenceMatcher exactly as render_diff() and
+    summarise_diff() already do, so this always agrees with what the diff
+    pane and the copy-summary text both already show for the same revision.
+    """
+    original_tokens = _tokenise(original)
+    revised_tokens = _tokenise(revised)
+    matcher = difflib.SequenceMatcher(
+        None, original_tokens, revised_tokens, autojunk=False)
+    output = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        old_text = html.escape("".join(original_tokens[i1:i2]))
+        new_text = html.escape("".join(revised_tokens[j1:j2]))
+        if tag == "equal":
+            output.append(new_text)
+        elif tag == "delete":
+            output.append(
+                '<del style="color:#a61b1b;text-decoration:line-through">'
+                f"{old_text}</del>")
+        elif tag == "insert":
+            output.append(
+                f'<strong style="color:#176b3a">{new_text}</strong>')
+        else:
+            output.append(
+                '<del style="color:#a61b1b;text-decoration:line-through">'
+                f"{old_text}</del>"
+                f'<strong style="color:#176b3a">{new_text}</strong>')
+    return (
+        '<div style="font-family:Segoe UI,Arial,sans-serif;'
+        'white-space:pre-wrap">' + "".join(output) + "</div>"
+    )
+
+
+def _build_cf_html(fragment):
+    """Build the UTF-8 Windows "HTML Format" payload with byte offsets.
+
+    The header's Start/EndHTML/Fragment fields are byte offsets into the
+    UTF-8-encoded document, not Python string/character indexes -- get this
+    wrong and a real rich-text consumer (Word, Outlook, WordPad) either
+    mis-renders the fragment boundary or rejects the paste outright. Fixed
+    10-digit decimal fields are part of the documented CF_HTML format
+    (fixed width so a consumer can rewrite them in place, e.g. IE historically
+    did), not an arbitrary choice here.
+    """
+    start_marker = b"<!--StartFragment-->"
+    end_marker = b"<!--EndFragment-->"
+    document = (
+        b"<html><body>" + start_marker + fragment.encode("utf-8")
+        + end_marker + b"</body></html>")
+    template = (
+        "Version:1.0\r\n"
+        "StartHTML:{:010d}\r\n"
+        "EndHTML:{:010d}\r\n"
+        "StartFragment:{:010d}\r\n"
+        "EndFragment:{:010d}\r\n")
+    provisional = template.format(0, 0, 0, 0).encode("ascii")
+    start_html = len(provisional)
+    end_html = start_html + len(document)
+    start_fragment = start_html + document.index(start_marker) + len(start_marker)
+    end_fragment = start_html + document.index(end_marker)
+    header = template.format(
+        start_html, end_html, start_fragment, end_fragment).encode("ascii")
+    return header + document + b"\x00"
+
+
+def _global_clipboard_memory(data):
+    """Allocate and fill moveable global memory for SetClipboardData.
+
+    GMEM_MOVEABLE (0x0002) matches what SetClipboardData itself documents
+    as required -- unlike the plain GMEM_FIXED/private-heap allocation a
+    hand-rolled cross-process test message would need (see v2.15's own
+    ERROR_INVALID_HANDLE finding for why that distinction matters), this
+    handle genuinely is meant to change hands: SetClipboardData's own
+    contract is that Windows owns it from a successful call onward, and the
+    caller must not touch or free it again -- see set_html_clipboard()'s
+    ownership bookkeeping below.
+    """
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    global_alloc = kernel32.GlobalAlloc
+    global_lock = kernel32.GlobalLock
+    global_unlock = kernel32.GlobalUnlock
+    global_free = kernel32.GlobalFree
+    global_alloc.argtypes = (wintypes.UINT, ctypes.c_size_t)
+    global_alloc.restype = wintypes.HGLOBAL
+    global_lock.argtypes = (wintypes.HGLOBAL,)
+    global_lock.restype = ctypes.c_void_p
+    global_unlock.argtypes = (wintypes.HGLOBAL,)
+    global_unlock.restype = wintypes.BOOL
+    global_free.argtypes = (wintypes.HGLOBAL,)
+    global_free.restype = wintypes.HGLOBAL
+
+    handle = global_alloc(0x0002, len(data))  # GMEM_MOVEABLE
+    if not handle:
+        raise ctypes.WinError()
+    pointer = global_lock(handle)
+    if not pointer:
+        global_free(handle)
+        raise ctypes.WinError()
+    try:
+        ctypes.memmove(pointer, data, len(data))
+    finally:
+        global_unlock(handle)
+    return handle
+
+
+def set_html_clipboard(owner_hwnd, plain_text, html_fragment):
+    """Publish rich HTML first and clean Unicode text as a fallback.
+
+    Both formats are published inside one OpenClipboard/CloseClipboard
+    transaction (per the documented clipboard contract), so a reader never
+    observes only one of the two mid-update. A failure partway through
+    still frees whichever handle Windows has *not* yet taken ownership of
+    (SetClipboardData only transfers ownership on success), never a handle
+    already handed over -- double-freeing or leaking would both be real
+    bugs here, not cosmetic ones.
+    """
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    user32.RegisterClipboardFormatW.argtypes = (wintypes.LPCWSTR,)
+    user32.RegisterClipboardFormatW.restype = wintypes.UINT
+    user32.OpenClipboard.argtypes = (wintypes.HWND,)
+    user32.OpenClipboard.restype = wintypes.BOOL
+    user32.EmptyClipboard.argtypes = ()
+    user32.EmptyClipboard.restype = wintypes.BOOL
+    user32.SetClipboardData.argtypes = (wintypes.UINT, wintypes.HANDLE)
+    user32.SetClipboardData.restype = wintypes.HANDLE
+    user32.CloseClipboard.argtypes = ()
+    user32.CloseClipboard.restype = wintypes.BOOL
+    kernel32.GlobalFree.argtypes = (wintypes.HGLOBAL,)
+    kernel32.GlobalFree.restype = wintypes.HGLOBAL
+
+    html_format = user32.RegisterClipboardFormatW("HTML Format")
+    if not html_format:
+        raise ctypes.WinError()
+
+    html_handle = _global_clipboard_memory(_build_cf_html(html_fragment))
+    text_handle = _global_clipboard_memory(
+        (plain_text + "\x00").encode("utf-16-le"))
+    html_transferred = False
+    text_transferred = False
+    try:
+        if not user32.OpenClipboard(owner_hwnd):
+            raise ctypes.WinError()
+        try:
+            if not user32.EmptyClipboard():
+                raise ctypes.WinError()
+            if not user32.SetClipboardData(html_format, html_handle):
+                raise ctypes.WinError()
+            html_transferred = True
+            if not user32.SetClipboardData(13, text_handle):  # CF_UNICODETEXT
+                raise ctypes.WinError()
+            text_transferred = True
+        finally:
+            user32.CloseClipboard()
+    finally:
+        # A successful SetClipboardData transfers ownership to Windows.
+        if not html_transferred:
+            kernel32.GlobalFree(html_handle)
+        if not text_transferred:
+            kernel32.GlobalFree(text_handle)
+
+
 def _count_syllables(word):
     """Approximate syllable count via a vowel-group heuristic.
 
@@ -2839,6 +3039,8 @@ class Scriptorium(ctk.CTk):
                       command=self.copy_original).pack(side="left", padx=4)
         ctk.CTkButton(bar2, text="History", width=80, fg_color="gray30",
                       command=self._open_history).pack(side="left", padx=4)
+        ctk.CTkButton(bar2, text="Copy rich diff", width=115, fg_color="gray30",
+                      command=self.copy_rich_diff).pack(side="left", padx=4)
 
         # Was a far-right toolbar button pushed there by a weighted grid
         # spacer column -- fine in principle, but the toolbar's own content
@@ -2849,6 +3051,8 @@ class Scriptorium(ctk.CTk):
         # hand-testing report, where it always has real room.
         ctk.CTkButton(bar2, text="⚙ Settings", width=100, fg_color="gray30",
                       command=self.open_settings).pack(side="right")
+        ctk.CTkButton(bar2, text="Export diff…", width=105, fg_color="gray30",
+                      command=self.export_diff_file).pack(side="right", padx=4)
 
         # Working… motion (notes_017 §1.5/2.6): a static "Working…" label was
         # the only feedback during a long Ollama call, which reads as frozen.
@@ -3328,6 +3532,69 @@ class Scriptorium(ctk.CTk):
         self.clipboard_clear()
         self.clipboard_append(summary)
         self._refresh_status(f"summary copied: \"{summary}\"")
+
+    def copy_rich_diff(self):
+        """Copy an HTML review diff, with the clean revision as plain-text fallback.
+
+        Uses the real Win32 clipboard (set_html_clipboard()), not Tk's own
+        clipboard_clear()/clipboard_append() -- Tk has no notion of
+        publishing more than one clipboard format at once, and the whole
+        point here is that a plain-text target still gets safe clean prose
+        while Word/Outlook/etc. get the reviewable red-strikethrough/
+        green-bold formatting.
+        """
+        if not self.last_result:
+            self._refresh_status("nothing to copy as a rich diff")
+            return
+        if self._revision_is_stale() and not messagebox.askyesno(
+                "Revision may be out of date",
+                "The original text changed after this revision was generated. "
+                "Copy the rich diff anyway?", parent=self):
+            return
+
+        revised = self.last_result["revised"]
+        fragment = build_html_diff(self._result_source, revised)
+        try:
+            set_html_clipboard(int(str(self.wm_frame()), 0), revised, fragment)
+        except OSError as exc:
+            messagebox.showerror(
+                "Clipboard unavailable",
+                f"Could not copy the rich diff.\n\n{exc}", parent=self)
+            return
+        self._refresh_status("rich diff copied to clipboard")
+
+    def export_diff_file(self):
+        """Export the active revision as a fenced unified Markdown diff.
+
+        Deliberately separate from export_file(): that one exports the
+        clean revision text (or Original, unprocessed) for someone who just
+        wants the result; this is the explicitly review-oriented path,
+        showing what changed and from what, for pasting into a PR
+        description, a code-review tool, or an email summarising an edit.
+        """
+        if not self.last_result:
+            self._refresh_status("nothing to export as a diff")
+            return
+        if self._revision_is_stale() and not messagebox.askyesno(
+                "Revision may be out of date",
+                "The original text changed after this revision was generated. "
+                "Export the diff anyway?", parent=self):
+            return
+
+        path = filedialog.asksaveasfilename(
+            title="Export revision diff", defaultextension=".md",
+            filetypes=[("Markdown", "*.md")])
+        if not path:
+            return
+        document = build_markdown_diff(
+            self._result_source, self.last_result["revised"])
+        try:
+            with open(path, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(document)
+        except OSError as exc:
+            messagebox.showerror("Export failed", str(exc), parent=self)
+            return
+        self._refresh_status(f"exported {os.path.basename(path)}")
 
     def _show_text_context_menu(self, event, widget, allow_paste):
         """Right-click Copy/Paste for the Original and Suggested revision

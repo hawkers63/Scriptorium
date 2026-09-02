@@ -6,6 +6,82 @@ Mark saying "lets get started").
 
 ---
 
+## 2026-09-02 (continued) — v2.16 (shipped as build 2.21): rich CF_HTML clipboard diff — the backlog is now clear
+
+Mark asked to close out the last remaining backlog item after the five
+notes_019 features shipped: "thanks for the excellent work... yes proceed
+with rich clipboard diff." This is notes_016's own §2.4/3.5 proposal (the
+other raw-Win32 item from the original architecture review, alongside
+v2.15's drag-and-drop) — scoped since that review but never started, since
+v2.17-v2.20 (a later, separate feature review) got implemented first while
+this stayed on the shelf. Full task detail and acceptance evidence in
+`ROADMAP.md`'s v2.16 section (kept at its original number for continuity;
+shipped as `APP_VERSION`/build **2.21** to match real chronological order).
+
+**Given this is the second raw-Win32 feature this session, after v2.15's
+crash taught a real lesson about not trusting same-process verification for
+anything meant to cross a process boundary, that exact discipline was
+applied here too** — clipboard data is *always* for another application to
+consume, the same category of risk as a window message, just a different
+mechanism. Two specific things were verified with real rigor, not assumed
+from the reviewed design being "reviewed":
+
+1. **CF_HTML byte-offset arithmetic**, per notes_016's own testing-checklist
+   warning ("verify against the encoded byte array, not Python indexes") —
+   checked directly against a deliberately non-ASCII test case (é, £, an
+   em dash, curly quotes: each 2-3 UTF-8 bytes but 1 Python character,
+   exactly the input shape that would silently corrupt a character-index
+   bug while looking fine for plain ASCII). Byte-perfect in both the ASCII
+   and non-ASCII cases.
+2. **A genuinely independent, cross-process reader** — not the same ctypes
+   code checking its own output. A real `copy_rich_diff()` call set the
+   live clipboard; a *separate* PowerShell process, using .NET's
+   `System.Windows.Forms.Clipboard` API (a completely different stack from
+   the ctypes writer), read it back and correctly parsed both the plain-text
+   fallback and the registered "HTML Format" data, byte-perfect. This is
+   actually a stronger check than a visual paste into WordPad/Word would
+   have been (neither was readily available on this machine anyway) — it
+   confirms the actual data structure is correct, not just that one
+   particular renderer happened to display it acceptably.
+
+**One deliberate deviation from the note's own spec, not an oversight**:
+notes_016 also proposed `text_metrics()` (centralising word/character/
+reading-time into one function, 225wpm). Not implemented — v2.17 already
+shipped an overlapping feature (a Flesch-Kincaid readability grade plus a
+200wpm reading-time estimate) earlier this same session, and adding a
+second, differently-worded reading-time estimate on top would just be two
+numbers quietly disagreeing in the status bar for no real benefit. Recorded
+explicitly in `ROADMAP.md` rather than silently dropped.
+
+**Also implemented**: `build_markdown_diff()`/`_safe_markdown_fence()` (a
+dynamically-sized backtick fence, longer than any run already inside the
+diff body, so source text containing its own triple-backtick fence can't
+terminate the block early — verified against a real tricky case, not just
+described); `export_diff_file()`; two new buttons ("Copy rich diff",
+"Export diff…") placed on the bottom action bar's *second* row rather than
+the first, since a real width measurement showed row 1 already at 1040px
+of ~1156 available after v2.14/v2.15.2's own additions, while row 2 had
+real headroom (340px before, 560px after) — the same overflow lesson from
+earlier this session, applied proactively this time instead of found by
+hand-testing after the fact.
+
+**Verification**: `ast.parse()` clean; the CF_HTML/cross-process checks
+above; the Markdown fence-escaping edge case verified against real output;
+`copy_rich_diff()`/`export_diff_file()`'s empty-state guards and a real
+successful copy/export both verified against a real `Scriptorium()`; a
+full construct/destroy cycle clean; both button rows measured against the
+real widget tree and confirmed visually via a real `PrintWindow`
+screenshot. Real packaged `.exe` rebuilt (`FileVersion`/`ProductVersion`
+`2.21.0.0`), launched against the live config, alive and `Responding: True`.
+Real `scriptorium_config.json` confirmed byte-identical throughout.
+
+`ROADMAP.md`'s "Current shipped version" updated to 2.21 — **the backlog is
+now clear for the first time since notes_001 opened it**: every proposal
+from both notes_016 and notes_019 has shipped. Not yet
+committed/pushed at the time this entry was written.
+
+---
+
 ## 2026-09-02 (continued) — v2.20: in-session revision history — all five notes_019 proposals now shipped
 
 Continued from v2.19 in the same session; the fifth and last of the

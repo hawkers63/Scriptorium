@@ -4,15 +4,15 @@
 When Mark says "lets get started", that is the cue to open these three files
 before doing anything else.
 
-Current shipped version: **2.20** (v2.9 bug-fix pass, v2.10 visual/UX
+Current shipped version: **2.21** (v2.9 bug-fix pass, v2.10 visual/UX
 polish, v2.11 three-tone picker, v2.12 persisted user presets, v2.13 backend
 retry transport, v2.14 hand-testing fixes, v2.15 Explorer drag-and-drop,
 v2.17 readability metrics + shortcuts reference, v2.18 house-style
 avoid-list, v2.19 headless batch/CLI mode, v2.20 in-session revision
-history — see those sections below). All five notes_019 proposals are now
-shipped. v2.16 (notes_016's remaining raw-Win32 item, the rich `CF_HTML`
-clipboard diff) is scoped but not yet implemented, shipped out of numeric
-order behind v2.17-v2.20 — the only item left in the backlog.
+history, v2.16 rich `CF_HTML` clipboard diff (shipped last, as build
+`2.21`) — see those sections below). All five notes_019 proposals and
+notes_016's full original proposal set are now shipped — **the backlog is
+clear** for the first time since notes_001 opened it.
 
 Scope through v2.3 was drawn from twelve accumulated review notes
 (`notes/01_Active/notes_001.txt` – `notes_012.txt`), written independently by
@@ -1480,7 +1480,7 @@ rather than grab-bagging two different raw-Win32 features together.
 
 ---
 
-## v2.16 — Rich `CF_HTML` clipboard diff (scoped, not yet implemented)
+## v2.16 — Rich `CF_HTML` clipboard diff ✅ shipped 2026-09-02 (as build 2.21)
 
 **Goal:** notes_016 §2.4/3.5 — a fenced unified Markdown diff export plus an
 HTML clipboard format (with a plain-text fallback) for "Copy rich diff",
@@ -1489,7 +1489,95 @@ backlog (manual `GlobalAlloc`/clipboard transaction, `CF_HTML` header byte
 offsets), so carries meaningful platform risk of its own even though it
 doesn't touch the same `WNDPROC`-subclassing surface as v2.15.
 
-No acceptance checklist yet — not started.
+**Shipped last, as `APP_VERSION`/build `2.21`, not `2.16`** — v2.17-v2.20
+(a separate, later feature review's proposals) were implemented and shipped
+first while this stayed scoped, so `2.16` was already behind by the time
+Mark asked for it; the section keeps its original number for continuity
+with the rest of this document, but the actual display version and
+`version_info.txt` reflect real shipping order. Implemented essentially as
+notes_016 specified — adapted only to the current file's structure, and
+deliberately **not** implementing that note's own `text_metrics()` (word/
+character/reading-time centralisation): v2.17 already shipped an
+overlapping reading-time-plus-readability-grade feature in
+`_refresh_status()`, and adding a second, differently-worded reading-time
+estimate on top would just be two numbers disagreeing on screen for no
+benefit.
+
+1. **Markdown diff export** — `build_markdown_diff()`/`_safe_markdown_fence()`
+   (near `summarise_diff()`), producing a `# Scriptorium revision diff`
+   document with a dynamically-sized backtick fence (longer than any run
+   already inside the diff body, so source text containing its own
+   ` ```password``` `-style fence can't terminate the block early) wrapping
+   a `difflib.unified_diff()` of `_result_source` vs the revision — the
+   exact snapshot the revision was generated from, not a possibly-edited
+   live Original. `export_diff_file()` (beside `export_file()`) writes it
+   to a user-chosen `.md` path, gated behind the same stale-revision
+   confirmation every other revision-touching action already uses.
+2. **Rich HTML clipboard** — `build_html_diff()` (reusing the exact same
+   `_tokenise()`/`SequenceMatcher` opcodes as `render_diff()`/
+   `summarise_diff()`, so it never disagrees with what the diff pane or the
+   copy-summary text already show) renders red-strikethrough deletions and
+   green-bold insertions as one HTML fragment. `_build_cf_html()` wraps it
+   in the documented Windows "HTML Format" header (`Version:1.0`/
+   `StartHTML`/`EndHTML`/`StartFragment`/`EndFragment`, **byte** offsets
+   into the UTF-8-encoded document, not Python character indexes —
+   confirmed the hard way to matter, see below). `_global_clipboard_memory()`/
+   `set_html_clipboard()` publish it via `GlobalAlloc(GMEM_MOVEABLE)` +
+   `RegisterClipboardFormatW("HTML Format")` + `OpenClipboard`/
+   `EmptyClipboard`/`SetClipboardData`/`CloseClipboard`, publishing the rich
+   HTML and a `CF_UNICODETEXT` plain-text fallback (the clean revised text)
+   in the same transaction, with correct ownership bookkeeping (a handle is
+   only freed if `SetClipboardData` did *not* already take ownership of it
+   — freeing a handle Windows now owns, or leaking one it doesn't, would
+   both be real bugs). `copy_rich_diff()` (beside `copy_change_summary()`)
+   wires it to a new "Copy rich diff" button.
+3. **Two new buttons**, both added to the bottom action bar's *second* row
+   (`bar2`) rather than the first — row 1 already sits at 1040px of ~1156
+   available after v2.14/v2.15.2's own additions, while row 2 had ample
+   headroom (a real measurement showed 340px of ~1156 before this, 560px
+   after adding both — still comfortable). "Copy rich diff" grouped with
+   Paste/Copy/History (left side); "Export diff…" placed beside Settings
+   (right side, packed so Settings stays the true rightmost button).
+
+### Acceptance checklist
+- [x] **CF_HTML byte-offset arithmetic verified directly against the
+      encoded byte array, not Python indexes** — per this note's own
+      testing-checklist warning (§3, "Verify CF_HTML byte offsets against
+      the encoded byte array"). Two real cases: a pure-ASCII fragment, and
+      a deliberately non-ASCII one (é, £, em dash, curly quotes — each 2-3
+      UTF-8 bytes but 1 Python character, exactly the shape of input that
+      would silently corrupt a character-index-based implementation).
+      Extracted `cf_html_bytes[StartFragment:EndFragment]` matched the
+      built fragment's own UTF-8 encoding byte-for-byte in both cases, and
+      decoded back to valid UTF-8 without error (a boundary bug would
+      likely split a multi-byte sequence).
+- [x] **Verified with a genuinely independent, cross-process reader — not
+      the same ctypes code checking itself** — per the exact lesson v2.15's
+      crash taught about anything meant to cross a process boundary. A real
+      `copy_rich_diff()` call set the live clipboard; a *separate*
+      PowerShell process using .NET's `System.Windows.Forms.Clipboard` API
+      (a completely different technology stack from the ctypes writer) read
+      it back: `UnicodeText`/plain text held exactly the clean revised
+      text; `HTML Format` was present, correctly matched by name, and its
+      decoded header/fragment content was byte-perfect and exactly the
+      expected `<del>`/`<strong>`-styled HTML — confirmed a genuinely
+      independent consumer parses this correctly, not just our own writer.
+- [x] The Markdown fence-escaping edge case (source content containing its
+      own triple-backtick run) produces a fence strictly longer than the
+      longest run inside the body, verified against real output, not just
+      inspected.
+- [x] `copy_rich_diff()`/`export_diff_file()`'s "nothing to copy/export yet"
+      guards fire correctly with no revision present; a real revision
+      produces a real clipboard write and a real `.md` file with correct
+      content, verified against a real `Scriptorium()`.
+- [x] Both new buttons fit their row with wide margin (row 2 at 560px of
+      ~1156 available); row 1 is untouched at 1040px. Verified against the
+      real widget tree, and visually via a real `PrintWindow` screenshot.
+- [x] `ast.parse()` clean; a full construct/destroy cycle against a real
+      `Scriptorium()` completes with no exception. Real packaged `.exe`
+      rebuilt (`FileVersion`/`ProductVersion` `2.21.0.0`), launched for real
+      against the live config, alive and `Responding: True`. Real
+      `scriptorium_config.json` confirmed byte-identical throughout.
 
 ---
 
