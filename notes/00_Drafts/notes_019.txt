@@ -1,0 +1,418 @@
+Scriptorium enhancement review — notes_019
+Review date: 2 September 2026
+Author: Claude (Lead Enhancement & Feature Architect role, enhancement_agent.md)
+Scope: read-only design against C:\Scriptorium\scriptorium.py (v2.15.2, 3,555 lines)
+
+===============================================================================
+1. EXECUTIVE SUMMARY
+===============================================================================
+
+This review deliberately does not repeat notes_016's five proposals — all are
+now shipped (v2.9-v2.15.2) except its rich CF_HTML clipboard diff, already
+scoped as v2.16 in ROADMAP.md and not re-proposed here. It also checked
+ROADMAP.md's "Deferred / explicitly out of scope" section before proposing
+anything, so as not to re-raise an idea without addressing why it was shelved
+last time.
+
+Five new proposals, ordered by risk/readiness:
+
+1. Readability and reading-time metrics in the status bar. Pure computation
+   on text already in memory — no prompt, no model, no config schema change.
+   Lowest risk in this note; a full code snippet is included.
+2. A keyboard-shortcut reference dialog. Eight shortcuts already exist
+   (Ctrl+Enter, Ctrl+I, Ctrl+S, Ctrl+Shift+A, Esc, Ctrl+Shift+C,
+   Ctrl+Shift+M, Ctrl+Z) and are documented nowhere in the running app.
+   Trivial risk, real discoverability gain; a full code snippet is included.
+3. A user-defined "house style" avoid-list — words or phrases the user never
+   wants to see, folded into the system prompt alongside the existing
+   Role/Tone instructions. Genuine new value, but touches prompt construction,
+   so per this project's own standing rule it needs live-model calibration
+   before shipping, not just a design. Architecture only, no code yet.
+4. A headless batch/CLI mode: point Scriptorium at a folder of documents and
+   a Mode/Strength/Role/Tone combination, get back suggested revisions and
+   diffs for each, no GUI. Reuses the existing file-loading and backend
+   plumbing almost unchanged. Moderate size; architecture only.
+5. An in-session (not persisted to disk) revision history — explicitly
+   revisiting notes_003/005/006's idea, deferred three times not because it
+   was unwanted but because something else always ranked higher. Proposed
+   here with an explicit constraint that keeps it inside this project's
+   existing "nothing persists except via Export" privacy principle.
+
+A short postscript flags two housekeeping items noticed in passing (not
+features): the file has nearly tripled in size since the "don't split into
+modules yet" call was last made, and README.md's feature list predates
+v2.14/v2.15.
+
+None of this has been implemented. Per the read-only ideation mandate, this
+note is the entire deliverable — Mark should say which items (if any) to
+start before any code changes are made.
+
+
+===============================================================================
+2. DETAILED ARCHITECTURAL PROPOSALS
+===============================================================================
+
+-------------------------------------------------------------------------------
+2.1 Readability and reading-time metrics
+-------------------------------------------------------------------------------
+
+Why it wasn't already ruled out: the status bar already computes word/character
+counts (Scriptorium._refresh_status(), line 2506) purely from text already in
+memory. A readability grade and reading-time estimate are the same category of
+computation — no new dependency, no network call, nothing that could change
+what gets sent to a backend or how a revision is generated. This is squarely
+UI polish on top of an existing, already-shipped metric, not a new capability
+with its own risk surface.
+
+Design: a small `_reading_metrics(text)` module-level function using a
+standard Flesch Reading Ease approximation (a crude vowel-group syllable
+heuristic is standard practice for this formula in the absence of a
+dictionary — CPython's stdlib has no syllable counter, and pulling in one
+would violate the standard-library-only constraint). Reading time uses a
+conventional 200 words/minute assumption, already implicit in how every
+similar tool estimates it. Both numbers are advisory, computed on the
+Original text (mirroring word/char counts, which already read from
+`original_box`) — not sent anywhere, not part of any prompt.
+
+State impact: none. No config key needed (nothing to remember between
+sessions — this is a live property of whatever text is currently in
+Original, recomputed every time `_refresh_status()` already runs).
+
+Meaning-preservation: does not apply — this never touches the model or the
+prompt, only counts words/syllables in text already on screen.
+
+-------------------------------------------------------------------------------
+2.2 Keyboard-shortcut reference dialog
+-------------------------------------------------------------------------------
+
+Why it wasn't already ruled out: `_bind_shortcuts()` (line 2123) has quietly
+grown to eight bindings across v2.3-v2.7 with no in-app way to discover any
+of them — not in the toolbar, not in Settings, not in README.md. This is a
+pure UX gap, not a feature nobody wanted.
+
+Design: a small `ShortcutsDialog(ctk.CTkToplevel)`, following the existing
+`TonePickerDialog`/`SettingsDialog` pattern exactly (`bind_dialog_chrome()`/
+`position_over_parent()`, already shared helpers at line 1578/1584) — a
+read-only list of the eight bindings and what they do, one Close button.
+Opened via a new `<F1>` binding alongside the existing eight in
+`_bind_shortcuts()`, and optionally a small "?" toolbar button if Mark wants
+it discoverable without knowing to press F1 first (not proposed as code
+below — a one-line addition to `_build_toolbar()` if wanted).
+
+State impact: none. No config key — this is static reference content.
+
+-------------------------------------------------------------------------------
+2.3 User-defined "house style" avoid-list
+-------------------------------------------------------------------------------
+
+Why it wasn't already ruled out: it is a new idea, not a repeat of anything
+in notes_016 or the Deferred list. It extends a seam this project already
+has and trusts — Role and Tone are both bounded, data-driven instructions
+folded into `build_system_prompt()` (line 948) via `ROLE_INSTRUCTIONS`
+(line 536) and `TONE_INSTRUCTIONS`; a user-supplied avoid-list is the same
+shape of thing (a bounded instruction), just user-authored instead of
+curated by this project.
+
+Design sketch (not written as final code — see calibration note below):
+  - `DEFAULT_CONFIG["house_style_avoid"] = []` (line 695 area) — a plain
+    list of short strings (words or short phrases), validated on load the
+    same way `default_tones` is: length-capped per entry, count-capped
+    overall (say 20 entries, ~40 chars each — small enough to stay a
+    clearly-bounded instruction, not an open-ended rules engine).
+  - `build_avoid_instruction(words)` mirrors `build_tone_instruction()`'s
+    shape: "Avoid the following words/phrases wherever the meaning can be
+    preserved without them: X, Y, Z. Do not simply delete a required fact
+    to avoid one of these terms — rephrase around it; if a term cannot be
+    avoided without changing meaning, keep it and note this in the
+    ambiguity list." That last clause is the load-bearing one: an avoid-list
+    is exactly the kind of instruction that could tempt a model into
+    deleting content to satisfy it, which is precisely what this project's
+    meaning-preservation contract forbids (see `[[mark_meaning_preservation_priority]]`-
+    equivalent guidance already embedded in every other tone/role
+    instruction's closing guard).
+  - `build_system_prompt()` gains an optional `avoid_words` parameter,
+    folded in alongside the existing role/tone instruction, same pattern.
+  - Settings UI: a small scrollable list with add/remove, capped the same
+    way user presets are capped in `PresetManagerDialog`.
+
+**This one needs the same live-model calibration discipline v2.4 and v2.11
+used before shipping** — the exact failure mode to check for is the model
+quietly dropping a sentence, fact or clause to avoid a banned word rather
+than rephrasing around it. Do not implement this from the design alone;
+run the same kind of before/after real-backend test v2.11's tone work did,
+specifically probing for content loss, before writing the Settings UI.
+
+State impact: one new config key, one new build_system_prompt() parameter.
+Backwards compatible (empty list = no behaviour change, matching every
+other optional config key's default).
+
+-------------------------------------------------------------------------------
+2.4 Headless batch/CLI mode
+-------------------------------------------------------------------------------
+
+Why it wasn't already ruled out: new idea, not in notes_016 or Deferred.
+Aimed at a different use case than the GUI — someone with a folder of
+documents wanting the same Mode/Strength/Role/Tone applied to all of them
+without opening a window per file.
+
+Design sketch: `main()` (line 3546) gains an early argparse check, before
+`_claim_single_instance()`/`Scriptorium()` construction:
+
+    python scriptorium.py --batch INPUT_DIR --out OUTPUT_DIR
+        [--mode Paraphrase] [--strength Substantial] [--role Academic]
+        [--tones Concise,Detailed] [--backend ollama]
+
+For each supported file in INPUT_DIR (reusing `_read_document_path()`'s
+exact suffix/encoding logic, lifted to a module-level function since it is
+already almost decoupled from `self` — the only `self` reference is
+`read_docx()`, itself already module-level), call `build_system_prompt()`
+and `run_backend()` exactly as the GUI does, then write two files per input
+rather than one: `<name>.revised.txt` (the suggested revision) and
+`<name>.diff.txt` (`summarise_diff()`'s existing one-line output, or the
+full word-level diff). Never overwrites the input, and never silently
+"accepts" anything — the two-file output is the batch-mode equivalent of
+the GUI's Original/Suggested-revision split, preserving "review before you
+act on it" in a form that fits a headless flow instead of removing it.
+
+State impact: no config schema change (CLI flags override the same
+Mode/Strength/Role/Tone/backend values Settings already validates through
+`validate_tones()`/the existing enum tables — batch mode should reject an
+invalid combination the same way the GUI does, not silently clamp it).
+`_claim_single_instance()` should probably be skipped for `--batch` (a
+batch run and an interactive session aren't the same "instance" in any
+useful sense) — worth Mark's explicit call before assuming that, since it's
+a change to existing lifecycle behaviour, not purely additive.
+
+Meaning-preservation: unchanged from the GUI path — same prompt-building
+functions, same backend calls, same review-before-acting shape (via the
+two-file output rather than an Accept button).
+
+-------------------------------------------------------------------------------
+2.5 In-session revision history
+-------------------------------------------------------------------------------
+
+Why it wasn't already ruled out: notes_003/005/006 all proposed this and
+every session since has ranked something else above it — never because it
+was a bad idea. Worth checking now the app is at v2.15.2 whether anything
+still outranks it; this review doesn't have that context and defers the
+call to Mark rather than assuming it should finally happen.
+
+Design sketch, deliberately constrained to avoid reopening the privacy
+question this project has already settled: `self.undo_stack` already exists
+and holds prior Original-pane states; a parallel `self._revision_log`
+(plain in-memory list, session lifetime only, cleared on `_quit_app()`
+same as everything else that isn't Export'd) could record
+`(timestamp, mode, strength, role, tones, original, revised)` tuples after
+each successful `process()`. A small dropdown or list dialog lets the user
+jump back to viewing (not silently re-accepting) an earlier revision.
+
+**Constraint that must not be relaxed without a separate, explicit
+conversation**: in-memory only, never written to `scriptorium_config.json`
+or any other file. This project has an existing, deliberate principle —
+confirmed after a real incident during v2.5 testing — that "nothing in this
+app persists except via Export". A history panel that silently wrote past
+Original/Revised text to disk between sessions would be a genuine privacy
+regression, not a UI nicety, given one of the two backends' entire value
+proposition is "nothing leaves your machine". If a persisted history is
+ever wanted, that is a separate, bigger conversation with its own privacy
+notice implications — not a natural extension of this proposal.
+
+State impact: one new instance attribute, cleared at the same point
+`self.undo_stack` effectively is (process lifetime). No config key.
+
+
+===============================================================================
+3. MODULAR CODE SNIPPETS
+===============================================================================
+
+Only the two lowest-risk, most fully-specified proposals (2.1, 2.2) are
+written as drop-in code. The other three are architecture-only per their
+own sections above — 2.3 explicitly should not be coded before a live-model
+calibration pass, and 2.4/2.5 have open product questions (single-instance
+behaviour; whether a history panel is even still wanted) worth Mark's
+answer before code is worth writing.
+
+-------------------------------------------------------------------------------
+3.1 Readability and reading-time metrics
+-------------------------------------------------------------------------------
+
+Insert as a module-level function near summarise_diff() (current line 1408):
+
+```python
+def _count_syllables(word):
+    """Approximate syllable count via vowel-group heuristic.
+
+    No stdlib syllable counter exists, and pulling in a third-party one
+    would break the standard-library-only constraint. A vowel-group
+    heuristic (count transitions into a vowel, with the standard silent-
+    trailing-"e" adjustment) is the conventional approximation used by
+    every dependency-free Flesch implementation; it is not exact, but the
+    resulting grade level is advisory, not a precision instrument, and it
+    only affects the metric shown here -- never the prompt or the revision.
+    """
+    word = word.lower().strip(".,!?;:'\"()")
+    if not word:
+        return 0
+    vowels = "aeiouy"
+    count = 0
+    previous_was_vowel = False
+    for char in word:
+        is_vowel = char in vowels
+        if is_vowel and not previous_was_vowel:
+            count += 1
+        previous_was_vowel = is_vowel
+    if word.endswith("e") and count > 1:
+        count -= 1
+    return max(count, 1)
+
+
+def reading_metrics(text):
+    """Return (grade_label, minutes) for the given text, or None if empty.
+
+    grade_label is a short Flesch-Kincaid-derived description ("Fairly
+    easy", "Standard", "Fairly difficult", etc.) rather than a bare number,
+    matching this project's existing preference for plain-language status
+    text (see _refresh_status()'s own wording) over raw statistics.
+    """
+    words = text.split()
+    if not words:
+        return None
+    sentence_count = max(text.count(".") + text.count("!") + text.count("?"), 1)
+    syllable_count = sum(_count_syllables(w) for w in words)
+    word_count = len(words)
+
+    # Standard Flesch Reading Ease formula.
+    score = (206.835
+             - 1.015 * (word_count / sentence_count)
+             - 84.6 * (syllable_count / word_count))
+
+    if score >= 90:
+        label = "Very easy"
+    elif score >= 70:
+        label = "Fairly easy"
+    elif score >= 60:
+        label = "Standard"
+    elif score >= 50:
+        label = "Fairly difficult"
+    elif score >= 30:
+        label = "Difficult"
+    else:
+        label = "Very difficult"
+
+    minutes = max(round(word_count / 200), 1) if word_count >= 20 else 0
+    return label, minutes
+```
+
+Modify `Scriptorium._refresh_status()` (current line 2506) to append the
+metric when there is enough text to make it meaningful (a handful of words
+does not produce a stable reading-ease score, hence the existing
+`word_count >= 20` floor inside `reading_metrics()` for the minutes figure --
+apply the same floor here so a two-word Original does not show a
+misleadingly precise grade):
+
+```python
+        msg = (f"Backend: {where}  —  {privacy}   |   "
+               f"{words} words, {chars} characters")
+        metrics = reading_metrics(original) if words >= 20 else None
+        if metrics:
+            label, minutes = metrics
+            time_text = "under a minute" if minutes <= 1 else f"~{minutes} min read"
+            msg += f"   |   {label} · {time_text}"
+```
+(insert immediately after the existing `msg = (...)` assignment, before the
+following `if self.last_result:` block already in that method)
+
+-------------------------------------------------------------------------------
+3.2 Keyboard-shortcut reference dialog
+-------------------------------------------------------------------------------
+
+Insert as a new class, alongside TonePickerDialog/SettingsDialog (before
+`BACKEND_LABELS`, current line 1724):
+
+```python
+SHORTCUTS = [
+    ("Ctrl+Enter", "Process"),
+    ("Ctrl+I", "Import…"),
+    ("Ctrl+S", "Export…"),
+    ("Ctrl+Shift+A", "Accept"),
+    ("Esc", "Reject"),
+    ("Ctrl+Shift+C", "Copy revision"),
+    ("Ctrl+Shift+M", "Copy summary"),
+    ("Ctrl+Z", "Undo"),
+    ("F1", "Show this list"),
+]
+
+
+class ShortcutsDialog(ctk.CTkToplevel):
+    """Read-only reference for every keyboard shortcut Scriptorium binds."""
+
+    def __init__(self, master):
+        super().__init__(master)
+        self.title("Keyboard shortcuts")
+        self.geometry("340x360")
+        self.resizable(False, False)
+        bind_dialog_chrome(self, on_close=self.destroy)
+        position_over_parent(self, master, 340, 360)
+
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=16, pady=16)
+        for keys, action in SHORTCUTS:
+            row = ctk.CTkFrame(body, fg_color="transparent")
+            row.pack(fill="x", pady=4)
+            ctk.CTkLabel(row, text=keys, font=ctk.CTkFont(weight="bold"),
+                         width=130, anchor="w").pack(side="left")
+            ctk.CTkLabel(row, text=action, anchor="w").pack(side="left")
+
+        ctk.CTkButton(self, text="Close", width=90,
+                      command=self.destroy).pack(pady=(0, 16))
+```
+
+In `Scriptorium._bind_shortcuts()` (current line 2123), add one entry to
+the existing `bindings` dict:
+
+```python
+            "<F1>": self._show_shortcuts,
+```
+
+And one small method near `open_settings()` (current line 3379):
+
+```python
+    def _show_shortcuts(self):
+        ShortcutsDialog(self)
+```
+
+
+===============================================================================
+4. INSERTION MAP
+===============================================================================
+
+| Snippet                        | File            | Location                                          |
+|---------------------------------|------------------|---------------------------------------------------|
+| `_count_syllables`, `reading_metrics` | scriptorium.py | module level, near `summarise_diff()` (~line 1408) |
+| `_refresh_status()` metric line | scriptorium.py  | `Scriptorium._refresh_status()`, after the existing `msg = (...)` assignment (~line 2523) |
+| `SHORTCUTS`, `ShortcutsDialog`   | scriptorium.py  | module level, before `BACKEND_LABELS` (~line 1724) |
+| `<F1>` binding                  | scriptorium.py  | `Scriptorium._bind_shortcuts()`, `bindings` dict (~line 2131) |
+| `_show_shortcuts()` method       | scriptorium.py  | `Scriptorium`, near `open_settings()` (~line 3373) |
+
+2.3-2.5 are architecture-only in this note (see reasoning in each section);
+their insertion points depend on product decisions not yet made (calibration
+outcome, single-instance behaviour for batch mode, and whether Mark still
+wants a history panel at all) and are not mapped to line numbers here.
+
+
+===============================================================================
+5. HOUSEKEEPING NOTED IN PASSING (not features, not actioned)
+===============================================================================
+
+- `scriptorium.py` is 3,555 lines, up from ~1,300 when notes_006 first
+  proposed splitting it into modules (deferred as "not yet, avoid two
+  things moving at once"; ROADMAP.md's Deferred section still describes it
+  as "~1,300 lines and still proportionate", which is now stale by nearly
+  3x). Not re-proposed as a decision here — genuinely a judgement call for
+  Mark, since a split is exactly the kind of architectural churn this
+  project has consistently and correctly avoided mid-feature-work — but
+  worth knowing the original justification for deferring it no longer
+  matches the file's actual size.
+- README.md's feature list predates v2.14 (button rearrangement) and v2.15
+  (Explorer drag-and-drop) — it documents Import/Export via dialog but not
+  the drop target. A documentation-only fix, not scoped further here.
