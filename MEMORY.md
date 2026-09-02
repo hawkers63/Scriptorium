@@ -284,11 +284,77 @@ picker only); the other four notes_016 proposals renumbered to v2.12+;
 "Current shipped version" updated to 2.11; `README.md`'s tone-control
 bullet updated for three tones and the new conflict pair.
 
-Next session: v2.12+ (persisted user presets first — self-contained, no
-prompt surface touched — then the backend retry transport, then the two
-raw-Win32 items: Explorer drag-and-drop and the rich `CF_HTML` clipboard
-diff) whenever Mark is ready — fully scoped in `ROADMAP.md`, nothing
-implemented yet.
+Mark then explicitly approved pushing and continuing in the same message
+("push it and continue with presets"). Continued straight into v2.12 — see
+the entry below.
+
+---
+
+## 2026-09-02 (continued) — v2.12 (persisted user presets) implemented
+
+Continued from v2.11 in the same session on Mark's explicit "push it and
+continue with presets". Full task list and acceptance evidence in
+`ROADMAP.md`'s v2.12 section; the one thing worth expanding on here since
+it's a real design decision, not just an implementation detail:
+
+**Deviated from notes_016's own `PresetManagerDialog` snippet on dialog
+ownership, decided in-session rather than asked about.** The note's version
+issues the "replace an existing preset?" confirmation and save-failure
+messages from the *application* method (`_save_current_preset`), called as
+`PresetManagerDialog`'s `on_save` callback. But `PresetManagerDialog`
+already holds `grab_set()` by the time that runs — a `messagebox.askyesno`
+parented on the main window instead of the currently-grabbed dialog is the
+wrong owner for it. Restructured so the overwrite confirmation happens
+inside `PresetManagerDialog._save()` itself (which has the correct `self`
+to parent it on), before delegating to the app for validation/persistence;
+`_save_current_preset()` now returns `None` on success or a message string
+on failure, shown inline via a status label rather than a second blocking
+messagebox stacked on an already-modal dialog. Verified this was a real
+concern, not a theoretical one, and that the fix actually works: a test
+asserts the exact `parent=` kwarg passed to the mocked
+`messagebox.askyesno` call is the dialog instance, not the main window, and
+that a real confirm-then-overwrite cycle updates the existing entry in
+place (preserving original casing, not creating a duplicate) while a
+declined confirmation leaves the dialog open with nothing written.
+
+**Also implemented** exactly as notes_016 specified, no other deviations:
+`normalise_preset()`/`normalise_user_presets()` (validated against the same
+canonical `MODES`/`STRENGTHS`/`ROLES`/`validate_tones()` tables everything
+else uses; reserved-name and length/count caps enforced case-insensitively);
+`preset_menu_names()`/`resolve_preset()` replacing the toolbar's direct
+`WRITING_PRESETS` reads; `PresetManagerDialog` (reusing v2.10's
+`bind_dialog_chrome()`/`position_over_parent()` helpers rather than
+reintroducing an undismissable/badly-positioned dialog);
+`_write_user_presets()` following `SettingsDialog._save()`'s existing
+candidate-copy-then-`save_config(force=True)`-then-commit-to-`self.cfg`
+pattern, so a failed write can't leave the in-memory preset list ahead of
+disk.
+
+**Verification**: `ast.parse()` clean; over 40 checks across two scripts —
+pure logic (`normalise_preset`/`normalise_user_presets` against valid,
+malformed, oversized, reserved-name and over-limit inputs) and real-object
+(a real `Scriptorium()`, `_save_current_preset()`/`_delete_user_preset()`
+exercised against a temp `CONFIG_PATH` with the file re-read after each
+step to confirm actual disk persistence, not just in-memory state; a
+simulated `save_config()` failure confirmed to leave both `self.cfg` and
+disk unchanged; the manager-label toolbar entry confirmed to open the
+dialog via a mocked `PresetManagerDialog` rather than silently no-op'ing).
+Full v2.9/v2.10/v2.11 regression suites re-run together, all still pass.
+Packaged `.exe` rebuilt, `FileVersion`/`ProductVersion` confirmed
+`2.12.0.0`, launched for real, alive and `Responding: True`. Real
+`scriptorium_config.json` confirmed untouched (unchanged mtime) — every
+persistence test used a temp path.
+
+`ROADMAP.md` restructured again: v2.12 is its own shipped section (user
+presets only); the remaining three notes_016 proposals renumbered to
+v2.13+; "Current shipped version" updated to 2.12; `README.md` gained its
+first-ever preset feature bullet (built-in presets existed since v2.3 but
+were apparently never documented).
+
+Next session: v2.13+ (backend retry transport first — moderate risk, no
+Win32/ctypes; then the two raw-Win32 items, Explorer drag-and-drop and the
+rich `CF_HTML` clipboard diff, last) whenever Mark is ready — fully scoped
+in `ROADMAP.md`, nothing implemented yet.
 
 ---
 

@@ -15,5 +15,6 @@
   "default_strength": "Substantial",
   "default_role": "Academic",
   "default_tones": ["Concise"],
-  "default_diff_view": "Inline"
+  "default_diff_view": "Inline",
+  "user_presets": {}
 }

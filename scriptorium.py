@@ -36,7 +36,7 @@ Dependencies
     Optional: install python-docx to import from and export to Word (.docx)
     files (`pip install python-docx`). Plain text and Markdown work without it.
 
-Author: built with Mark, August 2026. Version 2.11.
+Author: built with Mark, August 2026. Version 2.12.
 """
 
 import os
@@ -77,7 +77,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.11"
+APP_VERSION = "2.12"
 
 # A small shared palette (notes_017, v2.10) so the two text panes, the diff
 # tags and the notice banner read as one surface instead of drifting
@@ -524,6 +524,88 @@ WRITING_PRESETS = {
     },
 }
 
+# User-saved presets (v2.11, notes_016 §2.2/3.3) sit alongside the built-in
+# ones above but are persisted in config rather than code. Built-in presets
+# are never overwritten or deleted through this mechanism -- a user preset
+# can never take a reserved name (see normalise_user_presets()).
+PRESET_MANAGER_LABEL = "Manage presets…"
+MAX_USER_PRESETS = 30
+MAX_PRESET_NAME_LENGTH = 48
+
+
+def normalise_preset(preset):
+    """Return one canonical preset dict, or None if it doesn't validate.
+
+    Every field is checked against the same canonical tables everything
+    else in the app uses -- an old preset referencing a role or tone this
+    version no longer recognises is dropped wholesale rather than partially
+    applied.
+    """
+    if not isinstance(preset, dict):
+        return None
+    mode = preset.get("mode")
+    strength = preset.get("strength")
+    role = preset.get("role")
+    tones = preset.get("tones", [])
+    if mode not in MODES or strength not in STRENGTHS or role not in ROLES:
+        return None
+    if isinstance(tones, str):
+        tones = [tones]
+    if not isinstance(tones, list):
+        return None
+    try:
+        tones = validate_tones(tones)
+    except ValueError:
+        return None
+    return {"mode": mode, "strength": strength, "role": role, "tones": tones}
+
+
+def normalise_user_presets(value):
+    """Validate a stored user_presets mapping, protecting reserved names.
+
+    Names are stripped, capped at MAX_PRESET_NAME_LENGTH, compared
+    case-insensitively, and capped at MAX_USER_PRESETS entries. A name that
+    collides (case-insensitively) with a built-in preset or the manager
+    label is dropped, not renamed -- silently shadowing a built-in preset
+    would be more surprising than losing one malformed entry.
+    """
+    if not isinstance(value, dict):
+        return {}
+    reserved = {name.casefold() for name in WRITING_PRESETS}
+    reserved.add(PRESET_MANAGER_LABEL.casefold())
+    clean = {}
+    used_names = set(reserved)
+    for raw_name, raw_preset in value.items():
+        if len(clean) >= MAX_USER_PRESETS:
+            break
+        if not isinstance(raw_name, str):
+            continue
+        name = raw_name.strip()
+        folded = name.casefold()
+        if not name or len(name) > MAX_PRESET_NAME_LENGTH or folded in used_names:
+            continue
+        preset = normalise_preset(raw_preset)
+        if preset is None:
+            continue
+        clean[name] = preset
+        used_names.add(folded)
+    return clean
+
+
+def preset_menu_names(cfg):
+    """Return built-in preset names, then user preset names, then the
+    manager command -- the stable order the toolbar menu is populated in.
+    """
+    return list(WRITING_PRESETS) + list(cfg.get("user_presets", {})) + [
+        PRESET_MANAGER_LABEL]
+
+
+def resolve_preset(cfg, name):
+    """Resolve a preset name against built-ins first, then user presets."""
+    if name in WRITING_PRESETS:
+        return WRITING_PRESETS[name]
+    return cfg.get("user_presets", {}).get(name)
+
 
 DEFAULT_CONFIG = {
     "backend": "anthropic",          # "anthropic" or "ollama"
@@ -543,6 +625,7 @@ DEFAULT_CONFIG = {
     "default_role": "Academic",
     "default_tones": ["Concise"],
     "default_diff_view": "Inline",
+    "user_presets": {},              # validated personal toolbar combinations
 }
 
 
@@ -629,6 +712,7 @@ def normalise_config(cfg):
             clean[key] = value
 
     clean = normalise_tone_config(clean)
+    clean["user_presets"] = normalise_user_presets(clean.get("user_presets", {}))
     return clean
 
 
@@ -1682,6 +1766,97 @@ class SettingsDialog(ctk.CTkToplevel):
 
 
 # --------------------------------------------------------------------------- #
+#  Preset manager dialog
+# --------------------------------------------------------------------------- #
+# Deliberately saves the *current* toolbar state rather than duplicating
+# four editors inside the dialogue -- set Mode/Strength/Role/Tone the normal
+# way first, then open this to save that combination under a name.
+
+class PresetManagerDialog(ctk.CTkToplevel):
+    """Save the current toolbar combination as a user preset, or delete one."""
+
+    def __init__(self, master, summary, user_names, on_save, on_delete):
+        super().__init__(master)
+        self.on_save = on_save
+        self.on_delete = on_delete
+        self.user_names = user_names
+
+        self.title("Manage presets")
+        self.geometry("460x340")
+        self.resizable(False, False)
+        self.transient(master)
+        self.grab_set()
+        bind_dialog_chrome(self, self.destroy)
+        self.after_idle(lambda: position_over_parent(self, master, 460, 340))
+
+        ctk.CTkLabel(
+            self, text="Save the current writing controls",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).pack(anchor="w", padx=18, pady=(18, 4))
+        ctk.CTkLabel(
+            self, text=summary, wraplength=420, justify="left",
+            text_color="gray65",
+        ).pack(anchor="w", padx=18, pady=(0, 10))
+
+        self.name_entry = ctk.CTkEntry(
+            self, placeholder_text="Preset name", width=420)
+        self.name_entry.pack(padx=18, pady=(0, 4))
+        self.save_status = ctk.CTkLabel(self, text="", text_color="#e06c75")
+        self.save_status.pack(anchor="w", padx=18)
+        ctk.CTkButton(self, text="Save current controls",
+                      command=self._save).pack(fill="x", padx=18, pady=(4, 0))
+
+        ctk.CTkLabel(
+            self, text="Delete a user preset", font=ctk.CTkFont(weight="bold")
+        ).pack(anchor="w", padx=18, pady=(18, 4))
+        choices = user_names or ["(no user presets)"]
+        self.delete_var = ctk.StringVar(value=choices[0])
+        self.delete_menu = ctk.CTkOptionMenu(
+            self, values=choices, variable=self.delete_var,
+            state="normal" if user_names else "disabled")
+        self.delete_menu.pack(side="left", padx=(18, 8), pady=4)
+        ctk.CTkButton(
+            self, text="Delete", width=100, fg_color="#8b3a3a",
+            state="normal" if user_names else "disabled",
+            command=self._delete,
+        ).pack(side="left", pady=4)
+
+    def _save(self):
+        """Confirm an overwrite here (this dialogue owns the input grab, so
+        it -- not the main window -- is the correct parent for the
+        confirmation), then delegate validation and persistence.
+
+        on_save returns None on success (dialog closes) or a message string
+        on validation failure (dialog stays open, message shown inline
+        rather than as another blocking messagebox).
+        """
+        name = self.name_entry.get().strip()
+        existing = next(
+            (item for item in self.user_names if item.casefold() == name.casefold()),
+            None)
+        if existing and not messagebox.askyesno(
+                "Replace preset?", f"Replace the existing preset '{existing}'?",
+                parent=self):
+            return
+
+        error = self.on_save(name)
+        if error is None:
+            self.destroy()
+        else:
+            self.save_status.configure(text=error)
+
+    def _delete(self):
+        """Confirm destructive preset deletion; source text is unaffected."""
+        name = self.delete_var.get()
+        if not messagebox.askyesno(
+                "Delete preset?", f"Delete the user preset '{name}'?",
+                parent=self):
+            return
+        if self.on_delete(name):
+            self.destroy()
+
+
+# --------------------------------------------------------------------------- #
 #  Main application
 # --------------------------------------------------------------------------- #
 
@@ -1798,10 +1973,11 @@ class Scriptorium(ctk.CTk):
 
         ctk.CTkLabel(bar, text="Preset").grid(row=0, column=8, padx=(20, 4))
         self.preset_var = ctk.StringVar(value="(none)")
-        ctk.CTkOptionMenu(
-            bar, values=list(WRITING_PRESETS), variable=self.preset_var,
+        self.preset_menu = ctk.CTkOptionMenu(
+            bar, values=preset_menu_names(self.cfg), variable=self.preset_var,
             width=145, command=self._apply_writing_preset,
-        ).grid(row=0, column=9, padx=4)
+        )
+        self.preset_menu.grid(row=0, column=9, padx=4)
 
         ctk.CTkButton(bar, text="⚙ Settings", width=100, fg_color="gray30",
                       command=self.open_settings).grid(row=0, column=11, padx=(20, 14))
@@ -1811,9 +1987,17 @@ class Scriptorium(ctk.CTk):
         """Populate the existing Mode/Strength/Role/Tone knobs from a preset.
 
         Every knob stays independently editable afterwards — this only ever
-        performs a one-off copy onto controls that already exist.
+        performs a one-off copy onto controls that already exist. Choosing
+        the manager command opens PresetManagerDialog instead of applying
+        anything, and resets the menu to "(none)" first so the command
+        entry itself never lingers as a selected-looking value.
         """
-        preset = WRITING_PRESETS.get(name)
+        if name == PRESET_MANAGER_LABEL:
+            self.preset_var.set("(none)")
+            self._open_preset_manager()
+            return
+
+        preset = resolve_preset(self.cfg, name)
         if not preset:
             return
         self.mode_var.set(preset["mode"])
@@ -1821,6 +2005,91 @@ class Scriptorium(ctk.CTk):
         self.role_var.set(preset["role"])
         self._set_selected_tones(preset.get("tones", []))
         self._refresh_status(f"preset applied: {name}")
+
+    def _open_preset_manager(self):
+        """Describe the live controls and open the compact manager dialogue."""
+        tones = " + ".join(self.selected_tones) or "keep original"
+        summary = (f"{self.mode_var.get()} · {self.strength_var.get()} · "
+                   f"{self.role_var.get()} · {tones}")
+        PresetManagerDialog(
+            self, summary=summary,
+            user_names=list(self.cfg.get("user_presets", {})),
+            on_save=self._save_current_preset,
+            on_delete=self._delete_user_preset)
+
+    def _write_user_presets(self, presets):
+        """Persist a candidate user_presets collection before changing live state.
+
+        Mirrors SettingsDialog._save(): normalise a candidate copy, only
+        commit it to self.cfg once save_config() actually succeeds, so a
+        failed write can't leave the in-memory preset list ahead of disk.
+        force=True matches SettingsDialog -- this is user-initiated recovery
+        from a possibly-malformed file, same justification as Settings.
+        """
+        candidate = dict(self.cfg)
+        candidate["user_presets"] = presets
+        candidate = normalise_config(candidate)
+        if not save_config(candidate, force=True):
+            return (
+                "Could not write the configuration file. No preset "
+                "changes were applied.")
+        self.cfg.clear()
+        self.cfg.update(candidate)
+        self.preset_menu.configure(values=preset_menu_names(self.cfg))
+        self.preset_var.set("(none)")
+        return None
+
+    def _save_current_preset(self, name):
+        """Validate a name and save the live controls as a user preset.
+
+        Returns None on success, or a message string to show inline in the
+        dialogue (a validation failure or the preset limit) without closing
+        it. The overwrite confirmation itself is handled by the caller,
+        PresetManagerDialog._save() -- see its docstring.
+        """
+        if not name:
+            return "Enter a name for this preset."
+        if len(name) > MAX_PRESET_NAME_LENGTH:
+            return f"Use no more than {MAX_PRESET_NAME_LENGTH} characters."
+        reserved = {item.casefold() for item in WRITING_PRESETS}
+        reserved.add(PRESET_MANAGER_LABEL.casefold())
+        if name.casefold() in reserved:
+            return "That name is used by a built-in command — choose another."
+
+        # The overwrite confirmation itself already happened in
+        # PresetManagerDialog._save() (it owns the input grab, so it's the
+        # correct parent for that messagebox) -- reaching this method at
+        # all means either the name is new or the user already confirmed.
+        presets = dict(self.cfg.get("user_presets", {}))
+        existing_name = next(
+            (item for item in presets if item.casefold() == name.casefold()),
+            None)
+        if existing_name:
+            name = existing_name  # preserve the stored casing, don't duplicate
+        elif len(presets) >= MAX_USER_PRESETS:
+            return f"Delete a preset before adding more than {MAX_USER_PRESETS}."
+
+        presets[name] = {
+            "mode": self.mode_var.get(),
+            "strength": self.strength_var.get(),
+            "role": self.role_var.get(),
+            "tones": list(self.selected_tones),
+        }
+        error = self._write_user_presets(presets)
+        if error is None:
+            self._refresh_status(f"preset saved: {name}")
+        return error
+
+    def _delete_user_preset(self, name):
+        """Delete one exact user preset and persist the new collection."""
+        presets = dict(self.cfg.get("user_presets", {}))
+        if name not in presets:
+            return False
+        del presets[name]
+        if self._write_user_presets(presets) is not None:
+            return False
+        self._refresh_status(f"preset deleted: {name}")
+        return True
 
     def _open_tone_picker(self):
         """Open the compact multi-tone selection dialogue."""

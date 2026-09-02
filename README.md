@@ -46,6 +46,11 @@ Built in Python with a native-style CustomTkinter interface.
   right-click.
 - **Softer / Stronger** — one-click re-run at the next strength notch down or
   up, instead of changing Strength and pressing Process separately.
+- **Writing presets** — a few built-in Mode/Strength/Role/Tone combinations
+  (Formal letter, Client reply, Technical note), plus your own: save the
+  current toolbar controls under a name via the Preset menu's "Manage
+  presets…" command, or delete one later. Applying a preset is always a
+  one-off copy — every control stays independently editable afterwards.
 - **Minimise to tray, start with Windows** (optional) — the minimise button
   sends the window straight to the system tray instead of the taskbar; the
   close button always quits completely, tray icon included. A "Start with

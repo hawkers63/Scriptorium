@@ -4,12 +4,12 @@
 When Mark says "lets get started", that is the cue to open these three files
 before doing anything else.
 
-Current shipped version: **2.11** (v2.9 bug-fix pass, v2.10 visual/UX
-polish, v2.11 three-tone picker — all three against the review notes that
-opened this session; see those sections below). v2.12+ (notes_016's
-remaining four architecture proposals, in ascending risk order) is scoped
-but not yet implemented. Drag-and-drop import remains deliberately deferred
-pending v2.12+, see "Deferred" below.
+Current shipped version: **2.12** (v2.9 bug-fix pass, v2.10 visual/UX
+polish, v2.11 three-tone picker, v2.12 persisted user presets — all four
+against the review notes that opened this session; see those sections
+below). v2.13+ (notes_016's remaining three architecture proposals, in
+ascending risk order) is scoped but not yet implemented. Drag-and-drop
+import remains deliberately deferred pending v2.13+, see "Deferred" below.
 
 Scope through v2.3 was drawn from twelve accumulated review notes
 (`notes/01_Active/notes_001.txt` – `notes_012.txt`), written independently by
@@ -661,7 +661,7 @@ UI/UX visual audit; notes_018 Zoe — a fresh static bug hunt against v2.8).
 Rather than one grab-bag release, the work was split: this version closes
 every concrete, confirmed bug notes_018 found (all low individual risk, all
 worth fixing on their own merits); notes_017's visual polish and notes_016's
-five architecture proposals are scoped separately below (v2.10, v2.11/v2.12+) since
+five architecture proposals are scoped separately below (v2.10, v2.11/v2.12/v2.13+) since
 bundling correctness fixes with new-feature/visual work would make either
 harder to verify in isolation.
 
@@ -986,29 +986,112 @@ an invented fact.
 
 ---
 
-## v2.12+ — Remaining notes_016 architecture proposals (scoped, not yet implemented)
+## v2.12 — Persisted user presets ✅ shipped 2026-09-02
 
-**Goal:** notes_016's other four proposals, sequenced by risk — lowest-risk/
-most self-contained first, the two raw-Win32 items (window-procedure
-subclassing, hand-rolled `CF_HTML` clipboard transfer) last, since this
-project's own history shows Win32-level features need the most
-hand-testing and carry the highest single-bug blast radius (a bad `WNDPROC`
-can hang or crash the whole app, not just one feature).
+**Goal:** notes_016 §2.2/3.3 — let a user save the current Mode/Strength/
+Role/Tone combination under a name, alongside the three built-in presets,
+without touching the prompt or content-generation surface at all (pure
+config/UI feature, [[mark_meaning_preservation_priority]] doesn't apply the
+way it did to v2.11).
 
-1. **Persisted user presets** (notes_016 §2.2/3.3) — `user_presets` config
-   key, `PresetManagerDialog`, `normalise_user_presets()`. Self-contained,
-   no prompt/content surface touched, well-specified in the note.
-2. **Backend retry transport** (notes_016 §2.5/3.6) — `_request_json_with_retries()`
+1. `user_presets` config key (default `{}`); `normalise_preset()` validates
+   one preset dict against the canonical `MODES`/`STRENGTHS`/`ROLES`/
+   `validate_tones()` tables (an old preset naming a role/tone this version
+   no longer recognises is dropped wholesale, not partially applied);
+   `normalise_user_presets()` validates the whole stored mapping — names
+   trimmed, capped at `MAX_PRESET_NAME_LENGTH` (48) and `MAX_USER_PRESETS`
+   (30), compared case-insensitively, a name colliding with a built-in
+   preset or the `PRESET_MANAGER_LABEL` dropped rather than silently
+   shadowing the built-in. Wired into `normalise_config()`.
+2. `preset_menu_names(cfg)` (built-ins, then user presets, then the manager
+   command) and `resolve_preset(cfg, name)` (built-ins first, then user)
+   replace the toolbar's direct `WRITING_PRESETS` reads.
+3. `PresetManagerDialog` (new `CTkToplevel`, alongside `TonePickerDialog`/
+   `SettingsDialog`): shows the live toolbar state as a summary, saves it
+   under a name, or deletes an existing user preset. Uses the same
+   `bind_dialog_chrome()`/`position_over_parent()` helpers v2.10 added
+   rather than reintroducing an un-dismissable/badly-positioned dialog.
+4. `_apply_writing_preset()` routes the manager-label entry to
+   `_open_preset_manager()` instead of applying anything;
+   `_save_current_preset()`/`_delete_user_preset()`/`_write_user_presets()`
+   persist through the same candidate-copy-then-`save_config(force=True)`
+   pattern `SettingsDialog._save()` already established, so a failed write
+   can't leave the in-memory preset list ahead of disk.
+
+**One deliberate deviation from notes_016's own snippet**, decided during
+implementation rather than asked about: the note's `PresetManagerDialog`
+routes both the "replace an existing preset?" confirmation and save
+failures through `messagebox` calls issued from the *application* method
+(`_save_current_preset`), not the dialog. Since `PresetManagerDialog`
+already holds the input grab (`grab_set()`) by the time that runs, a
+confirmation dialog parented on the *main window* instead of the currently-
+grabbed `PresetManagerDialog` is the wrong owner for it — cosmetically
+survivable in Tk, but not correct. Restructured so the overwrite
+confirmation happens in `PresetManagerDialog._save()` itself (which has
+the right `self` to parent it on) before delegating to the app for
+validation and persistence; `_save_current_preset()` returns `None` on
+success or a message string on failure, shown inline via a status label
+rather than a second blocking messagebox stacked on top of an already-
+modal dialog — consistent with v2.10's move away from unnecessary blocking
+confirmations (the tone-picker limit flash).
+
+### Acceptance checklist
+- [x] Loading a config with a missing/malformed/wrong-type `user_presets`
+      value (absent key, a list, a dict with an invalid role/mode, a
+      conflicting tone pair, a non-dict entry) normalises to a safe result
+      rather than crashing. Verified against the real `normalise_preset()`/
+      `normalise_user_presets()`/`normalise_config()`.
+- [x] A user preset named the same (case-insensitively) as a built-in
+      preset or "Manage presets…" is dropped on load, never shadows the
+      built-in. Verified directly.
+- [x] Saving, overwriting (case-insensitive match, original casing
+      preserved, not duplicated), and deleting all persist to the actual
+      config file on disk, not just in-memory `self.cfg` — verified via a
+      real `_save_current_preset()`/`_delete_user_preset()` call against a
+      temp `CONFIG_PATH`, reading the file back after each step.
+- [x] The 31st preset and a 49-character name are both rejected with an
+      inline message, dialog stays open. Verified against the real
+      `MAX_USER_PRESETS`/`MAX_PRESET_NAME_LENGTH` constants.
+- [x] A simulated `save_config()` failure leaves `self.cfg` and the on-disk
+      file unchanged, and returns an error message rather than silently
+      losing the preset. Verified by patching `save_config` to return
+      `False`.
+- [x] Applying a user preset sets exactly the four documented controls and
+      remains hand-editable afterwards, same contract as a built-in preset.
+      Verified against the real `_apply_writing_preset()`.
+- [x] The overwrite confirmation is parented on `PresetManagerDialog`, not
+      the main window (see "deliberate deviation" above) — verified by
+      asserting the actual `parent=` kwarg passed to `messagebox.askyesno`;
+      declining it leaves the dialog open and nothing is written.
+- [x] `ast.parse()` clean; full v2.9/v2.10/v2.11 regression suites re-run
+      together, all still pass; a real `Scriptorium()` construct/destroy
+      cycle clean. Packaged `.exe` rebuilt, `FileVersion`/`ProductVersion`
+      confirmed `2.12.0.0`, launched for real, alive and `Responding: True`.
+      Real `scriptorium_config.json` confirmed untouched (unchanged mtime)
+      throughout — every persistence test used a temp `CONFIG_PATH`.
+
+---
+
+## v2.13+ — Remaining notes_016 architecture proposals (scoped, not yet implemented)
+
+**Goal:** notes_016's remaining three proposals, sequenced by risk — the
+two raw-Win32 items (window-procedure subclassing, hand-rolled `CF_HTML`
+clipboard transfer) last, since this project's own history shows Win32-level
+features need the most hand-testing and carry the highest single-bug blast
+radius (a bad `WNDPROC` can hang or crash the whole app, not just one
+feature).
+
+1. **Backend retry transport** (notes_016 §2.5/3.6) — `_request_json_with_retries()`
    beneath `call_anthropic()`/`call_ollama()`, bounded exponential backoff,
    `Retry-After` handling. Moderate risk (touches the request path both
    backends share) but no Win32/ctypes involved.
-3. **Explorer drag-and-drop** (notes_016 §2.1/3.2) — unlike notes_014/015's
+2. **Explorer drag-and-drop** (notes_016 §2.1/3.2) — unlike notes_014/015's
    incomplete `DragAcceptFiles`-only proposal (deferred after v2.7, see
    below), this note supplies the full `WM_DROPFILES` `WNDPROC` subclass.
    Legitimate now, but the highest platform risk in the backlog — needs
    dedicated hand-testing per notes_016's own verification matrix (§5)
    before it ships.
-4. **Markdown diff export + rich `CF_HTML` clipboard diff** (notes_016
+3. **Markdown diff export + rich `CF_HTML` clipboard diff** (notes_016
    §2.4/3.5) — the other raw-Win32 item (manual `GlobalAlloc`/clipboard
    transaction); sequenced last for the same reason as drag-and-drop.
 
@@ -1016,7 +1099,7 @@ No acceptance checklist yet — not started this session.
 
 ---
 
-## Deferred / explicitly out of scope for v2.1–v2.11
+## Deferred / explicitly out of scope for v2.1–v2.12
 
 - Migrating the API key to Windows Credential Manager (`keyring`) — real
   architectural change, correctly flagged as out-of-scope by every note
@@ -1062,7 +1145,7 @@ No acceptance checklist yet — not started this session.
   file is actually dropped. Revisit as its own properly-scoped session
   (real Win32 message-loop subclassing, needs hand-testing) rather than
   guessing at it inside v2.7. **Superseded 2026-09-02**: notes_016 supplies
-  the missing `WM_DROPFILES` subclass; now scoped as v2.12+ item 3 above,
+  the missing `WM_DROPFILES` subclass; now scoped as v2.13+ item 2 above,
   no longer blocked on an incomplete proposal.
 
 ---
@@ -1083,7 +1166,7 @@ No acceptance checklist yet — not started this session.
 | notes_013 | 31 Aug | Mark / Codex | v2.3 | Closed by v2.4 |
 | notes_014 | 1 Sep | Gale | v2.5 (delta) | Closed by v2.6 (icon/single-instance) and v2.7 (always-on-top, change summary); drag-and-drop deferred, superseded by notes_016 (see "Deferred") |
 | notes_015 | 1 Sep | Antigravity | v2.5 (delta) | Closed by v2.6; its S1 "Confirmed" and S2 "Addressed" verdicts did not hold up against live re-testing — see v2.6 write-up |
-| notes_016 | 1 Sep | Mark / Codex | v2.9+ (architecture) | Three-tone picker closed by v2.11 (found and fixed two real embellishment bugs beyond what the note itself proposed — see that section); presets, retry transport, drag-and-drop, rich clipboard scoped as v2.12+, not yet implemented |
+| notes_016 | 1 Sep | Mark / Codex | v2.9+ (architecture) | Three-tone picker closed by v2.11 (found and fixed real embellishment bugs beyond what the note itself proposed); user presets closed by v2.12 (one deliberate deviation from the note's own dialog-ownership design — see that section); retry transport, drag-and-drop, rich clipboard scoped as v2.13+, not yet implemented |
 | notes_017 | 1 Sep | Lynne | v2.8 (delta) | Closed by v2.10 (typography/contrast, notice banner, busy motion, dialog chrome, backend labels; toolbar-wrap and character-level diffs deliberately not carried in, see v2.10 write-up) |
 | notes_018 | 1 Sep | Zoe | v2.8 (delta) | Closed by v2.9 (Bugs 1–2/S2, 3–7, S1); S3 deliberately not fixed (informational only, see v2.9 write-up) |
 
