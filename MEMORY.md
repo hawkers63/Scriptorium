@@ -6,6 +6,66 @@ Mark saying "lets get started").
 
 ---
 
+## 2026-09-02 (continued) — v2.20: in-session revision history — all five notes_019 proposals now shipped
+
+Continued from v2.19 in the same session; the fifth and last of the
+proposals Mark approved wholesale ("Please proceed with the development of
+the five new features"). Full task detail and acceptance evidence in
+`ROADMAP.md`'s v2.20 section.
+
+**Implemented as scoped, with the privacy constraint held throughout**:
+`self._revision_log` (plain in-memory list, never written to
+`scriptorium_config.json`), `HistoryDialog` (lists entries most recent
+first), `_restore_from_history()` (restores Original/Suggested revision
+*and* the Mode/Strength/Role/Tone controls that produced it, through the
+same undo/render path a fresh `process()` result uses), and a "History"
+button on the bottom action bar's second row (which had 340px of ~1156
+available for all four buttons — comfortable, unlike row 1's tighter
+budget after v2.14/v2.15.2's own additions).
+
+**A real debugging detour, worth recording so a future session doesn't
+repeat it**: the first, more elaborate test harness for this feature (a
+nested `after()`-based polling loop watching a real `process()` call)
+showed `busy` apparently stuck forever — which briefly looked like a
+serious, previously-undiscovered bug in `process()`'s own worker-thread/
+`_post_to_ui()` pipeline, notable because that exact pipeline had never
+actually been exercised end-to-end by an *automated* test anywhere in this
+project before: every prior session's `process()` verification was either
+a real person clicking the real button, or a direct `call_ollama()` call
+that bypasses the GUI's threading entirely. Before concluding a real
+regression, tried the simplest possible version of the same test (one
+`process()` call, one plain background-thread watchdog, no nested
+scheduling) — it completed correctly in about 4 seconds. The elaborate
+harness had its own scheduling bug; the app's threading was never at
+fault. Worth remembering: when a first automated test of an
+already-working, human-verified code path looks broken, suspect the new
+test harness before the old code.
+
+**Verification**: `ast.parse()` clean; two real `process()` calls (real
+`call_ollama()`) correctly logged with accurate metadata; a 60-append
+stress check confirmed the 50-entry cap holds correctly (oldest 10
+dropped, order preserved); restoring the *oldest* of two real history
+entries (a stronger test than just re-showing the latest) correctly
+restored Original's text, Mode, Strength, and `last_result`, and grew
+`undo_stack` by one; the real `scriptorium_config.json`'s mtime confirmed
+unchanged across the *entire* test run (two real backend calls, a restore,
+a cap stress test) — the in-memory-only constraint verified to actually
+hold, not just asserted from reading the code. Real packaged `.exe`
+rebuilt (`FileVersion`/`ProductVersion` `2.20.0.0`), launched against the
+live config, alive and `Responding: True`.
+
+`ROADMAP.md`'s "Current shipped version" updated to 2.20 — **all five
+notes_019 proposals are now shipped**; v2.16 (the rich `CF_HTML` clipboard
+diff) is the only item left anywhere in the backlog. Ollama (`llama3.2:3b`)
+stopped after this, having been left running continuously since v2.18's
+calibration for v2.19's batch-mode testing and this feature's own
+verification, rather than restarted for each.
+
+Not yet committed/pushed at the time this entry was written — pending
+Mark's review of all five features together.
+
+---
+
 ## 2026-09-02 (continued) — v2.19: headless batch/CLI mode
 
 Continued from v2.18 in the same session, fourth of notes_019's five

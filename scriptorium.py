@@ -36,7 +36,7 @@ Dependencies
     Optional: install python-docx to import from and export to Word (.docx)
     files (`pip install python-docx`). Plain text and Markdown work without it.
 
-Author: built with Mark, August 2026. Version 2.19.
+Author: built with Mark, August 2026. Version 2.20.
 """
 
 import os
@@ -82,7 +82,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.19"
+APP_VERSION = "2.20"
 
 # A small shared palette (notes_017, v2.10) so the two text panes, the diff
 # tags and the notice banner read as one surface instead of drifting
@@ -2323,6 +2323,84 @@ class PresetManagerDialog(ctk.CTkToplevel):
 
 
 # --------------------------------------------------------------------------- #
+#  Revision history (in-session only)
+# --------------------------------------------------------------------------- #
+# notes_019 §2.5. Deliberately not persisted -- see Scriptorium._revision_log's
+# own comment for why that constraint is load-bearing, not just tidy.
+
+class HistoryDialog(ctk.CTkToplevel):
+    """Browse this session's completed revisions and reload one for review.
+
+    Selecting an entry loads it back into Original/Suggested revision (and
+    restores the Mode/Strength/Role/Tone controls that produced it) exactly
+    as if Process had just run -- going through the same render/undo path a
+    fresh result would, so Accept/Reject/Copy/Undo all behave identically
+    afterwards. This is a way back to an earlier moment, not a silent
+    re-application of one: the diff still has to be reviewed like any other.
+    """
+
+    def __init__(self, master, entries, on_restore):
+        super().__init__(master)
+        self.on_restore = on_restore
+
+        self.title("Revision history")
+        self.geometry("480x420")
+        self.resizable(False, True)
+        self.minsize(420, 300)
+        self.transient(master)
+        self.grab_set()
+        bind_dialog_chrome(self, self.destroy)
+        self.after_idle(lambda: position_over_parent(self, master, 480, 420))
+
+        ctk.CTkLabel(self, text="This session's revisions",
+                     font=ctk.CTkFont(weight="bold")
+                     ).pack(anchor="w", padx=18, pady=(16, 2))
+        ctk.CTkLabel(
+            self, text="Not saved between sessions — closing Scriptorium "
+                      "clears this.",
+            text_color="gray60", font=ctk.CTkFont(size=11)
+        ).pack(anchor="w", padx=18)
+
+        body = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=12, pady=(8, 12))
+
+        if not entries:
+            ctk.CTkLabel(body, text="No revisions yet this session.",
+                         text_color="gray60").pack(anchor="w", padx=8, pady=8)
+        else:
+            for entry in reversed(entries):  # most recent first
+                self._add_row(body, entry)
+
+    def _add_row(self, parent, entry):
+        row = ctk.CTkFrame(parent, fg_color="gray17", corner_radius=6)
+        row.pack(fill="x", pady=4)
+
+        tones = " + ".join(entry["tones"]) if entry["tones"] else "no tone"
+        role = entry["role"] if entry["role"] != "(none)" else "no role"
+        summary = (f"{entry['time']} · {entry['mode']} · {entry['strength']} "
+                   f"· {role} · {tones}")
+        preview = " ".join(entry["original"].split())
+        if len(preview) > 70:
+            preview = preview[:70] + "…"
+
+        text_col = ctk.CTkFrame(row, fg_color="transparent")
+        text_col.pack(side="left", fill="x", expand=True, padx=(10, 4), pady=8)
+        ctk.CTkLabel(text_col, text=summary, font=ctk.CTkFont(size=11),
+                     text_color="gray60", anchor="w").pack(fill="x")
+        ctk.CTkLabel(text_col, text=preview or "(empty)", anchor="w",
+                     justify="left").pack(fill="x")
+
+        ctk.CTkButton(
+            row, text="View", width=70,
+            command=lambda e=entry: self._restore(e)
+        ).pack(side="right", padx=10, pady=8)
+
+    def _restore(self, entry):
+        self.on_restore(entry)
+        self.destroy()
+
+
+# --------------------------------------------------------------------------- #
 #  Main application
 # --------------------------------------------------------------------------- #
 
@@ -2335,6 +2413,16 @@ class Scriptorium(ctk.CTk):
         self.busy = False
         self._request_id = 0          # bumped on every Process and every cancel
         self._result_source = ""      # the text last_result was generated from
+        # In-session revision history (v2.20, notes_019 §2.5) -- deliberately
+        # in-memory only, never persisted to scriptorium_config.json or any
+        # other file. This project has an existing, deliberate principle,
+        # confirmed after a real incident during v2.5 testing, that nothing
+        # in this app persists except via Export; a history panel silently
+        # writing past Original/Revised text to disk between sessions would
+        # be a genuine privacy regression given one of the two backends'
+        # entire value proposition is "nothing leaves your machine", not a
+        # UI nicety. Cleared implicitly at process exit, same as undo_stack.
+        self._revision_log = []
         self.selected_tones = list(self.cfg.get("default_tones", ["Concise"]))
         self.tray_icon = None         # the live pystray.Icon, only while hidden to tray
         self._drop_hwnd = None
@@ -2749,6 +2837,8 @@ class Scriptorium(ctk.CTk):
                       command=self.paste_original).pack(side="left")
         ctk.CTkButton(bar2, text="Copy", width=80, fg_color="gray30",
                       command=self.copy_original).pack(side="left", padx=4)
+        ctk.CTkButton(bar2, text="History", width=80, fg_color="gray30",
+                      command=self._open_history).pack(side="left", padx=4)
 
         # Was a far-right toolbar button pushed there by a weighted grid
         # spacer column -- fine in principle, but the toolbar's own content
@@ -3131,11 +3221,32 @@ class Scriptorium(ctk.CTk):
         render_diff(self.revised_box, original, result["revised"],
                     inline=(self.diff_view_var.get() == "Inline"))
         self._show_ambiguities(list(result.get("ambiguities", [])) + warnings)
+        self._remember_for_history(original, result)
 
         note = result.get("note", "")
         if ph_map and not warnings:
             note = (note + "  " if note else "") + f"{len(ph_map)} placeholder(s) preserved"
         self._refresh_status(note or "done")
+
+    def _remember_for_history(self, original, result, limit=50):
+        """Record one completed revision in the in-session history log.
+
+        In-memory only -- see _revision_log's own comment in __init__ for
+        why that constraint matters here specifically. Capped the same way
+        _remember_for_undo() caps undo_stack, for the same reason: a long
+        session must not grow this without bound.
+        """
+        self._revision_log.append({
+            "time": time.strftime("%H:%M:%S"),
+            "mode": self.mode_var.get(),
+            "strength": self.strength_var.get(),
+            "role": self.role_var.get(),
+            "tones": list(self.selected_tones),
+            "original": original,
+            "revised": result.get("revised", ""),
+        })
+        if len(self._revision_log) > limit:
+            del self._revision_log[:-limit]
 
     def _on_error(self, request_id, message):
         if not self._claim_request(request_id):
@@ -3661,6 +3772,36 @@ class Scriptorium(ctk.CTk):
         self.attributes("-topmost", bool(self.cfg.get("always_on_top")))
         self._maybe_show_privacy_notice()
         self._refresh_status("settings saved")
+
+    def _open_history(self):
+        HistoryDialog(self, self._revision_log, on_restore=self._restore_from_history)
+
+    def _restore_from_history(self, entry):
+        """Load a past revision back into Original/Suggested revision.
+
+        Restores the Mode/Strength/Role/Tone controls that produced it too
+        -- a complete return to that moment, not just a text preview -- via
+        the existing, already-validated _set_selected_tones() rather than
+        setting self.selected_tones directly. Goes through
+        _remember_for_undo() and render_diff() exactly as a fresh Process
+        result would, so Accept/Reject/Copy/Undo behave identically
+        afterwards; the diff still has to be reviewed like any other.
+        """
+        self._remember_for_undo(self.original_box.get("1.0", "end-1c"))
+        self.original_box.delete("1.0", "end")
+        self.original_box.insert("1.0", entry["original"])
+
+        self.mode_var.set(entry["mode"])
+        self.strength_var.set(entry["strength"])
+        self.role_var.set(entry["role"])
+        self._set_selected_tones(entry["tones"])
+
+        self.last_result = {"revised": entry["revised"], "ambiguities": [], "note": ""}
+        self._result_source = entry["original"]
+        render_diff(self.revised_box, entry["original"], entry["revised"],
+                    inline=(self.diff_view_var.get() == "Inline"))
+        self._show_ambiguities([])
+        self._refresh_status(f"restored from history ({entry['time']})")
 
     def _start_restore_listener(self):
         """Watch the named restore event so a second launch can wake us up.

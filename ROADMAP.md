@@ -4,15 +4,15 @@
 When Mark says "lets get started", that is the cue to open these three files
 before doing anything else.
 
-Current shipped version: **2.19** (v2.9 bug-fix pass, v2.10 visual/UX
+Current shipped version: **2.20** (v2.9 bug-fix pass, v2.10 visual/UX
 polish, v2.11 three-tone picker, v2.12 persisted user presets, v2.13 backend
 retry transport, v2.14 hand-testing fixes, v2.15 Explorer drag-and-drop,
 v2.17 readability metrics + shortcuts reference, v2.18 house-style
-avoid-list, v2.19 headless batch/CLI mode — see those sections below). v2.16
-(notes_016's remaining raw-Win32 item, the rich `CF_HTML` clipboard diff) is
-scoped but not yet implemented, shipped out of numeric order behind
-v2.17-v2.19. v2.20+ (notes_019's last feature proposal, an in-session
-revision history) is approved and in progress.
+avoid-list, v2.19 headless batch/CLI mode, v2.20 in-session revision
+history — see those sections below). All five notes_019 proposals are now
+shipped. v2.16 (notes_016's remaining raw-Win32 item, the rich `CF_HTML`
+clipboard diff) is scoped but not yet implemented, shipped out of numeric
+order behind v2.17-v2.20 — the only item left in the backlog.
 
 Scope through v2.3 was drawn from twelve accumulated review notes
 (`notes/01_Active/notes_001.txt` – `notes_012.txt`), written independently by
@@ -1698,6 +1698,80 @@ someone with many documents wanting one combination applied to all of them.
       confirmed byte-identical throughout — every test used an isolated
       temp config or explicit `--backend ollama` override, never the real
       config's own `anthropic` default.
+
+---
+
+## v2.20 — In-session revision history ✅ shipped 2026-09-02
+
+**Goal:** notes_019 §2.5 — the fifth and last approved proposal, explicitly
+revisiting an idea notes_003/005/006 all proposed and every session since
+kept ranking something else above, never because it was unwanted.
+Deliberately constrained from the outset to stay inside this project's
+existing "nothing persists except via Export" privacy principle (confirmed
+after a real incident during v2.5 testing) — the note this scoped from was
+explicit that relaxing that constraint would be a separate, bigger
+conversation, not a natural extension of this feature.
+
+1. **`self._revision_log`** (initialised in `__init__`, alongside
+   `undo_stack`) — a plain in-memory list, **never written to
+   `scriptorium_config.json` or any other file**, cleared implicitly at
+   process exit exactly like `undo_stack` is. `_remember_for_history()`
+   appends one entry per completed revision from inside `_on_success()`
+   (time, mode, strength, role, tones, original, revised), capped at 50
+   the same way `_remember_for_undo()` caps `undo_stack`.
+2. **`HistoryDialog`** (next to `PresetManagerDialog`) — lists entries most
+   recent first, each with a timestamp/settings summary and a text preview,
+   a "View" button per row.
+3. **`_restore_from_history()`** — loads a past entry back into Original/
+   Suggested revision *and* restores the Mode/Strength/Role/Tone controls
+   that produced it (a complete return to that moment, not just a text
+   preview), through `_remember_for_undo()` and `render_diff()` exactly as
+   a fresh `process()` result would, via the existing, already-validated
+   `_set_selected_tones()` rather than touching `self.selected_tones`
+   directly. Accept/Reject/Copy/Undo all behave identically afterwards —
+   this is a way back to an earlier moment, never a silent re-application
+   of one.
+4. **"History" button** added to the bottom action bar's second row
+   (`bar2`, next to Paste/Copy) — row 2 had ample width margin (340px of
+   ~1156 available with all four buttons, per a real measurement), unlike
+   row 1's tighter budget after v2.14/v2.15.2's own additions.
+
+### Acceptance checklist
+- [x] Two real `process()` calls (real `call_ollama()`, different Mode/
+      Strength each time) correctly append two entries with accurate
+      metadata; a direct 60-append stress check confirms the cap holds at
+      exactly 50 with the oldest 10 correctly dropped and order preserved.
+      Verified against a real `Scriptorium()`.
+- [x] `HistoryDialog` opens with the real log and both rows populated
+      correctly; restoring the *oldest* entry (not just re-showing the
+      most recent, which would be a much weaker test) correctly restores
+      Original's text, Mode, Strength, and `last_result`, and grows
+      `undo_stack` by one — verified against real widget state, not
+      assumed from the code.
+- [x] The real `scriptorium_config.json`'s mtime is provably unchanged
+      across the entire test (two real backend calls, a restore, cap
+      stress-test) — the in-memory-only constraint actually holds, not
+      just claimed.
+- [x] Bottom action bar's second row (now 4 buttons) still fits with wide
+      margin (340px of ~1156 available); the normal `Scriptorium()`
+      construct/destroy cycle remains clean.
+- [x] `ast.parse()` clean. Real packaged `.exe` rebuilt (`FileVersion`/
+      `ProductVersion` `2.20.0.0`), launched for real against the live
+      config, alive and `Responding: True`.
+
+**One real debugging detour worth recording**: an early, more elaborate
+test harness (nested nested `after()`-based polling alongside the worker
+thread's own callback scheduling) made a real `process()` call look
+permanently stuck ("busy" never clearing), which briefly looked like a
+serious pre-existing threading bug in `process()`'s worker-thread/
+`_post_to_ui()` pipeline — notable because that exact pipeline had never
+actually been exercised end-to-end by an automated test in this project
+before now; every prior session's `process()` verification was either a
+real human clicking the real button, or a direct `call_ollama()` call that
+bypasses the threading entirely. A simpler, isolated single-call test
+immediately showed the real pipeline completing correctly in ~4 seconds —
+the elaborate harness had its own scheduling bug, not the app. Recorded so
+a future session reaches for the simple version of this test first.
 
 ---
 
