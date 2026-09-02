@@ -1432,6 +1432,41 @@ from the original `2.15.0.0` that shipped with the crash — `APP_VERSION` in
 `scriptorium.py` stays the display string `"2.15"`, this was a fix to the
 same feature, not a new one.
 
+**A second, unrelated bug found by Mark's own real Explorer drag-and-drop
+hand-test**: dragging a real file worked correctly (closing the one
+verification gap noted above), but Mark also reported the toolbar's
+"⚙ Settings" button was positioned off-screen at the app's default window
+size — only reachable by manually widening the window (screenshot
+`wider.jpg`). Root cause was the *same class* of bug as v2.14's action-bar
+fix, just on the toolbar row instead of the bottom rows: `_build_toolbar()`
+used a `grid` layout with an empty weighted spacer column (`column 10,
+weight=1`) to push the Settings button to column 11, the far right — but the
+toolbar's own content (Mode through Preset, columns 0–9, including their
+`padx` spacing) already totals roughly 1159px, leaving only ~21px of the
+default 1180px width for the spacer to absorb before Settings needs room of
+its own; in practice the button's ~134px (including its own `padx`) pushed
+the row's true total past 1180px, and grid — like `pack` — does not shrink
+content to fit, it lets the excess extend past the frame's visible bounds.
+Not introduced by v2.14/v2.15 — latent since whichever of v2.4 (Tone)/v2.12
+(Preset) first pushed the toolbar's own content that wide, never caught
+because nothing had checked toolbar-row width the way v2.8 once checked
+button-row width (and only for buttons, not the whole row including labels
+and menus).
+
+**Fixed per Mark's own suggested placement**: removed the Settings button
+and the now-pointless spacer column from `_build_toolbar()` entirely
+(toolbar now totals ~1159px of the 1180px available, fitting with margin to
+spare); added it to `bar2` (row 2 of the bottom action bar), right-aligned
+via `pack(side="right")`, so it sits directly beneath "Export…" — exactly as
+requested. Verified against the real widget tree (toolbar's summed child
+`reqwidth` plus each column's `padx`, confirming the row now fits;
+`open_settings()` called for real, confirming the dialog still opens
+correctly from its new location) and visually via a real `PrintWindow`
+screenshot at the default `1180x760` geometry, showing "⚙ Settings" now
+directly under "Export…" as intended.
+
+Rebuilt as `2.15.2.0`.
+
 **Deferred to v2.16**: notes_016 §2.4/3.5's Markdown diff export and rich
 `CF_HTML` clipboard diff (the note's other raw-Win32 item, a separate
 `GlobalAlloc`/clipboard transaction unrelated to `WM_DROPFILES`) — split out

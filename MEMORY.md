@@ -6,6 +6,38 @@ Mark saying "lets get started").
 
 ---
 
+## 2026-09-02 (continued) — v2.15.2: real hand-test confirms drag-and-drop; fixed a second, unrelated toolbar bug it also caught
+
+Mark did the one manual check flagged as needing a person: dragging a real
+file from Explorer onto Original. **It worked correctly** — closes out the
+one open verification gap from the v2.15.1 crash fix (the `GlobalAlloc`
+cross-process limitation noted there was specific to synthetic testing, not
+a real defect; a genuine Explorer drop goes through the OS's own OLE
+compatibility shim and works as designed).
+
+While hand-testing, Mark also found a second, **unrelated** bug: the
+toolbar's "⚙ Settings" button was positioned off-screen at the app's default
+window size, only reachable by manually widening the window (his own
+screenshot, `wider.jpg`, showed this directly). Full technical detail is in
+`ROADMAP.md`'s v2.15 section; worth noting here that this is the *same class*
+of bug as v2.14's action-bar fix (content wider than the window, no session
+had ever checked), just on the toolbar row and pre-dating both v2.14 and
+v2.15 entirely — latent since whichever of v2.4/v2.12 first grew the
+toolbar's own content past the point where a weighted spacer column plus a
+button could still fit in 1180px. **Fixed per Mark's own suggested
+placement**: moved from a grid column pushed to the toolbar's far right, into
+`bar2` (row 2 of the bottom action bar), right-aligned so it sits directly
+beneath "Export…". Verified against the real widget tree (toolbar now totals
+~1159px of 1180px available) and a real screenshot showing the new
+placement.
+
+Shipped as **2.15.2.0** (display string `APP_VERSION` stays `"2.15"`, same
+reasoning as 2.15.1 — this is a fix within the v2.15 release, not a new
+feature). Not yet pushed at time of writing — pending Mark's go-ahead, same
+convention as every prior release.
+
+---
+
 ## 2026-09-02 (continued) — v2.15 hand-testing: found and fixed a real crash the initial push missed
 
 Mark's next instruction after the v2.14/v2.15 push-and-pause was "hand-test

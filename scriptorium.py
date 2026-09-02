@@ -2178,10 +2178,6 @@ class Scriptorium(ctk.CTk):
         )
         self.preset_menu.grid(row=0, column=9, padx=4)
 
-        ctk.CTkButton(bar, text="⚙ Settings", width=100, fg_color="gray30",
-                      command=self.open_settings).grid(row=0, column=11, padx=(20, 14))
-        bar.grid_columnconfigure(10, weight=1)
-
     def _apply_writing_preset(self, name):
         """Populate the existing Mode/Strength/Role/Tone knobs from a preset.
 
@@ -2470,6 +2466,16 @@ class Scriptorium(ctk.CTk):
                       command=self.paste_original).pack(side="left")
         ctk.CTkButton(bar2, text="Copy", width=80, fg_color="gray30",
                       command=self.copy_original).pack(side="left", padx=4)
+
+        # Was a far-right toolbar button pushed there by a weighted grid
+        # spacer column -- fine in principle, but the toolbar's own content
+        # (Mode..Preset) already exceeds the app's default 1180px window
+        # width, so the spacer collapsed to zero and Settings landed past
+        # the visible edge, only reachable by manually widening the window.
+        # Moved here (row 2, right-aligned under Export) per Mark's own
+        # hand-testing report, where it always has real room.
+        ctk.CTkButton(bar2, text="⚙ Settings", width=100, fg_color="gray30",
+                      command=self.open_settings).pack(side="right")
 
         # Working… motion (notes_017 §1.5/2.6): a static "Working…" label was
         # the only feedback during a long Ollama call, which reads as frozen.
