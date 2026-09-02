@@ -81,7 +81,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.13"
+APP_VERSION = "2.14"
 
 # A small shared palette (notes_017, v2.10) so the two text panes, the diff
 # tags and the notice banner read as one surface instead of drifting
@@ -1990,9 +1990,12 @@ class Scriptorium(ctk.CTk):
         self.attributes("-topmost", bool(self.cfg.get("always_on_top")))
 
         self._build_toolbar()
-        self._build_panes()
+        # Action bar and status bar are built (and packed to the bottom)
+        # before the panes -- see _build_actionbar()'s comment for why the
+        # order matters here, not just cosmetically.
         self._build_actionbar()
         self._build_statusbar()
+        self._build_panes()
 
         self._bind_shortcuts()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -2289,7 +2292,10 @@ class Scriptorium(ctk.CTk):
         # (notes_017 §1.6/2.7): the old disabled textbox had no dismiss
         # control and blocked text selection on some CTk versions, so a
         # flagged line couldn't even be copied out.
-        self.notice_frame = ctk.CTkFrame(self, fg_color=AMBER_BG,
+        # Parented on _bottom_frame (built by _build_actionbar(), which now
+        # runs before this method) rather than self, so pack(before=self.status)
+        # below still refers to a sibling under the same master.
+        self.notice_frame = ctk.CTkFrame(self._bottom_frame, fg_color=AMBER_BG,
                                          corner_radius=6)
         rule = ctk.CTkFrame(self.notice_frame, width=4, fg_color=AMBER_RULE,
                             corner_radius=0)
@@ -2311,7 +2317,25 @@ class Scriptorium(ctk.CTk):
         # next to Undo was that overlap, not a rendering bug in Copy itself).
         # Row 1 is the review/process workflow; row 2 is original-text and
         # file operations.
-        bar = ctk.CTkFrame(self, fg_color="transparent")
+        #
+        # Both rows (and the status bar, built into this same frame by
+        # _build_statusbar()) live in one wrapper packed to the *bottom* of
+        # the window, built and packed before _build_panes() runs. pack()'s
+        # cavity is carved in packing order regardless of side: an
+        # expand=True/fill="both" sibling packed first (the panes used to be)
+        # claims the entire remaining cavity for itself the moment it is
+        # packed, even if its own requested height is a wish rather than a
+        # hard need -- so a later-packed fixed-height sibling can be left
+        # with nothing, not just squeezed. The panes' own default text-box
+        # height easily exceeds the app's default 1180x760 window on its
+        # own, which is exactly what was swallowing this frame. Reserving
+        # this frame's (modest, fixed) height first guarantees it is always
+        # visible; the panes still fill whatever is left via their own
+        # internal grid row-weight, same as before.
+        self._bottom_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self._bottom_frame.pack(side="bottom", fill="x")
+
+        bar = ctk.CTkFrame(self._bottom_frame, fg_color="transparent")
         bar.pack(fill="x", padx=12, pady=(8, 4))
 
         self.process_btn = ctk.CTkButton(bar, text="Process", width=100,
@@ -2340,7 +2364,16 @@ class Scriptorium(ctk.CTk):
         ctk.CTkButton(bar, text="Undo", width=80, fg_color="gray30",
                       command=self.undo).pack(side="left", padx=4)
 
-        bar2 = ctk.CTkFrame(self, fg_color="transparent")
+        # Clear/Import/Export on row 1 (right-aligned), per Mark's request --
+        # row 2 is Original-pane copy/paste only.
+        ctk.CTkButton(bar, text="Export…", width=90, fg_color="gray30",
+                      command=self.export_file).pack(side="right")
+        ctk.CTkButton(bar, text="Import…", width=90, fg_color="gray30",
+                      command=self.import_file).pack(side="right", padx=4)
+        ctk.CTkButton(bar, text="Clear", width=80, fg_color="gray30",
+                      command=self.clear_all).pack(side="right", padx=4)
+
+        bar2 = ctk.CTkFrame(self._bottom_frame, fg_color="transparent")
         bar2.pack(fill="x", padx=12, pady=(0, 8))
 
         ctk.CTkButton(bar2, text="Paste", width=80, fg_color="gray30",
@@ -2348,22 +2381,15 @@ class Scriptorium(ctk.CTk):
         ctk.CTkButton(bar2, text="Copy", width=80, fg_color="gray30",
                       command=self.copy_original).pack(side="left", padx=4)
 
-        ctk.CTkButton(bar2, text="Export…", width=90, fg_color="gray30",
-                      command=self.export_file).pack(side="right")
-        ctk.CTkButton(bar2, text="Import…", width=90, fg_color="gray30",
-                      command=self.import_file).pack(side="right", padx=4)
-        ctk.CTkButton(bar2, text="Clear", width=80, fg_color="gray30",
-                      command=self.clear_all).pack(side="right", padx=4)
-
         # Working… motion (notes_017 §1.5/2.6): a static "Working…" label was
         # the only feedback during a long Ollama call, which reads as frozen.
         # Packed/started on demand from _set_busy(), not here.
-        self.progress = ctk.CTkProgressBar(self, mode="indeterminate",
+        self.progress = ctk.CTkProgressBar(self._bottom_frame, mode="indeterminate",
                                            height=4)
         self._pulse_job = None
 
     def _build_statusbar(self):
-        self.status = ctk.CTkLabel(self, text="", anchor="w",
+        self.status = ctk.CTkLabel(self._bottom_frame, text="", anchor="w",
                                    text_color="gray65",
                                    font=ctk.CTkFont(size=12))
         self.status.pack(fill="x", padx=16, pady=(0, 8))

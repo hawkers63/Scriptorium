@@ -4,12 +4,12 @@
 When Mark says "lets get started", that is the cue to open these three files
 before doing anything else.
 
-Current shipped version: **2.13** (v2.9 bug-fix pass, v2.10 visual/UX
+Current shipped version: **2.14** (v2.9 bug-fix pass, v2.10 visual/UX
 polish, v2.11 three-tone picker, v2.12 persisted user presets, v2.13 backend
-retry transport — all five against the review notes that opened this
-session; see those sections below). v2.14+ (notes_016's remaining two
-Win32-heavy proposals) is scoped but not yet implemented. Drag-and-drop
-import remains deliberately deferred pending v2.14+, see "Deferred" below.
+retry transport, v2.14 hand-testing fixes — see those sections below).
+v2.15+ (notes_016's remaining two Win32-heavy proposals) is scoped but not
+yet implemented. Drag-and-drop import remains deliberately deferred pending
+v2.15+, see "Deferred" below.
 
 Scope through v2.3 was drawn from twelve accumulated review notes
 (`notes/01_Active/notes_001.txt` – `notes_012.txt`), written independently by
@@ -661,7 +661,7 @@ UI/UX visual audit; notes_018 Zoe — a fresh static bug hunt against v2.8).
 Rather than one grab-bag release, the work was split: this version closes
 every concrete, confirmed bug notes_018 found (all low individual risk, all
 worth fixing on their own merits); notes_017's visual polish and notes_016's
-five architecture proposals are scoped separately below (v2.10, v2.11/v2.12/v2.13/v2.14+) since
+five architecture proposals are scoped separately below (v2.10, v2.11/v2.12/v2.13/v2.15+) since
 bundling correctness fixes with new-feature/visual work would make either
 harder to verify in isolation.
 
@@ -1170,7 +1170,113 @@ for transparency rather than silently assumed equivalent.
 
 ---
 
-## v2.14+ — Remaining notes_016 architecture proposals (scoped, not yet implemented)
+## v2.14 — Hand-testing fixes: action-bar/status-bar visibility, button layout, autostart ✅ shipped 2026-09-02
+
+**Goal:** three issues Mark found hand-testing v2.13 (screenshot `01.jpg` on
+the Desktop, plus a direct question about autostart), none from the notes
+backlog. Session opened with an instruction to start v2.15's drag-and-drop
+work; that was paused in favour of this hand-testing pass, per the v2.7→v2.8
+precedent.
+
+1. **Action bar and status bar were being pushed off-window at the app's own
+   default size** — `01.jpg` showed only the toolbar and the Original/
+   Suggested panes; both action-bar rows and the status bar were entirely
+   absent, not just visually different. Root-caused, not guessed at: a
+   throwaway diagnostic build (`Scriptorium()` constructed directly against
+   an isolated temp config, `winfo_reqheight()`/`winfo_manager()` read from
+   the real widget tree) showed the panes frame's own natural minimum height
+   (852px — driven mostly by `revised_box`, a plain `tk.Text` that has never
+   had an explicit `height=` set, so it defaults to Tk's built-in 24 text
+   rows) exceeds the 760px the default `1180x760` window actually has left
+   after the 48px toolbar. `pack()`'s cavity is carved in packing order
+   regardless of `side`: the panes frame was packed (and its `expand=True,
+   fill="both"` honoured) *before* the action bar/status bar in `__init__`,
+   so it claimed the entire remaining cavity for itself the moment it was
+   packed, leaving literally nothing for the widgets packed after it —
+   confirmed directly: `bar`/`bar2`/`status` all showed `manager="pack"` but
+   `winfo_ismapped()` False and an actual height of 1px. This was not a new
+   regression introduced by any single version; nothing in v2.9-v2.13's own
+   verification ever checked *vertical* fit (v2.8's own check, when the
+   action bar was first split into two rows, measured only button-row
+   *widths* against the window width — never whether the two rows plus the
+   status bar fit *underneath* the panes' own minimum height). Fixed by
+   building the action bar and status bar into one `_bottom_frame`, packed
+   to `side="bottom"` *before* `_build_panes()` runs, so their combined
+   112px is always reserved first regardless of how tall the panes would
+   like to be; the panes still fill whatever is left via their existing
+   internal grid row-weight (compressing gracefully to ~590-600px instead of
+   their 852px wish, exactly as they already did at 702px before this fix,
+   just more so) rather than ever swallowing a sibling. The on-demand
+   ambiguity banner (`notice_frame`) was reparented onto `_bottom_frame` too,
+   since `_show_ambiguities()`'s `pack(before=self.status)` needs a shared
+   master.
+2. **Button rearrangement, Mark's explicit instruction mid-session**: Clear/
+   Import/Export moved from row 2 onto row 1 (right-aligned, after Undo);
+   row 2 now holds only Paste/Copy. Verified against the real widget tree:
+   row 1's eleven buttons request 1124px against 1156px available at the
+   default 1180px window width (fits, 32px to spare) — noted as tighter than
+   before and likely to crowd if the window is resized down toward its
+   920px `minsize`, same class of issue v2.8 fixed for the original
+   single-row layout, not re-solved here since it wasn't asked for.
+3. **"No longer starting with Windows minimised"**: investigated rather than
+   assumed. Directly tested the *real* packaged `.exe` against Mark's
+   *actual* saved config (`start_minimised`/`minimise_to_tray`/
+   `start_with_windows` all already `true`) — it correctly launched with no
+   visible window at all (`MainWindowHandle: 0` on both the bootloader and
+   child process, confirmed via a full `EnumWindows` scan finding nothing
+   titled "Scriptorium"). The app-level minimise-to-tray code is not broken.
+   What was actually missing: `HKCU\...\Run` had **no `Scriptorium` value at
+   all** — confirmed unambiguously (`Get-ItemProperty -Name Scriptorium`
+   returned null; the full key's other ~8 entries listed fine). A config
+   value of `start_with_windows: true` does not itself create this registry
+   entry — only `set_autostart(True)`, called from `SettingsDialog._save()`,
+   does that — so autostart was not actually wired up on this machine
+   regardless of app version, meaning nothing would launch Scriptorium at
+   logon at all, not "launches but shows a window instead of hiding". Fixed,
+   with Mark's explicit go-ahead, by writing the exact command line
+   `set_autostart(True)` would produce for the frozen case
+   (`"C:\Scriptorium\dist\Scriptorium.exe" --minimised`) directly to the real
+   registry, then verified for real: launching that exact command line as a
+   subprocess produced a `Scriptorium.exe` process with `MainWindowHandle: 0`
+   and `Responding: True` — genuinely starts withdrawn to tray, matching the
+   v2.5 verification precedent.
+
+### Acceptance checklist
+- [x] Both action-bar rows and the status bar are visible at the app's
+      default `1180x760` geometry. Verified against the real widget tree
+      before the fix (`bar`/`bar2`/`status` all `manager="pack"`, actual
+      height 1px, `winfo_ismapped()` False — reproduced the bug on demand)
+      and after (`_bottom_frame` gets its full 112px request; `process_btn`
+      and `status` both confirmed mapped at sane on-screen y-coordinates).
+      Also confirmed visually: a real windowed instance captured via
+      `PrintWindow` (bypassing this project's usual UI-automation gap) shows
+      the toolbar, both panes, both action-bar rows and the status bar all
+      present and correctly positioned.
+- [x] Row 1 now ends with Clear/Import/Export after Undo; row 2 holds only
+      Paste/Copy. Verified against the real widget tree (button texts and
+      order read directly from each row's children) and that row 1 still
+      fits the default window width with margin (1124px of 1156px
+      available).
+- [x] The ambiguity banner still attaches/detaches correctly after being
+      reparented onto `_bottom_frame`. Verified via `_show_ambiguities()`
+      called for real with a populated list then an empty one:
+      `winfo_manager()` reports `"pack"` then `""` with no `TclError` from
+      the `before=self.status` reference (this project's own documented
+      `winfo_ismapped()`-without-`mainloop()` artefact means that probe
+      alone reads False regardless; `winfo_manager()` is the reliable one,
+      per the v2.10 precedent).
+- [x] Real packaged `.exe` rebuilt (`FileVersion`/`ProductVersion` confirmed
+      `2.14.0.0`), launched for real both normally and via the literal
+      registered autostart command line; both confirmed alive and
+      `Responding: True`, the latter with no visible window. Real
+      `scriptorium_config.json` (holds the live API key) confirmed
+      byte-identical (unchanged mtime) throughout — every layout/geometry
+      test used an isolated temp config; only the registry write (explicitly
+      approved) touched real machine state.
+
+---
+
+## v2.15+ — Remaining notes_016 architecture proposals (scoped, not yet implemented)
 
 **Goal:** notes_016's remaining two proposals — both raw-Win32
 (window-procedure subclassing, hand-rolled `CF_HTML` clipboard transfer),
@@ -1239,7 +1345,7 @@ No acceptance checklist yet — not started this session.
   file is actually dropped. Revisit as its own properly-scoped session
   (real Win32 message-loop subclassing, needs hand-testing) rather than
   guessing at it inside v2.7. **Superseded 2026-09-02**: notes_016 supplies
-  the missing `WM_DROPFILES` subclass; now scoped as v2.14+ item 1 above,
+  the missing `WM_DROPFILES` subclass; now scoped as v2.15+ item 1 above,
   no longer blocked on an incomplete proposal.
 
 ---
@@ -1260,7 +1366,7 @@ No acceptance checklist yet — not started this session.
 | notes_013 | 31 Aug | Mark / Codex | v2.3 | Closed by v2.4 |
 | notes_014 | 1 Sep | Gale | v2.5 (delta) | Closed by v2.6 (icon/single-instance) and v2.7 (always-on-top, change summary); drag-and-drop deferred, superseded by notes_016 (see "Deferred") |
 | notes_015 | 1 Sep | Antigravity | v2.5 (delta) | Closed by v2.6; its S1 "Confirmed" and S2 "Addressed" verdicts did not hold up against live re-testing — see v2.6 write-up |
-| notes_016 | 1 Sep | Mark / Codex | v2.9+ (architecture) | Three-tone picker closed by v2.11 (found and fixed real embellishment bugs); user presets closed by v2.12 (one deliberate dialog-ownership deviation); retry transport closed by v2.13 (one stale-docstring fix noticed and corrected along the way); drag-and-drop and rich clipboard scoped as v2.14+, not yet implemented |
+| notes_016 | 1 Sep | Mark / Codex | v2.9+ (architecture) | Three-tone picker closed by v2.11 (found and fixed real embellishment bugs); user presets closed by v2.12 (one deliberate dialog-ownership deviation); retry transport closed by v2.13 (one stale-docstring fix noticed and corrected along the way); drag-and-drop and rich clipboard scoped as v2.15+, not yet implemented |
 | notes_017 | 1 Sep | Lynne | v2.8 (delta) | Closed by v2.10 (typography/contrast, notice banner, busy motion, dialog chrome, backend labels; toolbar-wrap and character-level diffs deliberately not carried in, see v2.10 write-up) |
 | notes_018 | 1 Sep | Zoe | v2.8 (delta) | Closed by v2.9 (Bugs 1–2/S2, 3–7, S1); S3 deliberately not fixed (informational only, see v2.9 write-up) |
 

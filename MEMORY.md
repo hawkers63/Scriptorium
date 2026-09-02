@@ -6,6 +6,102 @@ Mark saying "lets get started").
 
 ---
 
+## 2026-09-02 (new session) — v2.14: action-bar/status-bar visibility, button rearrangement, autostart
+
+Mark opened with "start v2.14 drag-and-drop", then immediately shared a
+hand-testing screenshot (`01.jpg`) instead: the app no longer starts
+minimised with Windows, and the two-row action bar plus the status bar from
+v2.8 onward were entirely missing — only the toolbar and the Original/
+Suggested panes showed. Per the v2.7→v2.8 precedent, paused the planned
+v2.15 (renumbered from v2.14+) Win32 work and ran a hand-testing fix pass
+instead. Full detail and acceptance evidence in `ROADMAP.md`'s v2.14 section;
+the two things worth expanding on here:
+
+**The missing action bar/status bar was a real, root-caused `pack()` bug, not
+a cosmetic regression** — confirmed by constructing the real `Scriptorium()`
+against an isolated temp config and reading `winfo_reqheight()`/
+`winfo_manager()` directly off the live widget tree. The panes frame's own
+natural minimum height (852px, driven by `revised_box` — a plain `tk.Text`
+that has never had an explicit `height=`, so it defaults to Tk's built-in 24
+rows) exceeds the 760px the default `1180x760` window has left after the
+48px toolbar. `pack()` carves its cavity in packing order regardless of
+`side`: since the panes frame (built by `_build_panes()`, `expand=True,
+fill="both"`) was packed *before* the action bar/status bar in `__init__`, it
+claimed the entire remaining cavity for itself the instant it was packed,
+leaving the later-packed `bar`/`bar2`/`status` with `manager="pack"` but an
+actual height of 1px and `winfo_ismapped()` False. **Not a new regression
+from any single version** — v2.8's own verification, when the action bar was
+first split into two rows, checked only button-row *widths* against the
+window width, never whether the two rows plus the status bar fit
+*vertically* underneath the panes' own minimum height; no session since
+(v2.9-v2.13) ever re-checked this either, all relying on "process constructs
+and stays alive" checks rather than a real layout screenshot. Fixed by
+building the action bar and status bar into one `_bottom_frame`, packed
+`side="bottom"` *before* `_build_panes()` runs, so its combined 112px is
+always reserved first; the panes still compress via their own existing grid
+row-weight to fill whatever's left (~590-600px instead of their 852px wish),
+exactly as they were already doing at 702px before this fix, just more so.
+The on-demand ambiguity banner (`notice_frame`) was reparented onto
+`_bottom_frame` too, since `_show_ambiguities()`'s `pack(before=self.status)`
+needs a shared master — verified this doesn't raise and still
+attaches/detaches correctly (`winfo_manager()` `"pack"` then `""`).
+Screenshotted for real afterwards via `PrintWindow` (this project's usual
+UI-automation gap doesn't block a raw window capture): toolbar, both panes,
+both action-bar rows and the status bar all visible and correctly
+positioned. Mark separately asked, mid-session, to move Clear/Import/Export
+from row 2 onto row 1 (right-aligned after Undo), leaving row 2 as
+Paste/Copy only — done; row 1 now requests 1124px of 1156px available at the
+default window width (fits, but tighter than before — flagged in
+`ROADMAP.md` as likely to crowd if resized down toward the 920px `minsize`,
+not pre-emptively fixed since it wasn't asked for).
+
+**"No longer starting with Windows minimised" was a real but different bug
+than it looked like — the app-level code wasn't broken, autostart itself
+was never wired up on this machine.** Directly tested the real packaged
+`.exe` against Mark's actual saved config (`start_minimised`/
+`minimise_to_tray`/`start_with_windows` all already `true` in it): launched
+with no visible window at all, confirmed via a full `EnumWindows` scan
+finding nothing titled "Scriptorium" and both the bootloader and child
+process showing `MainWindowHandle: 0`. Then checked `HKCU\...\Run` directly
+and found **no `Scriptorium` value there at all** (confirmed unambiguously —
+`Get-ItemProperty -Name Scriptorium` returned null while the key's other
+~8 entries listed fine). A `true` value in the config JSON does not itself
+create this registry entry; only `set_autostart(True)`, called from
+`SettingsDialog._save()`, does — so nothing was actually launching
+Scriptorium at logon at all, on any version, not "launches but fails to
+minimise". With Mark's explicit go-ahead ("yes please do"), wrote the exact
+command line `set_autostart(True)` would produce for the frozen case
+(`"C:\Scriptorium\dist\Scriptorium.exe" --minimised`) directly to the real
+registry, then verified for real by launching that exact command line as a
+subprocess: produced a `Scriptorium.exe` process with `MainWindowHandle: 0`,
+`Responding: True` — genuinely starts withdrawn to tray now, matching the
+v2.5 verification precedent. Root cause of how the registry entry went
+missing wasn't established (no direct evidence either way) — noted as
+possibly never actually saved through Settings on this install, or removed
+by one of the cleanup tools already implicated in this project's v2.8
+`_MEI...` incident, but not chased further since Mark didn't ask for that.
+
+**Verification**: `ast.parse()` clean; real `.exe` rebuilt via
+`pyinstaller scriptorium.spec`, `FileVersion`/`ProductVersion` confirmed
+`2.14.0.0`. Real `scriptorium_config.json` confirmed byte-identical
+(unchanged mtime) throughout every layout test (all used an isolated temp
+config); the only real-machine state touched was the explicitly-approved
+registry write. Every diagnostic `Scriptorium.exe`/`python` process launched
+during testing was cleaned up afterwards (`Stop-Process -Force` plus the
+resulting orphaned `_MEI######` extraction folder removed, same expected
+onefile-forced-kill artefact as prior sessions).
+
+`ROADMAP.md` restructured: new v2.14 section (this work) inserted ahead of
+the renumbered v2.15+ (the two raw-Win32 items, formerly labelled v2.14+ as
+a placeholder); "Current shipped version" updated to 2.14. Not yet committed
+or pushed — pending final confirmation this session.
+
+Next: Mark's original instruction for this session ("start v2.14 drag-and-
+drop") now maps to v2.15+ under the new numbering — hasn't been resumed yet,
+paused by this hand-testing detour exactly as v2.7 was paused for v2.8.
+
+---
+
 ## 2026-09-02 — Three new review notes triaged; v2.9 (bug-fix pass) implemented
 
 Mark opened the session with three new notes already sitting in
