@@ -6,6 +6,77 @@ Mark saying "lets get started").
 
 ---
 
+## 2026-09-02 (continued) — v2.15: Explorer drag-and-drop, verified with a real synthetic WM_DROPFILES message
+
+Continued from v2.14 in the same session. Mark's original instruction for
+the session ("start v2.14 drag-and-drop") had been paused for the v2.14
+hand-testing detour; after v2.14 shipped and pushed, Mark gave an explicit
+go-ahead to start this — the first time this project's own "confirm risk
+appetite before the raw-Win32 items" checkpoint has actually been exercised
+rather than deferred (see [[project_v24_status]]). Full task list and
+acceptance evidence in `ROADMAP.md`'s v2.15 section; worth expanding on here:
+
+**Implemented essentially as notes_016 §2.1/3.2 specified, not improvised
+fresh** — deliberately, given this is flagged (correctly) as the highest
+single-bug blast radius in the whole backlog: a bad `WNDPROC` can hang or
+crash the whole app, not just one feature. Adapted only to the current
+file's structure (line numbers had drifted six versions since the note was
+written) and to preserve `import_file()`'s exact existing error-message
+wording rather than the note's own slightly different phrasing — a
+deliberate "smallest safe change" call, not an oversight: the note's own
+`_read_document_path()`/`_load_file_path()` split was followed, but the
+shared loader's exception handling was written to reproduce the pre-existing
+dialogs byte-for-byte rather than adopt the note's rewording.
+
+**Verification leaned on a genuinely synthetic-but-real `WM_DROPFILES`
+message, not a mocked call** — this was the one place in the whole session
+worth the extra rigor. Built a real `DROPFILES` structure in `GlobalAlloc`'d
+memory (test-harness-only Win32 code — `GlobalAlloc`/`GlobalLock`/
+`ScreenToClient`/`SendMessageW`, none of it shipped in `scriptorium.py`
+itself) containing a real temp `.txt` file's path, computed the correct
+client-relative drop point via `ScreenToClient()` against `original_box`'s
+actual on-screen centre, then called `SendMessageW()` directly against the
+live, already-subclassed `_drop_hwnd` — exercising the real installed
+window procedure end-to-end (proving `SetWindowLongPtrW` genuinely replaced
+it and `_capture_file_drop`/`_handle_dropped_paths`/`_load_file_path` all
+fire correctly), not a direct Python call standing in for that plumbing.
+Result: `SendMessageW` returned `0` (the handler's own return value,
+confirming real interception rather than fallthrough to the original
+procedure), the real file's exact content landed in `original_box`, and the
+status bar updated correctly. Followed up with two more targeted checks:
+teardown (`_quit_app()`, not `destroy()` directly — confirmed
+`_drop_hwnd`/`_drop_old_wndproc`/`_drop_wndproc` all reset to `None` and no
+crash/hang before the window is actually destroyed) and five edge cases
+(drop outside Original, unsupported extension, directory, multiple files,
+zero files — all correctly rejected with `original_box` left untouched,
+`messagebox` patched to non-blocking recorders so a real modal couldn't hang
+the test).
+
+**Also implemented, low-risk**: `_load_file_path()`/`_read_document_path()`
+now shared between the Import dialog and a completed drop — the dialog's own
+long-standing "accept whatever the user explicitly picks" behaviour is
+unchanged; only the new drop path gets the narrower `.txt`/`.md`/`.docx`
+extension gate notes_016 called for, applied in `_handle_dropped_paths()`
+rather than the shared reader, specifically so it doesn't retroactively
+tighten the existing dialog's behaviour.
+
+**Verification**: `ast.parse()` clean; real packaged `.exe` rebuilt,
+`FileVersion`/`ProductVersion` confirmed `2.15.0.0`, launched for real
+against the live config (both bootloader and child process alive,
+`Responding: True`, correctly hidden per `start_minimised` — no crash from
+the new ctypes declarations at import time). Real `scriptorium_config.json`
+confirmed byte-identical throughout — every test used an isolated temp
+config. Every diagnostic process cleaned up afterwards, same discipline as
+v2.14.
+
+`ROADMAP.md` restructured: v2.15 is its own shipped section (drag-and-drop
+only); the remaining notes_016 item (rich `CF_HTML` clipboard diff) split
+out as its own **v2.16**, not bundled with drag-and-drop, per this project's
+established one-focused-release-per-risk/theme pattern; "Current shipped
+version" updated to 2.15.
+
+---
+
 ## 2026-09-02 (new session) — v2.14: action-bar/status-bar visibility, button rearrangement, autostart
 
 Mark opened with "start v2.14 drag-and-drop", then immediately shared a
@@ -93,12 +164,12 @@ onefile-forced-kill artefact as prior sessions).
 
 `ROADMAP.md` restructured: new v2.14 section (this work) inserted ahead of
 the renumbered v2.15+ (the two raw-Win32 items, formerly labelled v2.14+ as
-a placeholder); "Current shipped version" updated to 2.14. Not yet committed
-or pushed — pending final confirmation this session.
+a placeholder); "Current shipped version" updated to 2.14. Committed and
+pushed after explicit confirmation.
 
-Next: Mark's original instruction for this session ("start v2.14 drag-and-
-drop") now maps to v2.15+ under the new numbering — hasn't been resumed yet,
-paused by this hand-testing detour exactly as v2.7 was paused for v2.8.
+Mark then gave an explicit go-ahead to resume the session's original
+instruction (drag-and-drop, now v2.15) in the same round of questions that
+approved the v2.14 push — see the entry above for that work.
 
 ---
 

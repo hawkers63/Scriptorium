@@ -4,12 +4,11 @@
 When Mark says "lets get started", that is the cue to open these three files
 before doing anything else.
 
-Current shipped version: **2.14** (v2.9 bug-fix pass, v2.10 visual/UX
+Current shipped version: **2.15** (v2.9 bug-fix pass, v2.10 visual/UX
 polish, v2.11 three-tone picker, v2.12 persisted user presets, v2.13 backend
-retry transport, v2.14 hand-testing fixes — see those sections below).
-v2.15+ (notes_016's remaining two Win32-heavy proposals) is scoped but not
-yet implemented. Drag-and-drop import remains deliberately deferred pending
-v2.15+, see "Deferred" below.
+retry transport, v2.14 hand-testing fixes, v2.15 Explorer drag-and-drop — see
+those sections below). v2.16 (notes_016's remaining raw-Win32 item, the rich
+`CF_HTML` clipboard diff) is scoped but not yet implemented.
 
 Scope through v2.3 was drawn from twelve accumulated review notes
 (`notes/01_Active/notes_001.txt` – `notes_012.txt`), written independently by
@@ -661,7 +660,7 @@ UI/UX visual audit; notes_018 Zoe — a fresh static bug hunt against v2.8).
 Rather than one grab-bag release, the work was split: this version closes
 every concrete, confirmed bug notes_018 found (all low individual risk, all
 worth fixing on their own merits); notes_017's visual polish and notes_016's
-five architecture proposals are scoped separately below (v2.10, v2.11/v2.12/v2.13/v2.15+) since
+five architecture proposals are scoped separately below (v2.10, v2.11/v2.12/v2.13/v2.15/v2.16) since
 bundling correctness fixes with new-feature/visual work would make either
 harder to verify in isolation.
 
@@ -1276,26 +1275,117 @@ precedent.
 
 ---
 
-## v2.15+ — Remaining notes_016 architecture proposals (scoped, not yet implemented)
+## v2.15 — Explorer drag-and-drop ✅ shipped 2026-09-02
 
-**Goal:** notes_016's remaining two proposals — both raw-Win32
-(window-procedure subclassing, hand-rolled `CF_HTML` clipboard transfer),
-sequenced together since this project's own history shows Win32-level
-features need the most hand-testing and carry the highest single-bug blast
-radius (a bad `WNDPROC` can hang or crash the whole app, not just one
-feature).
+**Goal:** notes_016 §2.1/3.2 (Mark/Codex) — unlike notes_014/015's incomplete
+`DragAcceptFiles`-only proposal (deferred after v2.7, see "Deferred" below),
+this note supplies the full `WM_DROPFILES` `WNDPROC` subclass needed to
+actually retrieve a dropped path, not just register interest in one. The
+highest platform risk in the backlog, per this project's own history (a bad
+`WNDPROC` can hang or crash the whole app, not just one feature) — Mark gave
+an explicit go-ahead to start it after the v2.14 hand-testing detour.
+Implemented essentially as the note specified (a reviewed design, not
+improvised fresh, precisely because of that risk); adapted only to the
+current file's structure and to preserve `import_file()`'s exact existing
+error-message wording rather than the note's own slightly different phrasing.
 
-1. **Explorer drag-and-drop** (notes_016 §2.1/3.2) — unlike notes_014/015's
-   incomplete `DragAcceptFiles`-only proposal (deferred after v2.7, see
-   below), this note supplies the full `WM_DROPFILES` `WNDPROC` subclass.
-   Legitimate now, but the highest platform risk in the backlog — needs
-   dedicated hand-testing per notes_016's own verification matrix (§5)
-   before it ships.
-2. **Markdown diff export + rich `CF_HTML` clipboard diff** (notes_016
-   §2.4/3.5) — the other raw-Win32 item (manual `GlobalAlloc`/clipboard
-   transaction); sequenced together with drag-and-drop for the same reason.
+1. **Native `WM_DROPFILES` bridge** — subclasses the toplevel's own window
+   procedure (`SetWindowLongPtrW(GWLP_WNDPROC)`), retaining both the Python
+   callback and the original procedure on the instance (`_drop_hwnd`,
+   `_drop_wndproc`, `_drop_old_wndproc`) and forwarding every other message
+   through `CallWindowProcW` unchanged. On `WM_DROPFILES`: hit-tests the drop
+   point against `self.original_box` (accepting it or any Tk/CustomTkinter
+   descendant), extracts every dropped path via `DragQueryFileW`, and always
+   calls `DragFinish()` in a `finally` block before deferring all Tk/file
+   work to `after_idle()` — no Tk mutation happens inside the Win32 callback
+   itself. Installed via `self.after_idle(self._enable_file_drops)` scheduled
+   at the end of `__init__` (`wm_frame()` is only reliable once Tk has
+   realised the top-level); torn down via `_disable_file_drops()`, called
+   from `_quit_app()` before `self.destroy()` so the subclass is always
+   removed and the callback reference released while the window still exists.
+   Installation failure (e.g. a locked-down `SetWindowLongPtrW`) is non-fatal
+   and reported via the status bar — Import continues to work regardless.
+2. **Shared loader** — `import_file()` split into `_read_document_path()`
+   (path → text, extension-agnostic, unraised errors bubble up — preserves
+   `import_file()`'s existing "All files" dialog behaviour exactly, since it
+   has always accepted whatever the user explicitly picks) and
+   `_load_file_path()` (the existing undo/reject/insert/status sequence plus
+   every existing error dialog, unchanged in wording). Both the file dialog
+   and a completed drop now go through the identical path. Drops are
+   deliberately narrower than the dialog: `_handle_dropped_paths()` rejects
+   anything but a single `.txt`/`.md`/`.docx` file before ever calling the
+   shared loader, since a drop is a much lower-friction action than
+   deliberately choosing a file in a dialog — this does not change what the
+   Import dialog itself accepts.
+3. **Deliberately not enabling `ChangeWindowMessageFilterEx`** — dragging from
+   an unelevated Explorer into an elevated Scriptorium is blocked by Windows
+   integrity isolation by design; Scriptorium should run unelevated rather
+   than widening the accepted cross-integrity message surface to work around
+   that.
 
-No acceptance checklist yet — not started this session.
+### Acceptance checklist
+- [x] A real drop lands the file's actual content in Original, indistinguishable
+      from Import. Verified with a genuinely synthetic-but-real `WM_DROPFILES`
+      message: a real `DROPFILES` structure built in `GlobalAlloc`'d memory
+      (test-harness-only Win32 code, not shipped) with a real temp `.txt`
+      file's path, `ScreenToClient()`'d against `original_box`'s actual
+      on-screen centre, sent via `SendMessageW()` directly to the live,
+      already-subclassed `_drop_hwnd` — exercising the *actual* installed
+      window procedure end-to-end, not a direct Python call standing in for
+      it. Result: `SendMessageW` returned 0 (our handler's own return value,
+      confirming the subclass really intercepted the message rather than
+      falling through to the original procedure), the real file's exact
+      content landed in `original_box`, and the status bar correctly showed
+      the new word/character count.
+- [x] The window remains fully responsive after subclassing. Verified: `self.title(...)`
+      calls before and after the `SendMessageW` both succeeded with no error,
+      confirming `CallWindowProcW` forwarding doesn't break ordinary window
+      behaviour.
+- [x] Teardown removes the subclass cleanly before the window is destroyed.
+      Verified against the real `_quit_app()` (not `destroy()` called
+      directly): `_drop_hwnd`/`_drop_old_wndproc`/`_drop_wndproc` all
+      confirmed `None` immediately after `_quit_app()` runs and before
+      `self.destroy()` completes it; no exception, no hang, clean process
+      exit.
+- [x] A drop outside Original is ignored (status message only, no file
+      touched); an unsupported extension, a directory-shaped path, more than
+      one file, and zero files are all rejected with the correct dialog/status
+      and leave `original_box` untouched. Verified against the real
+      `_handle_dropped_paths()`/`_point_is_over_original()` for all five
+      cases, `messagebox.showerror`/`showinfo` patched to non-blocking
+      recorders so a real modal couldn't hang the test.
+- [x] `_load_file_path()`'s error handling is unchanged from the pre-refactor
+      `import_file()`: a missing file (`OSError`), a `.docx` needing
+      `python-docx`, and a genuinely bad encoding all produce the exact same
+      dialogs as before, with `original_box` left untouched on every failure
+      path. Verified directly, including a real missing-file `OSError`
+      surfacing its exact message text.
+- [x] `ast.parse()` clean; real packaged `.exe` rebuilt (`FileVersion`/
+      `ProductVersion` confirmed `2.15.0.0`), launched for real against the
+      live config (both processes alive, `Responding: True`, correctly
+      hidden per `start_minimised`), no startup crash from the new ctypes
+      declarations. Real `scriptorium_config.json` confirmed byte-identical
+      throughout — every drag-and-drop test used an isolated temp config.
+
+**Deferred to v2.16**: notes_016 §2.4/3.5's Markdown diff export and rich
+`CF_HTML` clipboard diff (the note's other raw-Win32 item, a separate
+`GlobalAlloc`/clipboard transaction unrelated to `WM_DROPFILES`) — split out
+rather than bundled with drag-and-drop, per this project's own established
+pattern of one focused, independently-verifiable release per risk/theme
+rather than grab-bagging two different raw-Win32 features together.
+
+---
+
+## v2.16 — Rich `CF_HTML` clipboard diff (scoped, not yet implemented)
+
+**Goal:** notes_016 §2.4/3.5 — a fenced unified Markdown diff export plus an
+HTML clipboard format (with a plain-text fallback) for "Copy rich diff",
+useful when pasting into Word/Outlook. The other raw-Win32 item in the
+backlog (manual `GlobalAlloc`/clipboard transaction, `CF_HTML` header byte
+offsets), so carries meaningful platform risk of its own even though it
+doesn't touch the same `WNDPROC`-subclassing surface as v2.15.
+
+No acceptance checklist yet — not started.
 
 ---
 
@@ -1344,9 +1434,9 @@ No acceptance checklist yet — not started this session.
   it would be dead code that looks like a feature but does nothing when a
   file is actually dropped. Revisit as its own properly-scoped session
   (real Win32 message-loop subclassing, needs hand-testing) rather than
-  guessing at it inside v2.7. **Superseded 2026-09-02**: notes_016 supplies
-  the missing `WM_DROPFILES` subclass; now scoped as v2.15+ item 1 above,
-  no longer blocked on an incomplete proposal.
+  guessing at it inside v2.7. **Superseded, then shipped 2026-09-02**:
+  notes_016 supplied the missing `WM_DROPFILES` subclass; implemented and
+  verified as v2.15 above.
 
 ---
 
@@ -1366,7 +1456,7 @@ No acceptance checklist yet — not started this session.
 | notes_013 | 31 Aug | Mark / Codex | v2.3 | Closed by v2.4 |
 | notes_014 | 1 Sep | Gale | v2.5 (delta) | Closed by v2.6 (icon/single-instance) and v2.7 (always-on-top, change summary); drag-and-drop deferred, superseded by notes_016 (see "Deferred") |
 | notes_015 | 1 Sep | Antigravity | v2.5 (delta) | Closed by v2.6; its S1 "Confirmed" and S2 "Addressed" verdicts did not hold up against live re-testing — see v2.6 write-up |
-| notes_016 | 1 Sep | Mark / Codex | v2.9+ (architecture) | Three-tone picker closed by v2.11 (found and fixed real embellishment bugs); user presets closed by v2.12 (one deliberate dialog-ownership deviation); retry transport closed by v2.13 (one stale-docstring fix noticed and corrected along the way); drag-and-drop and rich clipboard scoped as v2.15+, not yet implemented |
+| notes_016 | 1 Sep | Mark / Codex | v2.9+ (architecture) | Three-tone picker closed by v2.11 (found and fixed real embellishment bugs); user presets closed by v2.12 (one deliberate dialog-ownership deviation); retry transport closed by v2.13 (one stale-docstring fix noticed and corrected along the way); Explorer drag-and-drop closed by v2.15 (verified with a real synthetic WM_DROPFILES message end-to-end); rich CF_HTML clipboard diff scoped as v2.16, not yet implemented |
 | notes_017 | 1 Sep | Lynne | v2.8 (delta) | Closed by v2.10 (typography/contrast, notice banner, busy motion, dialog chrome, backend labels; toolbar-wrap and character-level diffs deliberately not carried in, see v2.10 write-up) |
 | notes_018 | 1 Sep | Zoe | v2.8 (delta) | Closed by v2.9 (Bugs 1–2/S2, 3–7, S1); S3 deliberately not fixed (informational only, see v2.9 write-up) |
 

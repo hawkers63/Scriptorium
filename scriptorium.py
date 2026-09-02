@@ -36,7 +36,7 @@ Dependencies
     Optional: install python-docx to import from and export to Word (.docx)
     files (`pip install python-docx`). Plain text and Markdown work without it.
 
-Author: built with Mark, August 2026. Version 2.13.
+Author: built with Mark, August 2026. Version 2.15.
 """
 
 import os
@@ -81,7 +81,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.14"
+APP_VERSION = "2.15"
 
 # A small shared palette (notes_017, v2.10) so the two text panes, the diff
 # tags and the notice banner read as one surface instead of drifting
@@ -278,6 +278,87 @@ def set_autostart(enabled):
     except OSError as exc:
         print(f"[warning] could not update the Windows startup entry: {exc}")
         return False
+
+
+# -- Explorer drag-and-drop (native WM_DROPFILES bridge) --------------------- #
+#
+# DragAcceptFiles() alone only registers interest; it does not deliver a
+# path. Retrieving one needs subclassing the toplevel's own window procedure
+# (SetWindowLongPtrW(GWLP_WNDPROC)) to intercept WM_DROPFILES, since that is
+# the only place Windows actually hands over the HDROP. From notes_016 §2.1/
+# §3.2 (Mark/Codex) -- a reviewed design, not invented fresh here, precisely
+# because a bad WNDPROC can hang or crash the whole app, not just one
+# feature.
+#
+# Unlike _kernel32() above (a function re-run on kernel32's few, rare,
+# once-per-process calls), user32/shell32 are set up once at module level:
+# WM_DROPFILES can fire far more often over a session, and neither DLL nor
+# its argtypes ever change, so there is no benefit to re-declaring them on
+# every drop the way there would be a cost to doing so.
+WM_DROPFILES = 0x0233
+GWLP_WNDPROC = -4
+DROP_FILE_COUNT = 0xFFFFFFFF
+
+# LRESULT is pointer-sized. ctypes.wintypes does not expose it consistently,
+# so c_ssize_t is the correct signed representation on 32-bit and 64-bit
+# Python.
+WNDPROC = ctypes.WINFUNCTYPE(
+    ctypes.c_ssize_t,
+    wintypes.HWND,
+    wintypes.UINT,
+    wintypes.WPARAM,
+    wintypes.LPARAM,
+)
+
+_user32 = ctypes.WinDLL("user32", use_last_error=True)
+_shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+
+# The exported function name differs on 32-bit Windows, where the C macro
+# SetWindowLongPtr maps to SetWindowLong.
+if ctypes.sizeof(ctypes.c_void_p) == 8:
+    _set_window_proc = _user32.SetWindowLongPtrW
+else:
+    _set_window_proc = _user32.SetWindowLongW
+
+_set_window_proc.argtypes = (
+    wintypes.HWND,
+    ctypes.c_int,
+    ctypes.c_void_p,
+)
+_set_window_proc.restype = ctypes.c_void_p
+
+_call_window_proc = _user32.CallWindowProcW
+_call_window_proc.argtypes = (
+    ctypes.c_void_p,
+    wintypes.HWND,
+    wintypes.UINT,
+    wintypes.WPARAM,
+    wintypes.LPARAM,
+)
+_call_window_proc.restype = ctypes.c_ssize_t
+
+_user32.ClientToScreen.argtypes = (
+    wintypes.HWND,
+    ctypes.POINTER(wintypes.POINT),
+)
+_user32.ClientToScreen.restype = wintypes.BOOL
+
+_shell32.DragAcceptFiles.argtypes = (wintypes.HWND, wintypes.BOOL)
+_shell32.DragAcceptFiles.restype = None
+_shell32.DragQueryPoint.argtypes = (
+    wintypes.HANDLE,
+    ctypes.POINTER(wintypes.POINT),
+)
+_shell32.DragQueryPoint.restype = wintypes.BOOL
+_shell32.DragQueryFileW.argtypes = (
+    wintypes.HANDLE,
+    wintypes.UINT,
+    wintypes.LPWSTR,
+    wintypes.UINT,
+)
+_shell32.DragQueryFileW.restype = wintypes.UINT
+_shell32.DragFinish.argtypes = (wintypes.HANDLE,)
+_shell32.DragFinish.restype = None
 
 
 # Current Claude model IDs (verified against the Claude Platform docs).
@@ -1977,6 +2058,9 @@ class Scriptorium(ctk.CTk):
         self._result_source = ""      # the text last_result was generated from
         self.selected_tones = list(self.cfg.get("default_tones", ["Concise"]))
         self.tray_icon = None         # the live pystray.Icon, only while hidden to tray
+        self._drop_hwnd = None
+        self._drop_old_wndproc = None
+        self._drop_wndproc = None
         self._start_restore_listener()
 
         ctk.set_appearance_mode("dark")
@@ -1996,6 +2080,10 @@ class Scriptorium(ctk.CTk):
         self._build_actionbar()
         self._build_statusbar()
         self._build_panes()
+
+        # wm_frame() is reliable only after Tk has realised the top-level,
+        # so this waits for the next idle pass rather than running inline.
+        self.after_idle(self._enable_file_drops)
 
         self._bind_shortcuts()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -2942,51 +3030,253 @@ class Scriptorium(ctk.CTk):
         self.reject()
         self._refresh_status("cleared")
 
-    def import_file(self):
-        path = filedialog.askopenfilename(
-            title="Import text",
-            filetypes=[("Text, Markdown and Word", "*.txt *.md *.docx"),
-                       ("All files", "*.*")])
-        if not path:
-            return
+    def _read_document_path(self, path):
+        """Return a supported document's text. Raises on any failure.
+
+        Extension-agnostic by design -- import_file()'s own dialog already
+        offers an "All files" filter and has always accepted whatever the
+        user picks (as text, unless it's .docx), so this preserves that
+        exact existing behaviour. Drops are gated separately in
+        _handle_dropped_paths(), which is narrower on purpose: a drop is a
+        much lower-friction action than deliberately choosing a file in a
+        dialog, so it only accepts the three document types Scriptorium
+        actually knows how to read.
+        """
         if path.lower().endswith(".docx"):
-            try:
-                content = read_docx(path)
-            except ImportError:
-                messagebox.showerror(
-                    "Import failed",
-                    "Reading Word files needs the python-docx package.\n\n"
-                    "Install it with:  pip install python-docx")
-                return
-            except Exception as exc:  # noqa: BLE001 — bad/locked/corrupt .docx
-                messagebox.showerror("Import failed",
-                                     f"Could not read the Word file.\n\n{exc}")
-                return
-        else:
-            try:
-                # utf-8-sig handles both a BOM-prefixed and a plain UTF-8
-                # file, stripping the BOM either way instead of leaving a
-                # stray ﻿ in the text sent to the backend.
-                with open(path, "r", encoding="utf-8-sig") as fh:
-                    content = fh.read()
-            except UnicodeDecodeError:
-                try:
-                    with open(path, "r", encoding="cp1252") as fh:
-                        content = fh.read()
-                except (OSError, UnicodeDecodeError) as exc:
-                    messagebox.showerror(
-                        "Import failed",
-                        "The file encoding could not be read. Save it as "
-                        f"UTF-8 and try again.\n\n({exc})")
-                    return
-            except OSError as exc:
-                messagebox.showerror("Import failed", str(exc))
-                return
+            return read_docx(path)
+        try:
+            # utf-8-sig handles both a BOM-prefixed and a plain UTF-8 file,
+            # stripping the BOM either way instead of leaving a stray ﻿ in
+            # the text sent to the backend.
+            with open(path, "r", encoding="utf-8-sig") as fh:
+                return fh.read()
+        except UnicodeDecodeError:
+            with open(path, "r", encoding="cp1252") as fh:
+                return fh.read()
+
+    def _load_file_path(self, path):
+        """Load one path into Original through the normal undo/state boundary.
+
+        Shared by the Import dialog and a completed Explorer drop, so both
+        get identical encoding fallback, error handling and undo/stale-
+        result behaviour.
+        """
+        try:
+            content = self._read_document_path(path)
+        except ImportError:
+            messagebox.showerror(
+                "Import failed",
+                "Reading Word files needs the python-docx package.\n\n"
+                "Install it with:  pip install python-docx")
+            return
+        except UnicodeDecodeError as exc:
+            messagebox.showerror(
+                "Import failed",
+                "The file encoding could not be read. Save it as "
+                f"UTF-8 and try again.\n\n({exc})")
+            return
+        except OSError as exc:
+            messagebox.showerror("Import failed", str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001 — bad/locked/corrupt .docx
+            messagebox.showerror("Import failed",
+                                 f"Could not read the Word file.\n\n{exc}")
+            return
         self._remember_for_undo(self.original_box.get("1.0", "end-1c"))
         self.reject()
         self.original_box.delete("1.0", "end")
         self.original_box.insert("1.0", content)
         self._refresh_status(f"imported {os.path.basename(path)}")
+
+    def import_file(self):
+        path = filedialog.askopenfilename(
+            title="Import text",
+            filetypes=[("Text, Markdown and Word", "*.txt *.md *.docx"),
+                       ("All files", "*.*")])
+        if path:
+            self._load_file_path(path)
+
+    # -- Explorer drag-and-drop ---------------------------------------------- #
+
+    def _enable_file_drops(self):
+        """Accept Explorer files and intercept WM_DROPFILES safely.
+
+        Failure to install the hook is deliberately non-fatal: Import
+        continues to work regardless, so a status-bar message is enough --
+        this is a convenience on top of an already-complete feature, not a
+        dependency for it.
+        """
+        if self._drop_wndproc is not None:
+            return
+
+        try:
+            self.update_idletasks()
+            hwnd = int(str(self.wm_frame()), 0)
+        except (TypeError, ValueError, tk.TclError) as exc:
+            self._refresh_status(f"drag-and-drop unavailable: {exc}")
+            return
+
+        @WNDPROC
+        def window_proc(message_hwnd, message, wparam, lparam):
+            if message == WM_DROPFILES:
+                try:
+                    self._capture_file_drop(message_hwnd, wparam)
+                except Exception as exc:  # Never unwind through a Win32 callback.
+                    self.after_idle(self._show_drop_error, str(exc))
+                return 0
+            return _call_window_proc(
+                self._drop_old_wndproc,
+                message_hwnd,
+                message,
+                wparam,
+                lparam,
+            )
+
+        # Store the Python callback before exposing its address to Windows --
+        # if it were only a local temporary, Windows retains the address it
+        # was given regardless, but Python would be free to garbage-collect
+        # the callback object itself; the next dropped file (or any other
+        # message reaching this HWND) would then call through a dangling
+        # address and crash the process. Keeping it on self for the life of
+        # the window is a correctness requirement, not cosmetic state.
+        self._drop_hwnd = hwnd
+        self._drop_wndproc = window_proc
+        ctypes.set_last_error(0)
+        old_proc = _set_window_proc(
+            hwnd,
+            GWLP_WNDPROC,
+            ctypes.cast(window_proc, ctypes.c_void_p),
+        )
+        if not old_proc and ctypes.get_last_error():
+            error = ctypes.WinError(ctypes.get_last_error())
+            self._drop_hwnd = None
+            self._drop_wndproc = None
+            self._refresh_status(f"drag-and-drop unavailable: {error}")
+            return
+
+        self._drop_old_wndproc = old_proc
+        _shell32.DragAcceptFiles(hwnd, True)
+
+    def _capture_file_drop(self, hwnd, drop_handle):
+        """Copy paths out of HDROP, then defer all Tk/file work.
+
+        Runs on the native window procedure, not a Tk callback -- this must
+        do only path extraction and hit-testing (no Tk widget mutation, no
+        file reading) and hand everything else to after_idle() once it
+        returns, to avoid re-entrant Tk work inside a Win32 window
+        procedure.
+        """
+        paths = []
+        over_original = False
+        point = wintypes.POINT()
+        try:
+            if _shell32.DragQueryPoint(drop_handle, ctypes.byref(point)):
+                if _user32.ClientToScreen(hwnd, ctypes.byref(point)):
+                    over_original = self._point_is_over_original(
+                        point.x,
+                        point.y,
+                    )
+
+            if over_original:
+                count = _shell32.DragQueryFileW(
+                    drop_handle,
+                    DROP_FILE_COUNT,
+                    None,
+                    0,
+                )
+                for index in range(count):
+                    length = _shell32.DragQueryFileW(
+                        drop_handle,
+                        index,
+                        None,
+                        0,
+                    )
+                    buffer = ctypes.create_unicode_buffer(length + 1)
+                    _shell32.DragQueryFileW(
+                        drop_handle,
+                        index,
+                        buffer,
+                        len(buffer),
+                    )
+                    paths.append(buffer.value)
+        finally:
+            # Windows owns HDROP; every processed message must release it.
+            _shell32.DragFinish(drop_handle)
+
+        if over_original:
+            self.after_idle(self._handle_dropped_paths, paths)
+        else:
+            self.after_idle(
+                self._refresh_status,
+                "drop files onto the Original pane",
+            )
+
+    def _show_drop_error(self, detail):
+        """Report a native drop failure after the window procedure returns."""
+        messagebox.showerror(
+            "Import failed",
+            f"Could not receive the dropped file.\n\n{detail}",
+            parent=self,
+        )
+
+    def _point_is_over_original(self, root_x, root_y):
+        """Return True for Original or any Tk/CustomTkinter child inside it."""
+        try:
+            widget = self.winfo_containing(root_x, root_y)
+        except tk.TclError:
+            return False
+
+        while widget is not None:
+            if widget is self.original_box:
+                return True
+            widget = getattr(widget, "master", None)
+        return False
+
+    def _handle_dropped_paths(self, paths):
+        """Validate a completed Explorer drop on Tk's event thread.
+
+        Deliberately narrower than import_file()'s own dialog (which has
+        always accepted anything the user explicitly picks): a drop is a
+        much lower-friction action, so only the document types Scriptorium
+        actually knows how to read are accepted here.
+        """
+        if not paths:
+            self._refresh_status("no file was supplied")
+            return
+        if len(paths) != 1:
+            messagebox.showinfo(
+                "Drop one file",
+                "Scriptorium opens one document at a time. Drop a single "
+                ".txt, .md or .docx file onto Original.",
+                parent=self,
+            )
+            return
+        path = paths[0]
+        if os.path.isdir(path) or os.path.splitext(path)[1].lower() not in (
+                ".txt", ".md", ".docx"):
+            messagebox.showerror(
+                "Import failed",
+                "Scriptorium can open .txt, .md or .docx files.\n\n"
+                "Shortcuts and other file types aren't supported.",
+                parent=self,
+            )
+            return
+        self._load_file_path(path)
+
+    def _disable_file_drops(self):
+        """Remove the subclass before Tk destroys the native window."""
+        if self._drop_hwnd is None or self._drop_old_wndproc is None:
+            return
+
+        _shell32.DragAcceptFiles(self._drop_hwnd, False)
+        _set_window_proc(
+            self._drop_hwnd,
+            GWLP_WNDPROC,
+            self._drop_old_wndproc,
+        )
+        self._drop_hwnd = None
+        self._drop_old_wndproc = None
+        self._drop_wndproc = None
 
     def export_file(self):
         if self.last_result and self._revision_is_stale() and not messagebox.askyesno(
@@ -3127,6 +3417,7 @@ class Scriptorium(ctk.CTk):
             except Exception:
                 pass
             self.tray_icon = None
+        self._disable_file_drops()
         self._invalidate_inflight()
         self.destroy()
 
