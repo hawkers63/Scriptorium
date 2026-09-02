@@ -83,7 +83,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.21"
+APP_VERSION = "2.22"
 
 # A small shared palette (notes_017, v2.10) so the two text panes, the diff
 # tags and the notice banner read as one surface instead of drifting
@@ -237,28 +237,34 @@ def _signal_existing_instance():
         kernel32.CloseHandle(handle)
 
 
-def _autostart_command():
+def _autostart_command(start_minimised=False):
     """Return the command line that should launch Scriptorium at logon.
 
     Frozen: the .exe itself (already windowed, console=False). From source:
     pythonw.exe (not python.exe) so no console flashes, falling back to
     python.exe if pythonw.exe isn't found beside the running interpreter.
-    Either way, --minimised tells __init__ to start withdrawn to tray
-    rather than showing the window on every logon.
+    --minimised is only appended when the caller actually wants a hidden
+    start (notes_020) -- previously this was unconditional, so an ordinary
+    double-click of a shortcut created from the Run key always launched
+    hidden regardless of the "Start minimised to tray" setting.
     """
     if getattr(sys, "frozen", False):
-        return f'"{sys.executable}" --minimised'
-    pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-    interpreter = pythonw if os.path.isfile(pythonw) else sys.executable
-    script = os.path.abspath(__file__)
-    return f'"{interpreter}" "{script}" --minimised'
+        cmd = f'"{sys.executable}"'
+    else:
+        pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+        interpreter = pythonw if os.path.isfile(pythonw) else sys.executable
+        script = os.path.abspath(__file__)
+        cmd = f'"{interpreter}" "{script}"'
+    if start_minimised:
+        cmd += " --minimised"
+    return cmd
 
 
 _AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _AUTOSTART_VALUE = "Scriptorium"
 
 
-def set_autostart(enabled):
+def set_autostart(enabled, start_minimised=False):
     """Add or remove the HKCU Run entry that starts Scriptorium at logon.
 
     Returns True on success, False on a registry error (e.g. an unusually
@@ -270,7 +276,7 @@ def set_autostart(enabled):
                             winreg.KEY_SET_VALUE) as key:
             if enabled:
                 winreg.SetValueEx(key, _AUTOSTART_VALUE, 0, winreg.REG_SZ,
-                                  _autostart_command())
+                                  _autostart_command(start_minimised))
             else:
                 try:
                     winreg.DeleteValue(key, _AUTOSTART_VALUE)
@@ -2417,7 +2423,8 @@ class SettingsDialog(ctk.CTkToplevel):
                 parent=self)
             return
 
-        if not set_autostart(candidate["start_with_windows"]):
+        if not set_autostart(candidate["start_with_windows"],
+                              candidate["start_minimised"]):
             messagebox.showwarning(
                 "Startup entry not updated",
                 "Settings were saved, but Scriptorium could not update the "
@@ -2656,19 +2663,22 @@ class Scriptorium(ctk.CTk):
 
         self._bind_shortcuts()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        # Windows 11 frequently delivers a spurious iconic <Unmap> while Tk
+        # is still settling the window's initial Win32 placement, before any
+        # user action -- notes_020 (Mark). Gating on _window_ready (armed
+        # shortly after the *first* real <Map>) stops that startup noise
+        # from being misread as a user-initiated minimise; the deferred
+        # _apply_launch_visibility() call, not an immediate withdraw() here,
+        # is what actually decides a hidden vs. visible launch.
+        self._window_ready = False
         self.bind("<Unmap>", self._on_minimize)
+        self.bind("<Map>", self._on_mapped)
+        self.after_idle(self._apply_launch_visibility)
 
         self._maybe_offer_config_migration()
         self._maybe_warn_unreadable_config()
         self._maybe_show_privacy_notice()
         self._refresh_status()
-
-        # Only ever start hidden if the tray is genuinely available -- a
-        # start-minimised launch with no working tray would trap the user
-        # with no way to reach an invisible window.
-        wants_minimised = "--minimised" in sys.argv[1:] or self.cfg.get("start_minimised")
-        if wants_minimised and self.cfg.get("minimise_to_tray") and TRAY_AVAILABLE:
-            self._minimise_to_tray()
 
     # -- layout ------------------------------------------------------------- #
 
@@ -4121,16 +4131,67 @@ class Scriptorium(ctk.CTk):
         self.lift()
         self.focus_force()
 
+    def _on_mapped(self, event):
+        """First real <Map>: arm minimise-to-tray only once placement settles.
+
+        notes_020 (Mark): Windows 11 can still deliver a further spurious
+        iconic <Unmap>/<Map> pair for a short window after the toplevel is
+        first mapped, while the OS is settling its placement. Waiting 300ms
+        after this first Map before trusting <Unmap> as a genuine user
+        minimise (see _on_minimize) is cheap insurance against misreading
+        that settling noise as "user clicked minimise".
+        """
+        if event.widget is not self or self._window_ready:
+            return
+        self.after(300, self._arm_tray_minimise)
+
+    def _arm_tray_minimise(self):
+        self._window_ready = True
+
+    def _wants_start_minimised(self):
+        return (
+            "--minimised" in sys.argv[1:]
+            or bool(self.cfg.get("start_minimised"))
+        )
+
+    def _apply_launch_visibility(self):
+        """Decide first-show versus tray-only, once Tk has a real HWND.
+
+        notes_020 (Mark): deciding this from __init__ itself and calling
+        withdraw() before the window has ever been mapped is unreliable on
+        Windows 11 -- the withdraw can simply be ignored. Deferred to
+        after_idle (this method itself) plus one more after() tick for the
+        hidden case, so withdraw() always applies to a window Tk has
+        actually placed.
+        """
+        hidden = (
+            self._wants_start_minimised()
+            and self.cfg.get("minimise_to_tray")
+            and TRAY_AVAILABLE
+        )
+        if hidden:
+            self.after(50, self._minimise_to_tray)
+            return
+        try:
+            self.state("normal")
+        except tk.TclError:
+            pass
+        self.deiconify()
+        self.lift()
+
     def _on_minimize(self, event):
         """Native minimise button -- send straight to the tray when enabled.
 
         <Unmap> also fires for unrelated reasons (a child widget mapping/
-        unmapping during construction, or transiently from withdraw()/
-        deiconify() themselves), so this only acts when the window itself
-        has just become iconic and isn't already on its way to the tray --
-        that guard also stops the withdraw() inside _minimise_to_tray() from
-        re-entering this handler.
+        unmapping during construction, transiently from withdraw()/
+        deiconify() themselves, or Windows 11's own initial-placement noise
+        -- notes_020), so this only acts once _window_ready is armed (see
+        _on_mapped) and when the window itself has just become iconic and
+        isn't already on its way to the tray -- that guard also stops the
+        withdraw() inside _minimise_to_tray() from re-entering this handler.
         """
+        if not self._window_ready:
+            return
         if event.widget is not self or str(self.state()) != "iconic":
             return
         if self.tray_icon is not None:

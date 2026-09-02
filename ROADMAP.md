@@ -4,15 +4,18 @@
 When Mark says "lets get started", that is the cue to open these three files
 before doing anything else.
 
-Current shipped version: **2.21** (v2.9 bug-fix pass, v2.10 visual/UX
+Current shipped version: **2.22** (v2.9 bug-fix pass, v2.10 visual/UX
 polish, v2.11 three-tone picker, v2.12 persisted user presets, v2.13 backend
 retry transport, v2.14 hand-testing fixes, v2.15 Explorer drag-and-drop,
 v2.17 readability metrics + shortcuts reference, v2.18 house-style
 avoid-list, v2.19 headless batch/CLI mode, v2.20 in-session revision
-history, v2.16 rich `CF_HTML` clipboard diff (shipped last, as build
-`2.21`) — see those sections below). All five notes_019 proposals and
-notes_016's full original proposal set are now shipped — **the backlog is
-clear** for the first time since notes_001 opened it.
+history, v2.16 rich `CF_HTML` clipboard diff (shipped as build `2.21`),
+v2.22 tray/start-up lifecycle gating — see those sections below). All five
+notes_019 proposals and notes_016's full original proposal set shipped by
+build 2.21, clearing the backlog for the first time since notes_001 opened
+it; v2.22 closed a fresh hand-testing defect (notes_020) found immediately
+after. notes_021's second-generation hardening pass is scoped but not yet
+implemented — see its own section below.
 
 Scope through v2.3 was drawn from twelve accumulated review notes
 (`notes/01_Active/notes_001.txt` – `notes_012.txt`), written independently by
@@ -1860,6 +1863,90 @@ bypasses the threading entirely. A simpler, isolated single-call test
 immediately showed the real pipeline completing correctly in ~4 seconds —
 the elaborate harness had its own scheduling bug, not the app. Recorded so
 a future session reaches for the simple version of this test first.
+
+---
+
+## v2.22 — Tray/start-up lifecycle gating ✅ shipped 2026-09-03
+
+**Goal:** notes_020 (Mark) — a real hand-testing diagnosis, not a note-backlog
+proposal. Two observed symptoms on Windows 11 (an ordinary launch sometimes
+jumping straight to the tray; "Start minimised" not reliably taking effect)
+traced to one root cause: `<Unmap>` firing with an iconic state while Tk is
+still settling the window's initial Win32 placement, *before* any user
+action, plus deciding hidden-vs-visible from inside `__init__` and calling
+`withdraw()` before the window had ever been mapped — unreliable on Windows
+11, which can simply ignore a pre-map withdraw. No prompt or data-model
+surface touched; pure lifecycle/window-state.
+
+1. **`_window_ready` gate on `_on_minimize()`** — `<Unmap>` is now ignored
+   entirely until armed. `_on_mapped()` (bound to `<Map>`) schedules
+   `_arm_tray_minimise()` 300ms after the *first* real Map, giving Windows
+   11's initial-placement noise a window to settle in before a genuine
+   minimise is trusted.
+2. **`_apply_launch_visibility()`** replaces the old immediate
+   `wants_minimised` check/`withdraw()` call in `__init__`. Scheduled via
+   `after_idle` so it runs against a window Tk has actually placed, not
+   mid-construction; the hidden branch itself withdraws via one more
+   `after(50, ...)` tick rather than inline, per Mark's own note ("a
+   withdraw-before-map is ignored on Windows 11"). The existing safety net
+   is preserved exactly: hidden only when `_wants_start_minimised()` *and*
+   `minimise_to_tray` *and* `TRAY_AVAILABLE` all hold, so a start-minimised
+   config with tray unavailable/disabled still falls back to a normal
+   visible launch rather than trapping the user.
+3. **`_autostart_command()`/`set_autostart()` gain a `start_minimised`
+   parameter** — `--minimised` is now only appended to the registered Run
+   command when the user's "Start minimised to tray" setting is actually
+   on, not unconditionally on every autostart launch as before. Threaded
+   through from `SettingsDialog._save()`'s existing `set_autostart()` call.
+
+### Acceptance checklist
+- [x] A synthetic iconic `<Unmap>` fired before `_window_ready` is armed
+      does not tray-minimise; the identical event fired after arming does
+      (real `pystray.Icon` created, `state()` becomes `"withdrawn"`).
+      Verified against a real `Scriptorium()`, a real `iconify()` call (not
+      a synthetic event object), gated and then armed.
+- [x] `start_minimised: True` + `minimise_to_tray: True` genuinely launches
+      hidden (real `mainloop()` run, `state()` ends `"withdrawn"`, a real
+      tray icon exists) — not just "doesn't crash". `--minimised` on argv
+      forces the same outcome independent of the config flag.
+- [x] `start_minimised: True` + `minimise_to_tray: False` still launches
+      visible (the pre-existing "don't trap the user" safety net holds
+      through the new gating).
+- [x] An ordinary default-config launch is visually unaffected: `state()`
+      ends `"normal"`, no tray icon.
+- [x] `_autostart_command(True)` ends in `--minimised`; `_autostart_command(False)`
+      does not. `set_autostart()` writes both forms correctly to the real
+      `HKCU\...\Run` entry (read back via `winreg`) and the entry was
+      removed afterwards, restoring the machine to its pre-test (absent)
+      state.
+- [x] `ast.parse()` clean. Real packaged `.exe` rebuilt (`FileVersion`/
+      `ProductVersion` `2.22.0.0`), launched for real against the live
+      config, alive and `Responding: True`. Real `scriptorium_config.json`
+      confirmed untouched (unchanged mtime) throughout.
+
+**One testing-environment finding, not a product defect**: this session's
+automated `EnumWindows`/`IsWindowVisible` checks against the real packaged
+`.exe` reported the window as not visible even for an ordinary launch that
+Tk's own `state()` correctly reported as `"normal"` — and, as a control, the
+identical check also failed to find a completely unrelated, freshly-launched
+plain `tk.Tk()` test window. This confirms the false reading is a limitation
+of this automation channel's cross-session window enumeration (same
+underlying category as this project's already-documented UI-automation gaps
+for this app — see [[scriptorium_testing_gotchas]] items 4/5), not a real
+visibility bug; Tk's own `state()`/`winfo_viewable()` under a real
+`mainloop()`, used for every acceptance check above, remains the correct
+source of truth and is unaffected by this gap.
+
+**Also found and fixed during hand-verification, not in the note**: a
+genuinely unrelated real modal — `_maybe_show_privacy_notice()` — blocks
+`__init__` on a fresh `backend: "anthropic"`/no-`privacy_ack` config, since
+`messagebox.showinfo()`'s `tkwait window` blocks regardless of whether
+`mainloop()` has been entered yet. Confirmed present identically on the
+unmodified v2.21 baseline (`git stash` control test), so this is pre-existing
+behaviour correctly requiring a real click, not a defect this release
+introduced or needed to fix — noted here only so a future session's test
+configs set `privacy_ack: True` (or `backend: "ollama"`) up front rather than
+re-diagnosing an apparent "hang" from scratch.
 
 ---
 

@@ -3,8 +3,8 @@
 # Bump the version tuples/strings here alongside APP_VERSION in scriptorium.py.
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(2, 21, 0, 0),
-    prodvers=(2, 21, 0, 0),
+    filevers=(2, 22, 0, 0),
+    prodvers=(2, 22, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -20,12 +20,12 @@ VSVersionInfo(
           [
             StringStruct(u'CompanyName', u'Mark Hawksworth'),
             StringStruct(u'FileDescription', u'Scriptorium — British English writing assistant'),
-            StringStruct(u'FileVersion', u'2.21.0.0'),
+            StringStruct(u'FileVersion', u'2.22.0.0'),
             StringStruct(u'InternalName', u'Scriptorium'),
             StringStruct(u'LegalCopyright', u'© Mark Hawksworth'),
             StringStruct(u'OriginalFilename', u'Scriptorium.exe'),
             StringStruct(u'ProductName', u'Scriptorium'),
-            StringStruct(u'ProductVersion', u'2.21.0.0'),
+            StringStruct(u'ProductVersion', u'2.22.0.0'),
           ],
         )
       ]
