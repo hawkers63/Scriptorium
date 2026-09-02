@@ -36,7 +36,7 @@ Dependencies
     Optional: install python-docx to import from and export to Word (.docx)
     files (`pip install python-docx`). Plain text and Markdown work without it.
 
-Author: built with Mark, August 2026. Version 2.17.
+Author: built with Mark, August 2026. Version 2.18.
 """
 
 import os
@@ -81,7 +81,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.17"
+APP_VERSION = "2.18"
 
 # A small shared palette (notes_017, v2.10) so the two text panes, the diff
 # tags and the notice banner read as one surface instead of drifting
@@ -677,6 +677,40 @@ def normalise_user_presets(value):
     return clean
 
 
+# User-defined house-style avoid-list (v2.18, notes_019 §2.3) -- words or
+# phrases the user never wants to see, folded into the system prompt
+# alongside Role/Tone. Capped small deliberately: this stays a clearly
+# bounded instruction, not an open-ended rules engine.
+MAX_HOUSE_STYLE_TERMS = 20
+MAX_HOUSE_STYLE_TERM_LENGTH = 40
+
+
+def normalise_house_style_avoid(value):
+    """Validate a stored house_style_avoid list.
+
+    Entries are stripped, length-capped, de-duplicated case-insensitively,
+    and count-capped -- the same discipline normalise_user_presets() above
+    applies to preset names, for the same reason: a malformed or oversized
+    stored value should degrade to "fewer/no entries", never raise.
+    """
+    if not isinstance(value, list):
+        return []
+    clean = []
+    seen = set()
+    for raw_term in value:
+        if len(clean) >= MAX_HOUSE_STYLE_TERMS:
+            break
+        if not isinstance(raw_term, str):
+            continue
+        term = raw_term.strip()
+        folded = term.casefold()
+        if not term or len(term) > MAX_HOUSE_STYLE_TERM_LENGTH or folded in seen:
+            continue
+        clean.append(term)
+        seen.add(folded)
+    return clean
+
+
 def preset_menu_names(cfg):
     """Return built-in preset names, then user preset names, then the
     manager command -- the stable order the toolbar menu is populated in.
@@ -711,6 +745,7 @@ DEFAULT_CONFIG = {
     "default_tones": ["Concise"],
     "default_diff_view": "Inline",
     "user_presets": {},              # validated personal toolbar combinations
+    "house_style_avoid": [],         # words/phrases to steer the prompt away from
 }
 
 
@@ -798,6 +833,8 @@ def normalise_config(cfg):
 
     clean = normalise_tone_config(clean)
     clean["user_presets"] = normalise_user_presets(clean.get("user_presets", {}))
+    clean["house_style_avoid"] = normalise_house_style_avoid(
+        clean.get("house_style_avoid", []))
     return clean
 
 
@@ -945,8 +982,37 @@ def build_tone_instruction(tones):
         "them.")
 
 
+def build_avoid_instruction(terms):
+    """Return a bounded prompt instruction steering away from given terms.
+
+    Deliberately the same shape as build_tone_instruction()'s closing guard,
+    for the same reason: an avoid-list is exactly the kind of instruction
+    that could tempt a model into deleting a required fact rather than
+    rephrasing around it, so the rule against that is stated explicitly
+    rather than assumed. See notes_019 §2.3 for why this needs live-model
+    calibration before the wording here is trusted.
+    """
+    terms = normalise_house_style_avoid(list(terms))
+    if not terms:
+        return ""
+    listed = ", ".join(f'"{term}"' for term in terms)
+    return (
+        "\n- House style: avoid the following words/phrases wherever the "
+        f"meaning can be preserved without them: {listed}. Rephrase around "
+        "a required fact rather than deleting it to avoid one of these "
+        "terms -- if a term genuinely cannot be avoided without changing "
+        "meaning, keep it and note this in the ambiguity list instead of "
+        "silently dropping the surrounding content. The replacement wording "
+        "must express only what the source already states: do not add a new "
+        "claim, cause, benefit or qualifier (e.g. do not turn 'the synergy "
+        "between X and Y increased revenue' into 'the alignment between X "
+        "and Y enhanced overall performance, leading to increased revenue' "
+        "-- 'enhanced overall performance' is not in the source) as a bridge "
+        "for the rephrase.")
+
+
 def build_system_prompt(mode, strength, tones, role="(none)",
-                        protect_tokens=False):
+                        protect_tokens=False, avoid_words=()):
     """Assemble the system prompt that governs a single rewrite."""
     protect_line = ""
     if protect_tokens:
@@ -963,13 +1029,14 @@ def build_system_prompt(mode, strength, tones, role="(none)",
                      "present or clearly implied in the source.")
 
     tone_line = build_tone_instruction(tones)
+    avoid_line = build_avoid_instruction(avoid_words)
 
     return f"""You are a meticulous British English copy-editor with decades of \
 experience in professional publishing.
 
 # Task
 {MODE_INSTRUCTIONS[mode]}
-{STRENGTH_INSTRUCTIONS[strength]}{role_line}{tone_line}
+{STRENGTH_INSTRUCTIONS[strength]}{role_line}{tone_line}{avoid_line}
 
 # Non-negotiable rules
 - Write in British English throughout: use -ise not -ize (organise, realise), \
@@ -1923,6 +1990,30 @@ class SettingsDialog(ctk.CTkToplevel):
             text="Check British letter conventions — flag salutation / "
                  "sign-off mismatches (advisory)").pack(anchor="w", padx=16, pady=(10, 0))
 
+        ctk.CTkLabel(body, text="House style", font=ctk.CTkFont(weight="bold")
+                     ).pack(anchor="w", **pad)
+        ctk.CTkLabel(
+            body, text="Words or phrases to steer away from wherever meaning "
+                       "allows — never by deleting a required fact, only by "
+                       f"rephrasing (up to {MAX_HOUSE_STYLE_TERMS}).",
+            text_color="gray60", font=ctk.CTkFont(size=11), justify="left",
+            wraplength=460).pack(anchor="w", padx=16)
+
+        self.avoid_terms = list(cfg.get("house_style_avoid", []))
+        avoid_add_row = ctk.CTkFrame(body, fg_color="transparent")
+        avoid_add_row.pack(fill="x", padx=16, pady=(6, 0))
+        self.avoid_entry = ctk.CTkEntry(avoid_add_row, width=340,
+                                        placeholder_text="e.g. leverage")
+        self.avoid_entry.pack(side="left")
+        self.avoid_entry.bind("<Return>", lambda _e: self._add_avoid_term())
+        ctk.CTkButton(avoid_add_row, text="Add", width=80,
+                      command=self._add_avoid_term).pack(side="left", padx=(8, 0))
+
+        self.avoid_list_frame = ctk.CTkScrollableFrame(
+            body, height=100, fg_color="gray17")
+        self.avoid_list_frame.pack(fill="x", padx=16, pady=(6, 0))
+        self._refresh_avoid_list()
+
         ctk.CTkLabel(body, text="Startup & window behaviour",
                      font=ctk.CTkFont(weight="bold")).pack(anchor="w", **pad)
 
@@ -2016,6 +2107,57 @@ class SettingsDialog(ctk.CTkToplevel):
         if not enabled:
             self.start_minimised_var.set(False)
 
+    def _add_avoid_term(self):
+        """Add the entry field's text to the working avoid-list.
+
+        Validates the same way normalise_house_style_avoid() would (case-
+        insensitive duplicate check, length cap) so the list shown here
+        never has to silently reconcile with what _save() actually persists
+        -- what's on screen after Add is exactly what gets saved.
+        """
+        term = self.avoid_entry.get().strip()
+        if not term:
+            return
+        if len(term) > MAX_HOUSE_STYLE_TERM_LENGTH:
+            messagebox.showwarning(
+                "Too long",
+                f"Keep each term to {MAX_HOUSE_STYLE_TERM_LENGTH} characters "
+                "or fewer.", parent=self)
+            return
+        if any(term.casefold() == existing.casefold()
+               for existing in self.avoid_terms):
+            self.avoid_entry.delete(0, "end")
+            return
+        if len(self.avoid_terms) >= MAX_HOUSE_STYLE_TERMS:
+            messagebox.showwarning(
+                "List full",
+                f"Remove a term before adding more than "
+                f"{MAX_HOUSE_STYLE_TERMS}.", parent=self)
+            return
+        self.avoid_terms.append(term)
+        self.avoid_entry.delete(0, "end")
+        self._refresh_avoid_list()
+
+    def _remove_avoid_term(self, term):
+        self.avoid_terms = [t for t in self.avoid_terms if t != term]
+        self._refresh_avoid_list()
+
+    def _refresh_avoid_list(self):
+        for child in self.avoid_list_frame.winfo_children():
+            child.destroy()
+        if not self.avoid_terms:
+            ctk.CTkLabel(self.avoid_list_frame, text="(none)",
+                         text_color="gray60").pack(anchor="w", padx=8, pady=4)
+            return
+        for term in self.avoid_terms:
+            row = ctk.CTkFrame(self.avoid_list_frame, fg_color="transparent")
+            row.pack(fill="x", padx=4, pady=2)
+            ctk.CTkLabel(row, text=term, anchor="w").pack(side="left")
+            ctk.CTkButton(
+                row, text="Remove", width=70, fg_color="gray30",
+                command=lambda t=term: self._remove_avoid_term(t)
+            ).pack(side="right")
+
     def _save(self):
         """Validate and persist settings, keeping the dialog open on failure.
 
@@ -2037,6 +2179,7 @@ class SettingsDialog(ctk.CTkToplevel):
             "start_with_windows": bool(self.autostart_var.get()),
             "start_minimised": bool(self.start_minimised_var.get()),
             "always_on_top": bool(self.topmost_var.get()),
+            "house_style_avoid": list(self.avoid_terms),
         })
         candidate = normalise_config(candidate)
         if not save_config(candidate, force=True):
@@ -2902,7 +3045,8 @@ class Scriptorium(ctk.CTk):
             system_prompt = build_system_prompt(
                 self.mode_var.get(), self.strength_var.get(),
                 tuple(self.selected_tones), self.role_var.get(),
-                protect_tokens=bool(ph_map))
+                protect_tokens=bool(ph_map),
+                avoid_words=tuple(self.cfg.get("house_style_avoid", [])))
         except ValueError as exc:
             # Defence-in-depth: self.selected_tones is only ever set through
             # _set_selected_tones()/config normalisation, both of which

@@ -4,15 +4,15 @@
 When Mark says "lets get started", that is the cue to open these three files
 before doing anything else.
 
-Current shipped version: **2.17** (v2.9 bug-fix pass, v2.10 visual/UX
+Current shipped version: **2.18** (v2.9 bug-fix pass, v2.10 visual/UX
 polish, v2.11 three-tone picker, v2.12 persisted user presets, v2.13 backend
 retry transport, v2.14 hand-testing fixes, v2.15 Explorer drag-and-drop,
-v2.17 readability metrics + shortcuts reference — see those sections below).
-v2.16 (notes_016's remaining raw-Win32 item, the rich `CF_HTML` clipboard
-diff) is scoped but not yet implemented, shipped out of numeric order behind
-v2.17. v2.18-v2.20+ (notes_019's remaining feature proposals — a house-style
-avoid-list, a headless batch/CLI mode, an in-session revision history) are
-approved and in progress.
+v2.17 readability metrics + shortcuts reference, v2.18 house-style
+avoid-list — see those sections below). v2.16 (notes_016's remaining
+raw-Win32 item, the rich `CF_HTML` clipboard diff) is scoped but not yet
+implemented, shipped out of numeric order behind v2.17/v2.18. v2.19-v2.20+
+(notes_019's remaining feature proposals — a headless batch/CLI mode, an
+in-session revision history) are approved and in progress.
 
 Scope through v2.3 was drawn from twelve accumulated review notes
 (`notes/01_Active/notes_001.txt` – `notes_012.txt`), written independently by
@@ -1540,6 +1540,88 @@ none of its platform risk.
       against the live config, alive and `Responding: True`. Real
       `scriptorium_config.json` confirmed byte-identical throughout — every
       test used an isolated temp config.
+
+---
+
+## v2.18 — User-defined house-style avoid-list ✅ shipped 2026-09-02
+
+**Goal:** notes_019 §2.3 — a third proposal, higher risk than v2.17's pair
+since it touches prompt construction: words or phrases the user never wants
+to see, folded into the system prompt the same way Role and Tone already
+are. Per this project's own standing rule (and notes_019's own explicit
+flag), implemented then calibrated against a live model before being
+considered done — design alone was never treated as sufficient.
+
+1. **Config schema** — `DEFAULT_CONFIG["house_style_avoid"] = []`;
+   `normalise_house_style_avoid()` (mirrors `normalise_user_presets()`'s
+   discipline) strips, de-duplicates case-insensitively, and caps entries
+   at `MAX_HOUSE_STYLE_TERMS` (20) and length at `MAX_HOUSE_STYLE_TERM_LENGTH`
+   (40 chars) — small enough to stay a clearly bounded instruction, not an
+   open-ended rules engine. Wired into `normalise_config()`.
+2. **Prompt integration** — `build_avoid_instruction()` (mirrors
+   `build_tone_instruction()`'s shape and closing-guard pattern);
+   `build_system_prompt()` gained an `avoid_words` parameter, folded into
+   the `# Task` section alongside `tone_line`. `process()`'s call site
+   passes `self.cfg.get("house_style_avoid", [])` through.
+3. **Settings UI** — a "House style" section: an entry + Add button, and a
+   scrollable list of current terms each with a Remove button, following
+   the same working-copy-then-`_save()` pattern every other Settings
+   control already uses.
+
+**Live-model calibration — caught a real embellishment bug, then confirmed
+the fix**, same discipline as v2.4/v2.11: four real cases run against
+`call_ollama()` (`llama3.2:3b`), deliberately including one designed to be
+load-bearing (a source sentence whose banned term — "synergy" — sits inside
+the clause carrying the actual causal claim, so a naive rephrase has
+somewhere to lose content). First pass: three of four cases clean, but the
+"synergy" case turned "the synergy between the marketing and sales teams
+increased revenue" into "...enhanced overall performance, leading to
+increased revenue" — a new claim ("enhanced overall performance") not in
+the source, invented as a bridge for the rephrase. The original guard text
+only forbade *deleting* content to avoid a banned term; it said nothing
+about *adding* a new claim while working around one. Fixed by naming the
+exact failure as a worked example in `build_avoid_instruction()`'s guard
+(the real sentence pair from this test, not an abstract description) rather
+than a generic "don't embellish" restatement — re-ran the fixed version 3x
+on the same case (matching v2.4's own repeat-testing discipline for its
+trickiest finding) plus all three other cases once more: every run clean,
+no added claims, no dropped facts, banned terms genuinely absent from every
+revision. The one "missing content" flag automated checking raised on the
+"leverage" case was confirmed to be the test script's own overly literal
+substring match against a legitimate paraphrase ("current customer ties"
+for "existing customer relationships") — Paraphrase mode is supposed to
+reword, not preserve exact phrasing; the underlying fact was intact and the
+model itself flagged the one genuinely softer phrase ("secure a decision"
+for "close this deal") as an ambiguity worth a second look, exactly the
+self-aware behaviour this feature depends on.
+
+### Acceptance checklist
+- [x] `normalise_house_style_avoid()` strips/de-duplicates/caps correctly
+      against valid, malformed, oversized and over-length-limit inputs, and
+      degrades a non-list value to `[]` rather than raising. Verified
+      directly.
+- [x] `build_avoid_instruction()` names every configured term and includes
+      the anti-deletion and anti-embellishment guard text; an empty list
+      produces an empty string (no prompt change when the feature isn't
+      used). `build_system_prompt()` correctly folds it in only when
+      `avoid_words` is non-empty. Verified directly.
+- [x] The Settings UI's Add/Remove/Save cycle round-trips correctly against
+      a real `SettingsDialog`: adding two terms, removing one, attempting a
+      case-insensitive duplicate (silently ignored), then Save — both
+      `self.cfg` and the real file on disk hold exactly the expected final
+      list. Verified against a real temp config path.
+- [x] **Live-model calibration** (see above): 4 initial cases + 3 repeats of
+      the trickiest one, all against real `call_ollama()` calls — no
+      content loss, no invented claims, banned terms genuinely absent,
+      after one real fix to the guard wording based on an actual finding,
+      not assumed safe from the design alone.
+- [x] `ast.parse()` clean; a full construct/destroy cycle against a real
+      `Scriptorium()` completes with no exception. Real packaged `.exe`
+      rebuilt (`FileVersion`/`ProductVersion` `2.18.0.0`), launched for real
+      against the live config, alive and `Responding: True`. Real
+      `scriptorium_config.json` confirmed byte-identical throughout — every
+      test (including calibration) used an isolated temp config; Ollama
+      calls never touch `CONFIG_PATH`.
 
 ---
 

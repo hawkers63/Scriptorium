@@ -6,6 +6,72 @@ Mark saying "lets get started").
 
 ---
 
+## 2026-09-02 (continued) — v2.18: house-style avoid-list — calibration caught a real embellishment bug
+
+Continued from v2.17 in the same session, working through notes_019's five
+approved proposals in risk order. Full task detail and the complete
+calibration write-up are in `ROADMAP.md`'s v2.18 section; the calibration
+finding is worth recording here in full since it's exactly the kind of
+thing this project's "verify against a live model, not just the design"
+discipline (v2.4, v2.11) exists to catch.
+
+**Implemented**: `house_style_avoid` config key (validated by
+`normalise_house_style_avoid()`, mirroring `normalise_user_presets()`'s
+strip/dedupe/cap pattern, capped at 20 terms / 40 chars each);
+`build_avoid_instruction()` (mirrors `build_tone_instruction()`'s shape);
+`build_system_prompt()` gained an `avoid_words` parameter; a Settings UI
+section (entry + Add button, scrollable list with per-term Remove) using
+the same working-copy-then-`_save()` pattern as everything else in that
+dialog.
+
+**Calibration, run against real `call_ollama()` calls (`llama3.2:3b`),
+deliberately including one load-bearing case**: "The synergy between the
+marketing and sales teams increased quarterly revenue by 18%." with
+"synergy" banned — chosen specifically because the banned term sits inside
+the clause carrying the actual causal claim, the exact shape of case most
+likely to tempt a model into losing content while rephrasing. First pass:
+3 of 4 cases came back clean, but this one didn't — the model turned it
+into "...enhanced overall performance, leading to increased revenue",
+inventing "enhanced overall performance" as a bridge phrase not present in
+the source. **The original guard only forbade deleting content to avoid a
+banned term; it never said anything about adding a new one while rephrasing
+around it** — a real gap in the initial design, not a wording nitpick. Fixed
+by naming this exact sentence pair as a worked example directly in the
+guard text (matching this project's own established pattern from v2.11:
+concrete examples hold up better than abstract "don't invent things"
+restatements). Re-ran the fixed version 3x on the same case plus all three
+other cases once more — every run clean afterward, no added claims, no
+dropped facts, banned terms genuinely absent every time.
+
+**One thing checked and correctly not treated as a bug**: the "leverage"
+case's revision replaced "existing customer relationships" with "current
+customer ties" — automated keyword checking flagged this as "missing
+content", but this was the *test script's* limitation (an exact-substring
+check), not a real defect — Paraphrase mode is supposed to reword, and the
+underlying fact was fully intact. The model itself flagged a genuinely
+softer phrase in the same output ("secure a decision" for "close this
+deal") as an ambiguity worth a second look, which is exactly the kind of
+self-aware signal this feature is meant to produce, not something to
+"fix away".
+
+**Verification**: `ast.parse()` clean; `normalise_house_style_avoid()`
+checked against valid/malformed/oversized/duplicate inputs directly; a real
+`SettingsDialog` Add/Remove/Save cycle confirmed against a real temp config
+file on disk, not just in-memory state; a full `Scriptorium()`
+construct/destroy cycle clean. Real packaged `.exe` rebuilt
+(`FileVersion`/`ProductVersion` `2.18.0.0`), launched against the live
+config, alive and `Responding: True`. Real `scriptorium_config.json`
+confirmed byte-identical throughout — every test, calibration included,
+used an isolated temp config or a plain `cfg` dict never touching
+`CONFIG_PATH`. Ollama (`llama3.2:3b`) used for calibration per this
+project's existing free-local-model-first convention; left running for the
+remaining notes_019 items rather than stopped and restarted each time.
+
+Continuing into the remaining two notes_019 items (headless batch/CLI mode,
+in-session revision history) in the same session.
+
+---
+
 ## 2026-09-02 (continued) — v2.17: readability metrics + keyboard-shortcut dialog (notes_019, items 1-2)
 
 Mark reviewed notes_019 (the fresh feature review Claude wrote as the
