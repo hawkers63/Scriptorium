@@ -4,7 +4,7 @@
 When Mark says "lets get started", that is the cue to open these three files
 before doing anything else.
 
-Current shipped version: **2.24** (v2.9 bug-fix pass, v2.10 visual/UX
+Current shipped version: **2.25** (v2.9 bug-fix pass, v2.10 visual/UX
 polish, v2.11 three-tone picker, v2.12 persisted user presets, v2.13 backend
 retry transport, v2.14 hand-testing fixes, v2.15 Explorer drag-and-drop,
 v2.17 readability metrics + shortcuts reference, v2.18 house-style
@@ -12,13 +12,13 @@ avoid-list, v2.19 headless batch/CLI mode, v2.20 in-session revision
 history, v2.16 rich `CF_HTML` clipboard diff (shipped as build `2.21`),
 v2.22 tray/start-up lifecycle gating, v2.23 drop-safety/preset-repair/
 export/reading-time/clipboard polish, v2.24 protected-content fidelity
-audit — see those sections below). All five notes_019 proposals and
-notes_016's full original proposal set shipped by build 2.21, clearing the
-backlog for the first time since notes_001 opened it; v2.22 closed a fresh
-hand-testing defect (notes_020) found immediately after. notes_021's
-second-generation hardening pass is under way (v2.23/v2.24 above;
-cancellable retry transport remains — see v2.23's "notes_021 delivery
-plan" note).
+audit, v2.25 cancellable retry transport — see those sections below). All
+five notes_019 proposals and notes_016's full original proposal set shipped
+by build 2.21, clearing the backlog for the first time since notes_001
+opened it; v2.22 closed a fresh hand-testing defect (notes_020) found
+immediately after. notes_021's second-generation hardening pass is now
+fully shipped except its deliberately-deferred streaming half (v2.23–v2.25
+above; see v2.25's own write-up for why streaming stays out of scope).
 
 Scope through v2.3 was drawn from twelve accumulated review notes
 (`notes/01_Active/notes_001.txt` – `notes_012.txt`), written independently by
@@ -2139,6 +2139,120 @@ correctness.
 
 ---
 
+## v2.25 — Cancellable, response-reader-based retry transport ✅ shipped 2026-09-03
+
+**Goal:** notes_021 §2.5/3.5, the last of the four hardening areas actually
+scheduled for implementation (§2.5's visible-streaming half stays explicitly
+deferred — see below). Reject, Clear, Import, a new document drop and app
+shutdown all invalidate UI *ownership* of an in-flight request via
+`_invalidate_inflight()`, but before this version none of them stopped the
+*worker* itself: a request sleeping between retry attempts could wake and
+fire another attempt — a real cloud-API cost, and for Ollama's 300-second
+per-attempt timeout, real background work continuing well after the user
+had already moved on — purely to produce a result the UI had already
+promised to discard.
+
+1. **`RequestCancelled(BackendError)`** — raised internally when a request's
+   own cancellation `Event` is set; a `BackendError` subclass so it needs
+   no new case in `worker()`'s existing `except BackendError` handling
+   (though in practice a cancelled request's stale `request_id` means
+   `_claim_request()` already drops its callback either way).
+2. **Transport split into open/retry policy vs. response consumption**
+   (`_read_json_response()`, `_wait_for_retry()`, `_request_with_retries()`)
+   with `_request_json_with_retries()` kept as a thin compatibility wrapper
+   so `call_anthropic()`/`call_ollama()`'s own behaviour and return types
+   are unchanged — this is also the seam a future streaming response reader
+   would plug into. `_wait_for_retry()` replaces every `time.sleep(delay)`
+   backoff wait: with a real `cancel_event`, `Event.wait(delay)` wakes
+   immediately when set, raising `RequestCancelled`; with `cancel_event=None`
+   (batch mode has no cancellation concept) it degrades to the exact
+   previous `time.sleep()` behaviour.
+3. **One `threading.Event` per request**, allocated in `process()`
+   immediately before `_request_id` is bumped, captured directly in the
+   worker closure and passed through `run_backend()`/`call_anthropic()`/
+   `call_ollama()`. Deliberately never cleared and reused — a stale worker
+   could otherwise observe a cleared event and resume — so both `process()`
+   (starting a new request) and `_invalidate_inflight()` (Reject/Clear/
+   Import/shutdown) `.set()` the *current* event rather than touch a shared
+   one.
+4. **Explicit limits, not silently oversold**: cancellation is checked
+   before every attempt and wakes an in-progress backoff wait immediately,
+   but it cannot interrupt a socket already blocked inside `urlopen()`/
+   `read()` — that remains bounded only by the existing per-backend timeout
+   (120s Claude, 300s Ollama). This is the same honestly-scoped limitation
+   notes_021 itself named, not a gap discovered afterwards.
+
+### Acceptance checklist
+- [x] Fault-injected via a monkeypatched `urlopen`, matching v2.13's own
+      established pattern: recovers after one transient 503; exhausts
+      attempts and raises a specific `BackendError`; a non-transient status
+      (401) and a 200-with-invalid-JSON both fail on the first attempt with
+      no retry. Verified against the real `_request_json_with_retries()`.
+- [x] Cancellation, all three timing cases the note's own gate specifies:
+      cancelling *before* attempt one never opens a request; cancelling
+      *during* backoff wakes in well under the scheduled delay (measured
+      ~0.05s against a deliberately long 2s backoff) and never retries;
+      cancelling *after* a request has already succeeded has no effect on
+      that result. Omitting `cancel_event` entirely (the batch-mode case)
+      retries and succeeds exactly as before. Verified against the real
+      `_request_json_with_retries()`, all four cases.
+- [x] **Real end-to-end, not just the isolated transport function**: a real
+      `Scriptorium()`, a real `process()` call against a fault-injected
+      always-503 fake backend forced into its retry backoff, then a real
+      `reject()` call mid-wait. Confirmed exactly one HTTP attempt ever
+      happened — no further attempt fired at the point a second one would
+      have (~1.5s later) or at any point up to 2 further seconds afterward
+      — proving the worker thread genuinely stopped, not merely that the
+      UI chose to ignore a late result.
+- [x] The full success path (`run_backend()` → `call_ollama()` →
+      `_extract_json()`) is unaffected by the new `cancel_event` parameter:
+      a real, un-cancelled `Event` passed through produces the identical
+      result as the parameter being omitted altogether.
+- [x] `ast.parse()` clean; quick regression pass and a real `Scriptorium()`
+      construct/destroy cycle both still pass. Packaged `.exe` rebuilt
+      (`FileVersion`/`ProductVersion` `2.25.0.0`), launched for real, alive
+      and `Responding: True`. Real `scriptorium_config.json` confirmed
+      untouched throughout.
+
+**A genuine testing-environment limitation hit and worked around, not
+silently skipped**: this session could not get a *successful* `process()`
+call's completion to reach the UI (`self.after(0, callback, …)` called from
+the worker thread) inside an automated script in this specific sandbox,
+across several different harness patterns — including the exact "one plain
+background-thread watchdog, no nested scheduling" pattern
+[[scriptorium_testing_gotchas]] item 12 already documented as the fix for an
+identical-looking historical false alarm. Bisected properly rather than
+assumed: the identical test fails exactly the same way against the
+unmodified v2.24 baseline (`git stash`), confirming this is a pre-existing
+characteristic of running this specific cross-thread Tk dispatch inside this
+automated session, not a regression from anything in this version's actual
+changes, and not something a real interactive user has ever been observed
+to hit (v2.13's and v2.20's own real, human-adjacent `process()`
+verifications both succeeded). Confidence in the success path instead comes
+from three independent, passing checks that don't depend on that specific
+cross-thread mechanism: `run_backend()`'s full success path tested directly
+and synchronously with a real `cancel_event` passed through; `_on_success()`
+tested directly against a real `Scriptorium()` with a synthetic result
+(already done for v2.24's fidelity-audit wiring, reused here); and the
+real, passing end-to-end cancellation test above, which doesn't need the
+success-path dispatch to work since `reject()` sets `busy = False`
+synchronously on the calling thread. Worth a real human Process click as a
+final confirmation in a future hand-testing pass, same as any other change
+to this pipeline.
+
+**§2.5's visible-streaming half remains explicitly deferred**, exactly as
+notes_021 itself scoped it: the current model contract is one JSON object
+containing `revised`/`ambiguities`/`note`, and showing bytes as they arrive
+would expose raw JSON envelope fragments in the Suggested-revision pane —
+not a usable feature on its own. The note names two explicit product
+decisions needed first (whether the pane may show an unreviewed partial
+draft; whether a stream failure after a partial delivery keeps a labelled
+partial result or discards it, but must never invisibly retry into the same
+pane) — revisit only once Mark has actually made those calls, not as an
+engineering follow-up.
+
+---
+
 ## Deferred / explicitly out of scope for v2.1–v2.13
 
 - Migrating the API key to Windows Credential Manager (`keyring`) — real
@@ -2210,7 +2324,7 @@ correctness.
 | notes_017 | 1 Sep | Lynne | v2.8 (delta) | Closed by v2.10 (typography/contrast, notice banner, busy motion, dialog chrome, backend labels; toolbar-wrap and character-level diffs deliberately not carried in, see v2.10 write-up) |
 | notes_018 | 1 Sep | Zoe | v2.8 (delta) | Closed by v2.9 (Bugs 1–2/S2, 3–7, S1); S3 deliberately not fixed (informational only, see v2.9 write-up) |
 | notes_020 | 2 Sep | Mark | v2.22 (hand-test diagnosis) | Closed by v2.22 |
-| notes_021 | 2 Sep | Codex | v2.21+ (hardening) | Confirmed all five originally-requested areas already shipped by build 2.21; §2.1/2.2/2.3 closed by v2.23 (conflict feedback) + v2.24 (fidelity audit); §2.4 closed by v2.23; §2.5's cancellable retry transport not yet implemented (see v2.23's "notes_021 delivery plan"); §2.5's streaming groundwork explicitly deferred pending two open product decisions |
+| notes_021 | 2 Sep | Codex | v2.21+ (hardening) | Confirmed all five originally-requested areas already shipped by build 2.21; §2.1/2.2/2.4 closed by v2.23; §2.3 closed by v2.23 (conflict feedback) + v2.24 (fidelity audit); §2.5's cancellable retry transport closed by v2.25; §2.5's streaming half explicitly deferred pending two open product decisions (see v2.25) |
 
 `scriptorium_notes_001.txt`, a near-duplicate of notes_014 written under
 `AGENTS.md`'s (now-abandoned) `scriptorium_notes_[N].txt` draft-path

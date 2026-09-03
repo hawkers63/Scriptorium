@@ -85,7 +85,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.24"
+APP_VERSION = "2.25"
 
 # A small shared palette (notes_017, v2.10) so the two text panes, the diff
 # tags and the notice banner read as one surface instead of drifting
@@ -1150,6 +1150,17 @@ class BackendError(Exception):
     """Raised for any backend/network/parse failure, with a friendly message."""
 
 
+class RequestCancelled(BackendError):
+    """Raised internally when the owning UI request has been cancelled.
+
+    A BackendError subclass (notes_021 §2.5/3.5) so worker()'s existing
+    `except BackendError` branch already handles it without a new case --
+    though in practice _claim_request()'s request_id check means a
+    cancelled request's own callback is stale and dropped anyway, this
+    keeps the exception hierarchy meaningful rather than a bare Exception.
+    """
+
+
 def _payload_object(payload, label):
     """Return payload if it is a JSON object, otherwise raise BackendError.
 
@@ -1271,36 +1282,75 @@ def _retry_delay(failure_index, headers=None):
     return min(exponential + jitter, MAX_RETRY_DELAY)
 
 
-def _request_json_with_retries(request_factory, *, timeout, label,
-                               transient_statuses, unavailable_hint="",
-                               on_retry=None):
-    """Open a fresh urllib request per attempt and return decoded JSON.
+def _read_json_response(response, label):
+    """Consume one non-streaming HTTP response as decoded UTF-8 JSON."""
+    raw_body = response.read()
+    try:
+        return json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        # A 200 that isn't valid JSON is not transient -- retrying the
+        # exact same request would just get the exact same body.
+        raise BackendError(
+            f"{label} returned a non-JSON response.\n\n"
+            f"(Parser detail: {exc})") from exc
+
+
+def _wait_for_retry(delay, cancel_event):
+    """Wait out one backoff delay, waking immediately if cancelled.
+
+    notes_021 §2.5/3.5: a plain time.sleep(delay) can't be interrupted, so
+    a request the UI has already promised to ignore (Reject, Clear, a new
+    Import, or app shutdown) would otherwise keep sleeping and then fire
+    another real HTTP attempt regardless -- wasted, and for the cloud
+    backend, paid. cancel_event is None for callers with no cancellation
+    concept (batch mode), which keeps the plain sleep as before.
+    """
+    if cancel_event is None:
+        time.sleep(delay)
+        return
+    if cancel_event.wait(delay):
+        raise RequestCancelled("The request was cancelled.")
+
+
+def _request_with_retries(request_factory, *, timeout, label,
+                          transient_statuses, response_reader,
+                          unavailable_hint="", on_retry=None,
+                          cancel_event=None):
+    """Open a fresh urllib request per attempt and delegate response reading.
 
     request_factory is a callable, not a pre-built Request: a POST body
     already consumed by a failed attempt cannot be replayed, so each retry
-    needs its own fresh Request object. This also means a future streaming
-    reader can reuse this same transport boundary without either backend
-    function's payload construction changing.
+    needs its own fresh Request object. response_reader separates response
+    *consumption* from this open/retry policy (notes_021 §2.5/3.5) -- the
+    seam a future streaming reader would plug into without changing
+    anything here; it must stay side-effect-free while transparent retries
+    are enabled, since a reader that has already shown the user a partial
+    result must not let this function silently retry from the beginning.
 
     Runs on whatever thread calls it (process()'s worker, never the Tk
     thread), including the retry sleeps -- the UI stays responsive because
     nothing here touches Tk directly; on_retry is the caller's own
-    thread-safe hop back to the UI thread.
+    thread-safe hop back to the UI thread. cancel_event, when given, is
+    checked before every attempt and wakes an in-progress backoff wait
+    immediately (see _wait_for_retry) -- it cannot interrupt a socket
+    already blocked inside urlopen()/read(), which remains bounded only by
+    `timeout`.
     """
     last_network_error = None
     for attempt in range(MAX_REQUEST_ATTEMPTS):
+        if cancel_event is not None and cancel_event.is_set():
+            raise RequestCancelled("The request was cancelled.")
         try:
             request = request_factory()
             with urllib.request.urlopen(request, timeout=timeout) as response:
-                raw_body = response.read()
-            try:
-                return json.loads(raw_body.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                # A 200 that isn't valid JSON is not transient -- retrying
-                # the exact same request would just get the exact same body.
-                raise BackendError(
-                    f"{label} returned a non-JSON response.\n\n"
-                    f"(Parser detail: {exc})") from exc
+                return response_reader(response, label)
+        except RequestCancelled:
+            raise
+        except BackendError:
+            # A successful HTTP response that couldn't be consumed (e.g. a
+            # non-JSON body) is not a transient transport failure -- repeat
+            # attempts would just waste another call for nothing.
+            raise
         except urllib.error.HTTPError as exc:
             # HTTPError is a subclass of URLError and must be checked first.
             can_retry = (exc.code in transient_statuses
@@ -1319,7 +1369,7 @@ def _request_json_with_retries(request_factory, *, timeout, label,
                 on_retry(
                     f"{label} is temporarily unavailable; retrying in "
                     f"{delay:.1f}s ({attempt + 2}/{MAX_REQUEST_ATTEMPTS})…")
-            time.sleep(delay)
+            _wait_for_retry(delay, cancel_event)
         except (urllib.error.URLError, TimeoutError, ConnectionError,
                http.client.HTTPException) as exc:
             last_network_error = exc
@@ -1334,14 +1384,29 @@ def _request_json_with_retries(request_factory, *, timeout, label,
                 on_retry(
                     f"Connection to {label} was interrupted; retrying in "
                     f"{delay:.1f}s ({attempt + 2}/{MAX_REQUEST_ATTEMPTS})…")
-            time.sleep(delay)
+            _wait_for_retry(delay, cancel_event)
 
     # Every branch above returns or raises; this only guards a future edit
     # that adds a path which falls through the loop without doing either.
     raise BackendError(f"Could not reach {label}: {last_network_error}")
 
 
-def call_anthropic(system_prompt, user_text, cfg, on_retry=None):
+def _request_json_with_retries(request_factory, *, timeout, label,
+                               transient_statuses, unavailable_hint="",
+                               on_retry=None, cancel_event=None):
+    """Compatibility wrapper: the non-streaming JSON transport both
+    backends use today, built on _request_with_retries()'s open/retry
+    policy plus _read_json_response()'s response consumption.
+    """
+    return _request_with_retries(
+        request_factory, timeout=timeout, label=label,
+        transient_statuses=transient_statuses,
+        response_reader=_read_json_response,
+        unavailable_hint=unavailable_hint, on_retry=on_retry,
+        cancel_event=cancel_event)
+
+
+def call_anthropic(system_prompt, user_text, cfg, on_retry=None, cancel_event=None):
     api_key = cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         raise BackendError(
@@ -1371,7 +1436,7 @@ def call_anthropic(system_prompt, user_text, cfg, on_retry=None):
         request_factory, timeout=120, label="the Claude API",
         transient_statuses={429, 500, 502, 503, 504, 529},
         unavailable_hint="Check the network connection and try again.",
-        on_retry=on_retry)
+        on_retry=on_retry, cancel_event=cancel_event)
 
     payload = _payload_object(payload, "The Claude API")
     if payload.get("stop_reason") == "max_tokens":
@@ -1395,7 +1460,7 @@ def call_anthropic(system_prompt, user_text, cfg, on_retry=None):
     return _extract_json(text)
 
 
-def call_ollama(system_prompt, user_text, cfg, on_retry=None):
+def call_ollama(system_prompt, user_text, cfg, on_retry=None, cancel_event=None):
     body = json.dumps({
         "model": cfg.get("ollama_model", DEFAULT_OLLAMA_MODEL),
         "stream": False,
@@ -1420,7 +1485,7 @@ def call_ollama(system_prompt, user_text, cfg, on_retry=None):
         unavailable_hint=(
             "Is Ollama running at localhost:11434? Start it with "
             "'ollama serve' and pull a model first."),
-        on_retry=on_retry)
+        on_retry=on_retry, cancel_event=cancel_event)
 
     payload = _payload_object(payload, "Ollama")
     message = payload.get("message")
@@ -1432,20 +1497,25 @@ def call_ollama(system_prompt, user_text, cfg, on_retry=None):
     return _extract_json(text)
 
 
-def run_backend(system_prompt, user_text, cfg, on_retry=None):
+def run_backend(system_prompt, user_text, cfg, on_retry=None, cancel_event=None):
     """Dispatch to the configured backend. An unrecognised value is an
     error, not a silent fall-through to Claude: normalise_config()
     deliberately leaves an invalid "backend" string alone rather than
     clamping it to a guess (v2.9, see its comment there), specifically so
     this branch is reachable and the status bar's privacy claim can never
     disagree with what actually happens to the text. on_retry, if given, is
-    forwarded to the chosen backend's own retry transport.
+    forwarded to the chosen backend's own retry transport. cancel_event,
+    if given, lets a superseded/cancelled request (notes_021 §2.5/3.5) stop
+    retrying and wake an in-progress backoff wait immediately, rather than
+    sleeping out a full retry schedule for a result nobody will see.
     """
     backend = cfg.get("backend")
     if backend == "ollama":
-        return call_ollama(system_prompt, user_text, cfg, on_retry=on_retry)
+        return call_ollama(system_prompt, user_text, cfg, on_retry=on_retry,
+                           cancel_event=cancel_event)
     if backend == "anthropic":
-        return call_anthropic(system_prompt, user_text, cfg, on_retry=on_retry)
+        return call_anthropic(system_prompt, user_text, cfg, on_retry=on_retry,
+                              cancel_event=cancel_event)
     raise BackendError(
         f"Unrecognised backend {backend!r}. Open Settings and choose "
         "Claude or Ollama.")
@@ -2894,6 +2964,11 @@ class Scriptorium(ctk.CTk):
         self.last_result = None
         self.busy = False
         self._request_id = 0          # bumped on every Process and every cancel
+        # Request-scoped cancellation (notes_021 §2.5/3.5) -- process()
+        # allocates a fresh Event per request and captures that exact
+        # object in its worker's closure; never cleared and reused, since a
+        # stale worker could then observe the cleared state and resume.
+        self._request_cancel_event = threading.Event()
         self._result_source = ""      # the text last_result was generated from
         # In-session revision history (v2.20, notes_019 §2.5) -- deliberately
         # in-memory only, never persisted to scriptorium_config.json or any
@@ -3612,7 +3687,17 @@ class Scriptorium(ctk.CTk):
         return True
 
     def _invalidate_inflight(self):
-        """Drop any in-flight Process callback and re-enable the button."""
+        """Drop any in-flight Process callback and re-enable the button.
+
+        Setting the current cancel event (notes_021 §2.5/3.5) additionally
+        stops the worker's own retry loop: a subsequent attempt is refused
+        before it opens, and an in-progress backoff wait wakes immediately
+        instead of sleeping out its full delay for a result the UI has
+        already promised to ignore. It cannot interrupt a socket already
+        blocked inside urlopen()/read() -- that remains bounded only by the
+        backend's own timeout (120s Claude, 300s Ollama).
+        """
+        self._request_cancel_event.set()
         self._request_id += 1
         if self.busy:
             self._set_busy(False)
@@ -3666,7 +3751,14 @@ class Scriptorium(ctk.CTk):
         else:
             masked, ph_map = original, []
 
-        # Stamp this request so a superseded or cancelled result can be ignored.
+        # Stamp this request so a superseded or cancelled result can be ignored,
+        # and give it its own cancellation Event (notes_021 §2.5/3.5) -- any
+        # previous request's event is set first so a still-sleeping old
+        # worker (busy already cleared by Reject/etc., but not yet exited)
+        # stops rather than firing another attempt behind the UI's back.
+        self._request_cancel_event.set()
+        cancel_event = threading.Event()
+        self._request_cancel_event = cancel_event
         self._request_id += 1
         request_id = self._request_id
         self._set_busy(True)
@@ -3697,7 +3789,8 @@ class Scriptorium(ctk.CTk):
                 result = run_backend(
                     system_prompt, masked, cfg_snapshot,
                     on_retry=lambda message: self._post_to_ui(
-                        self._on_retry_progress, request_id, message))
+                        self._on_retry_progress, request_id, message),
+                    cancel_event=cancel_event)
             except BackendError as exc:
                 self._post_to_ui(self._on_error, request_id, str(exc))
             except Exception as exc:  # noqa: BLE001 — surface anything unexpected
