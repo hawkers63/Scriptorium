@@ -16,6 +16,14 @@ instruction. Invoke **one** bot per session. Do not chain bots.
 | **Workspace Clerk** | `workspace_clerk.md` | Local files under `C:\\Scriptorium`; note numbering; hygiene | File work only; never push |
 | **Repository Steward** | `repo_steward.md` | GitHub `hawkers63/Scriptorium`; copyright; professional standards | Sync only after Mark says push |
 
+On-demand only — do not paste these into a standing bot:
+
+| Bot | File | Mandate | When to invoke |
+|---|---|---|---|
+| Release Verifier | `release_verifier.md` | Version metadata, `ast.parse`, packaging smoke | Named version about to ship |
+| Prompt Calibrator | `prompt_calibrator.md` | Live Ollama checks on prompt surfaces | After a tone/role/avoid/prompt edit |
+| Note Archivist | `note_archivist.md` | Note numbering, `00_Drafts` → `01_Active` | An archive or collision pass |
+
 ## Anti-swarm rule (every bot)
 
 Bots must not call, spawn, mention-ping, or hand off to another bot.
