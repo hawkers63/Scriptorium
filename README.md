@@ -134,7 +134,7 @@ fallback.
 3. With Ollama running, all processing stays on your machine.
 
 To keep the (large) model files on another drive, set the `OLLAMA_MODELS`
-environment variable to that folder (for example `D:\Ollama_Models`) before
+environment variable to that folder (for example `D:\\Ollama_Models`) before
 starting Ollama.
 
 ---
@@ -149,7 +149,7 @@ pip install pyinstaller
 pyinstaller scriptorium.spec
 ```
 
-The build produces `dist\Scriptorium.exe`. The equivalent one-off command,
+The build produces `dist\\Scriptorium.exe`. The equivalent one-off command,
 without the spec file, is:
 
 ```
@@ -157,7 +157,7 @@ pyinstaller --onefile --windowed --collect-all customtkinter --name Scriptorium 
 ```
 
 When run as the packaged `.exe`, settings (including your API key) are stored
-under `%LOCALAPPDATA%\Scriptorium` rather than next to the script.
+under `%LOCALAPPDATA%\\Scriptorium` rather than next to the script.
 
 ---
 
@@ -167,6 +167,13 @@ under `%LOCALAPPDATA%\Scriptorium` rather than next to the script.
 
 ---
 
-## Licence
+## Copyright
 
-Personal project by Mark. All rights reserved unless a licence file is added.
+© 2026 Mark Hawksworth. All rights reserved.
+
+Scriptorium is a private, proprietary work. There is no public licence.
+You may not copy, modify, redistribute, or create derivative works
+without Mark Hawksworth's prior written consent. Access to the private
+GitHub repository is not a grant of those rights.
+
+See `LICENSE`, `COPYRIGHT.md`, and `SECURITY.md`.
