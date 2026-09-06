@@ -1,0 +1,542 @@
+Scriptorium — Feature Architecture Proposals (ideation only)
+============================================================
+Author: Lynne
+Date: 3 September 2026
+Target: C:\Scriptorium\scriptorium.py
+Verified metrics (read-only, this session):
+  APP_VERSION  = "2.25"   (line 88)
+  Bytes        = 220125
+  Physical lines = 4894   (Get-Content .Count; Measure-Object -Line reported 4305 non-blank)
+  SHA-256      = 6F182298B20419F08BD7199C18A7B1653C2F8E9A07CF8F31B22ABF77DCDCFB23
+Source not modified. Scratch under agent-tools only; sole project write is this note.
+
+Note numbering: highest existing note across 00_Drafts/ (empty) and 01_Active/
+is notes_021.txt → this file is notes_022.txt.
+
+
+1. Executive Summary
+--------------------
+UX rationale and honesty check against the live tree (enhancement_agent.md:
+do not re-propose shipped or still-deferred-for-a-reason work).
+
+STALE BRIEF AUDIT (the five themes named in the invoking brief):
+  All five are already shipped in v2.11–v2.25. notes_021 already recorded this;
+  this session re-verified line numbers. They are NOT re-proposed below.
+
+  | Brief theme                         | Shipped as | Key lines (verified)                          | Status    |
+  |-------------------------------------|------------|-----------------------------------------------|-----------|
+  | 1. Explorer DnD ctypes WM_DROPFILES | v2.15      | 293–371, 4206–4433, original_box 3265–3276    | shipped   |
+  | 2. User presets in config JSON      | v2.12      | WRITING_PRESETS 621+, user_presets 637–747, DEFAULT_CONFIG 817, PresetManagerDialog 2793 | shipped |
+  | 3. Full 3-tone + conflicts/guards   | v2.11/v2.4 | MAX_SELECTED_TONES=3 @472–473, validate_tones 508, build_tone_instruction 1013–1060, TonePickerDialog 2253 | shipped (limit is 3, not 2) |
+  | 4. MD diff / rich HTML / metrics    | v2.16–23   | build_markdown_diff 1698, annotated 1715, CF_HTML 1786+, reading_metrics 1963, export_diff_file 3980, status chars/words 3458–3482 | shipped |
+  | 5. Exp. backoff in call_*           | v2.13/v2.25| retry transport 1236–1406, call_anthropic 1409, call_ollama 1463; streaming half explicitly deferred (ROADMAP v2.25) | retry shipped; streaming deferred |
+
+FIVE FORWARD PROPOSALS (genuinely open; extend existing seams):
+
+  A. Multi-file / folder drop → guided batch handoff
+     Current `_handle_dropped_paths` (4385–4414) refuses `len(paths) != 1`
+     and directories. UX: when the user drops a folder or several .txt/.md/.docx
+     files onto Original, offer to launch the existing headless batch path
+     (`_run_batch_mode` / v2.19) with a chosen output folder, instead of a
+     dead-end dialogue. Preserves “one document at a time” for the GUI panes
+     while making Explorer the natural front door to batch.
+
+  B. Preset pack import / export
+     user_presets already persist in scriptorium_config.json. Missing: a
+     shareable pack file so house styles travel between machines without
+     hand-editing config. Extends `normalise_user_presets` / PresetManagerDialog.
+
+  C. Soft tone conflicts (advisory) beside hard TONE_CONFLICTS
+     Hard pairs already raise in validate_tones. Several near-conflicts
+     (e.g. Concise+Persuasive, Formal+Casual is hard already) still pass
+     silently yet pull the model. Soft advisories warn in TonePickerDialog
+     without blocking Apply; optional “acknowledge and continue”. Prompt-
+     adjacent → requires live-model calibration before ship (same discipline
+     as v2.4/v2.11).
+
+  D. Configurable reading_wpm + revision-pane readability in the status bar
+     reading_metrics hard-codes 200 wpm (2003) and Flesch is computed only
+     for Original (3465–3471). Add `reading_wpm` to config (clamped) and a
+     second Flesch label for the active revision when present, so Accept/
+     Reject decisions see both sides’ reading load.
+
+  E. Visible-streaming preparation (design only — do not implement SSE UI)
+     ROADMAP v2.25 defers visible streaming pending two product decisions.
+     This note records those decisions as an explicit matrix and designs the
+     `response_reader` seam for Anthropic SSE and Ollama NDJSON, including
+     the rule that transparent retries must disable once partial bytes have
+     been shown. No streaming code is proposed for paste-in yet.
+
+Checked: ROADMAP “Deferred / explicitly out of scope”, notes_021 status row,
+live scriptorium.py Select-String pass, DEFAULT_CONFIG / retry / DnD / tone /
+diff sections dumped. Not re-proposing Credential Manager, module split, or
+“Suggest 3 alternatives” (schema/UI/cost; still correctly ordered last).
+
+
+2. Detailed Architectural Proposals
+-----------------------------------
+
+### A. Multi-file / folder drop → batch handoff
+
+State impact:
+  - No new persistent state. Transient: list of validated paths, optional
+    output directory chosen via filedialog.
+  - Reuses BATCH_SUFFIXES (4724) and `_run_batch_mode` argv contract.
+  - GUI session stays on the single-document contract; batch runs in a
+    subprocess (`sys.executable` + `--batch …`) so the live window’s
+    cancel/mutex story is untouched (v2.19 deliberately skips the mutex for
+    `--batch`).
+
+Config schema deltas: none.
+
+Performance:
+  - Path enumeration for a dropped folder must be bounded (e.g. non-
+    recursive first cut, or recursive with a hard cap of 200 files and a
+    clear message). Reading file bodies stays in the batch process.
+
+DOCX: continue to gate through existing `read_docx` / optional import;
+batch already handles .docx the same way.
+
+### B. Preset pack import / export
+
+State impact:
+  - Pack file schema (versioned):
+      {
+        "format": "scriptorium.preset_pack",
+        "version": 1,
+        "presets": { "<name>": {mode, strength, role, tones} }
+      }
+  - Import merges through `normalise_user_presets` after union with current
+    `cfg["user_presets"]`, so reserved WRITING_PRESETS names and the manager
+    label stay protected. Collisions: skip with a repair-style message list
+    (same shape as load_config.repair_warnings), never silently overwrite
+    unless the user ticks “Replace existing names”.
+
+Config schema deltas: none required. Optional later:
+  `"last_applied_preset": ""`  # display-only; do not auto-apply on startup
+                               # (ROADMAP v2.x explicitly avoided persisting
+                               # last-used as a silent override of defaults)
+
+Performance: trivial JSON; packs capped at MAX_USER_PRESETS entries.
+
+### C. Soft tone conflicts
+
+State impact:
+  - New module-level `TONE_SOFT_CONFLICTS: dict[frozenset[str], str]` parallel
+    to `TONE_CONFLICTS` (475–489).
+  - New pure helper `tone_soft_conflict_message(tones) -> str` (mirror of
+    `tone_conflict_message` at 492).
+  - `validate_tones` UNCHANGED for hard conflicts (sole authoritative hard
+    boundary). Soft messages surface only in TonePickerDialog status /
+    Apply confirmation.
+  - Optional cfg flag `"acknowledge_soft_tone_conflicts": True` default —
+    when False, Apply on a soft conflict requires an explicit yes/no.
+
+Prompt calibration (mandatory before ship):
+  - Run Ollama llama3.1:8b and Claude Sonnet on fixed fixtures for each soft
+    pair (dominant order both ways). Pass criterion: no new facts, no
+    emboldened certainty, no invented offers — same anti-embellishment close
+    already in build_tone_instruction (1050–1060). If a soft pair still
+    injects content under Substantial strength, either tighten the shared
+    guard or promote the pair to hard TONE_CONFLICTS.
+
+### D. Configurable reading_wpm + revision readability
+
+State impact / config schema deltas:
+  DEFAULT_CONFIG += `"reading_wpm": 200`
+  normalise_config: clamp to int 100..400; non-numeric → 200.
+  reading_metrics(text, wpm=200) uses the argument for minutes.
+  _refresh_status: when last_result present and revised word count ≥ 20,
+  append `revision {label} · {time_text}` beside the existing word delta.
+
+Performance: Flesch is O(n) over words; already acceptable on keystroke-
+driven refresh for Original; same cost once more for revised text is fine.
+
+### E. Streaming preparation (design only)
+
+Product decisions still required from Mark (verbatim from ROADMAP v2.25 /
+notes_021 — recorded here so engineering does not guess):
+
+  P1. May the Suggested-revision pane show an unreviewed partial draft
+      while tokens arrive?
+        a) No — keep spinner/status only until a complete JSON object parses.
+        b) Yes — show a clearly labelled “partial / unreviewed” draft.
+  P2. If the stream fails after partial delivery:
+        a) Discard partial; show the error; leave prior accepted state alone.
+        b) Keep labelled partial; never silently retry into the same pane.
+
+Engineering seam already present (do not break it):
+  `_request_with_retries(..., response_reader=...)` at 1315–1406.
+  Docstring at 1323–1328 already states: a reader that has shown partial
+  output must not allow transparent retry from the beginning.
+
+Proposed reader contracts (not for paste yet):
+  - Anthropic: POST with `"stream": true`; read `text/event-stream`; assemble
+    content_block_delta text; only call `_extract_json` on message_stop.
+  - Ollama: `"stream": true`; read NDJSON lines; concatenate message.content
+    deltas; parse JSON on final `done: true`.
+  - When streaming UI is eventually enabled: pass
+    `transient_statuses=set()` or short-circuit retries after the first
+    byte is delivered to the UI callback; cancel_event remains the wake
+    path for Reject/Clear/Import.
+
+Performance: streaming reduces time-to-first-byte perception only; total
+tokens unchanged. JSON-in-stream still needs a complete object for
+ambiguities/note — partial display of raw envelope fragments is explicitly
+why this stays deferred.
+
+
+3. Modular Code Snippets
+------------------------
+Fully commented, PEP 8, British English. Ready to paste when scheduled.
+Streaming (E) is design-only — no implementation snippet.
+
+### Snippet A1 — drop path classifier (near _handle_dropped_paths)
+
+def classify_dropped_paths(paths, suffixes=BATCH_SUFFIXES, max_files=200):
+    """Classify an Explorer drop into single / batch / rejected.
+
+    Returns a dict with keys:
+      kind: "single" | "batch" | "empty" | "too_many" | "unsupported"
+      files: list[str]  # existing files whose suffix is allowed
+      reason: str       # human-readable when kind is not single/batch
+
+    Folders contribute their *immediate* children only (non-recursive) so a
+    careless drop of a home directory cannot enqueue thousands of files.
+    """
+    files = []
+    for path in paths:
+        if os.path.isdir(path):
+            try:
+                names = os.listdir(path)
+            except OSError as exc:
+                return {"kind": "unsupported", "files": [],
+                        "reason": f"Could not read folder: {exc}"}
+            for name in names:
+                candidate = os.path.join(path, name)
+                if (os.path.isfile(candidate)
+                        and os.path.splitext(candidate)[1].lower()
+                        in suffixes):
+                    files.append(candidate)
+        elif (os.path.isfile(path)
+              and os.path.splitext(path)[1].lower() in suffixes):
+            files.append(path)
+    # De-duplicate while preserving order.
+    seen = set()
+    ordered = []
+    for path in files:
+        key = os.path.normcase(os.path.abspath(path))
+        if key not in seen:
+            seen.add(key)
+            ordered.append(path)
+    if not ordered:
+        return {"kind": "empty", "files": [],
+                "reason": "No .txt, .md or .docx files were found."}
+    if len(ordered) > max_files:
+        return {"kind": "too_many", "files": ordered[:max_files],
+                "reason": (f"Found {len(ordered)} files; refuse more than "
+                           f"{max_files} in one drop.")}
+    if len(ordered) == 1 and len(paths) == 1 and os.path.isfile(paths[0]):
+        return {"kind": "single", "files": ordered, "reason": ""}
+    return {"kind": "batch", "files": ordered, "reason": ""}
+
+
+### Snippet A2 — replace body of Scriptorium._handle_dropped_paths
+
+def _handle_dropped_paths(self, paths):
+    """Validate a completed Explorer drop on Tk's event thread.
+
+    One ordinary document still loads into Original. A folder or several
+    matching documents offer the existing headless batch programme instead
+    of a dead-end 'drop one file' dialogue.
+    """
+    verdict = classify_dropped_paths(paths)
+    if verdict["kind"] == "single":
+        self._load_file_path(verdict["files"][0], confirm_replace=True)
+        return
+    if verdict["kind"] != "batch":
+        messagebox.showinfo(
+            "Nothing to open",
+            verdict["reason"] or "Scriptorium could not use that drop.",
+            parent=self,
+        )
+        return
+
+    count = len(verdict["files"])
+    if not messagebox.askyesno(
+            "Run batch on dropped files?",
+            f"{count} document(s) were dropped. Open them in the Original "
+            "pane one at a time is not supported; run a headless batch "
+            "instead?\n\nYou will be asked for an output folder. The "
+            "current window stays as it is.",
+            parent=self):
+        return
+    out_dir = filedialog.askdirectory(title="Batch output folder")
+    if not out_dir:
+        return
+    # Stage inputs into a temporary directory listing so batch mode keeps
+    # its existing INPUT_DIR contract without rewriting argv parsing.
+    staging = tempfile.mkdtemp(prefix="scriptorium_drop_")
+    try:
+        for src in verdict["files"]:
+            dest = os.path.join(staging, os.path.basename(src))
+            # Never overwrite silently inside staging.
+            if os.path.exists(dest):
+                stem, ext = os.path.splitext(os.path.basename(src))
+                dest = os.path.join(staging, f"{stem}_{secrets.token_hex(3)}{ext}")
+            shutil.copy2(src, dest)
+    except OSError as exc:
+        messagebox.showerror("Batch staging failed", str(exc), parent=self)
+        return
+
+    # Launch a sibling process; do not import _run_batch_mode on the UI thread.
+    cmd = [
+        sys.executable,
+        os.path.abspath(sys.argv[0]),
+        "--batch", staging,
+        "--out", out_dir,
+        "--mode", self.mode_var.get(),
+        "--strength", self.strength_var.get(),
+        "--role", self.role_var.get(),
+    ]
+    try:
+        subprocess.Popen(cmd, close_fds=True)
+    except OSError as exc:
+        messagebox.showerror("Batch launch failed", str(exc), parent=self)
+        return
+    self._refresh_status(
+        f"batch started for {count} file(s) → {os.path.basename(out_dir)}")
+
+
+### Snippet B1 — pack helpers (near normalise_user_presets ~688)
+
+PRESET_PACK_FORMAT = "scriptorium.preset_pack"
+PRESET_PACK_VERSION = 1
+
+
+def export_preset_pack(user_presets, path):
+    """Write a shareable preset pack. Returns (ok: bool, detail: str)."""
+    clean = normalise_user_presets(user_presets)
+    document = {
+        "format": PRESET_PACK_FORMAT,
+        "version": PRESET_PACK_VERSION,
+        "presets": clean,
+    }
+    try:
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(document, fh, indent=2, ensure_ascii=False)
+            fh.write("\n")
+    except OSError as exc:
+        return False, str(exc)
+    return True, f"exported {len(clean)} preset(s)"
+
+
+def import_preset_pack(path, existing, *, replace_existing=False):
+    """Merge a pack into existing user_presets.
+
+    Returns (merged_dict, messages: list[str]). Invalid packs yield
+    ({}, ["…"]) without raising, matching the config-repair style.
+    """
+    messages = []
+    try:
+        with open(path, "r", encoding="utf-8-sig") as fh:
+            loaded = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        return dict(existing), [f"Could not read preset pack: {exc}"]
+    if not isinstance(loaded, dict) or loaded.get("format") != PRESET_PACK_FORMAT:
+        return dict(existing), ["File is not a Scriptorium preset pack."]
+    incoming = loaded.get("presets", {})
+    if not isinstance(incoming, dict):
+        return dict(existing), ["Pack 'presets' field is not an object."]
+
+    merged = dict(existing)
+    if replace_existing:
+        # Drop only names that the pack successfully validates.
+        validated = normalise_user_presets(incoming)
+        for name in validated:
+            merged.pop(name, None)
+        incoming = validated
+    # Union then re-validate so reserved names and caps still apply.
+    trial = dict(merged)
+    trial.update(incoming if isinstance(incoming, dict) else {})
+    issues = {"messages": [], "omitted": 0}
+    clean = normalise_user_presets(trial, issues=issues)
+    messages.extend(issues["messages"])
+    if issues["omitted"]:
+        messages.append(f"{issues['omitted']} further pack issue(s) omitted.")
+    return clean, messages
+
+
+### Snippet C1 — soft conflicts (immediately after TONE_CONFLICTS ~489)
+
+TONE_SOFT_CONFLICTS = {
+    frozenset({"Concise", "Persuasive"}): (
+        "'Concise' shortens; 'Persuasive' often lengthens to argue. The "
+        "dominant tone will win, but expect the supporting tone to be "
+        "weakened. Continue only if that is intended."
+    ),
+    frozenset({"Detailed", "Direct"}): (
+        "'Detailed' expands explanation; 'Direct' cuts to the point. "
+        "Worth a quick check that the dominant tone matches the goal."
+    ),
+    frozenset({"Diplomatic", "Direct"}): (
+        "'Diplomatic' softens; 'Direct' hardens. Meaning must stay fixed — "
+        "watch for accidental loss of courtesy or of firmness."
+    ),
+}
+
+
+def tone_soft_conflict_message(tones):
+    """Return the first soft-conflict advisory for a selection, or "".
+
+    Soft conflicts never raise inside validate_tones(); they are UI guidance
+    only. Promote a pair into TONE_CONFLICTS after live-model calibration if
+    it reliably injects content or certainty.
+    """
+    selected = set(tones)
+    for pair, message in TONE_SOFT_CONFLICTS.items():
+        if pair.issubset(selected):
+            return message
+    return ""
+
+
+### Snippet C2 — TonePickerDialog Apply gate (inside Apply handler ~2365)
+
+# After: tones = validate_tones(self.selected_order)
+soft = tone_soft_conflict_message(tones)
+if soft and self.master.cfg.get("acknowledge_soft_tone_conflicts", True):
+    if not messagebox.askyesno(
+            "Tone combination advisory",
+            soft + "\n\nApply this combination anyway?",
+            parent=self):
+        return
+
+
+### Snippet D1 — reading_metrics signature delta (~1963)
+
+def reading_metrics(text, wpm=200):
+    """Return (grade_label, minutes) for the given text, or None if empty.
+
+    wpm is words-per-minute for the reading-time estimate (config-
+    driven; default 200). Grade labels remain Flesch Reading Ease bands.
+    """
+    words = text.split()
+    word_count = len(words)
+    if word_count == 0:
+        return None
+    # ... existing syllable / score logic unchanged ...
+    rate = max(int(wpm), 1)
+    minutes = word_count / rate
+    return label, minutes
+
+
+### Snippet D2 — DEFAULT_CONFIG / normalise_config deltas
+
+# In DEFAULT_CONFIG (after "house_style_avoid"):
+    "reading_wpm": 200,              # status-bar reading-time assumption
+
+# In normalise_config, after boolean normalisation:
+    raw_wpm = clean.get("reading_wpm", DEFAULT_CONFIG["reading_wpm"])
+    try:
+        wpm = int(raw_wpm)
+    except (TypeError, ValueError):
+        wpm = DEFAULT_CONFIG["reading_wpm"]
+    clean["reading_wpm"] = min(400, max(100, wpm))
+
+
+### Snippet D3 — _refresh_status revision readability (~3472)
+
+        if self.last_result:
+            revised = self.last_result["revised"]
+            r_words = len(revised.split()) if revised.strip() else 0
+            src = self._result_source if self._result_source else original
+            src_words = len(src.split()) if src.strip() else 0
+            delta = r_words - src_words
+            sign = f"+{delta}" if delta >= 0 else str(delta)
+            msg += f"   |   revision {r_words} words ({sign})"
+            if r_words >= 20:
+                r_metrics = reading_metrics(
+                    revised, wpm=self.cfg.get("reading_wpm", 200))
+                if r_metrics:
+                    r_label, r_minutes = r_metrics
+                    r_time = ("under a minute" if r_minutes < 1
+                              else f"~{math.ceil(r_minutes)} min read")
+                    msg += f"   |   revision {r_label} · {r_time}"
+
+
+### Snippet E — streaming seam notes (comments only; do NOT paste as live code)
+
+# Future streaming reader contract (design record — not enabled):
+#
+# def _read_anthropic_sse(response, label, on_delta=None):
+#     """Consume text/event-stream; return parsed revision dict.
+#
+#     on_delta, if given, receives text deltas for UI preview. The moment
+#     on_delta has been called even once, the caller MUST disable
+#     transparent retries for this request (pass transient_statuses=set()
+#     or use a one-shot open without _request_with_retries).
+#     Partial JSON must never be shown as a finished revision; only the
+#     assembled text after message_stop is passed to _extract_json().
+#     Product decisions P1/P2 in §2.E must be answered before wiring
+#     on_delta to the Suggested-revision pane.
+#     """
+#     raise NotImplementedError("streaming deferred — see ROADMAP v2.25")
+#
+# Ollama equivalent reads NDJSON (`{"message":{"content":"..."},"done":false}`).
+# call_ollama today sends "stream": False (line 1466); flipping that without
+# a reader that understands NDJSON would break _read_json_response.
+
+
+4. Insertion Map
+----------------
+File: C:\Scriptorium\scriptorium.py (single-file; class Scriptorium unless noted)
+
+| Snippet | Anchor | Surrounding verified lines | Notes |
+|---------|--------|----------------------------|-------|
+| A1 classify_dropped_paths | Module level, near BATCH_SUFFIXES / before _run_batch_mode | BATCH_SUFFIXES ~4724 | New function |
+| A2 _handle_dropped_paths | class Scriptorium | 4385–4414 (replace body) | Keep hit-test 4372–4383 |
+| B1 pack helpers | Module level after normalise_user_presets | after ~747 | Uses existing normalise_user_presets |
+| B2 UI buttons | class PresetManagerDialog | class starts 2793 | Add Export pack… / Import pack… |
+| C1 TONE_SOFT_CONFLICTS | Module level after TONE_CONFLICTS | after 489; tone_conflict_message 492 | Do not alter validate_tones 508 |
+| C2 Apply advisory | class TonePickerDialog | Apply path ~2365 (tones = validate_tones(...)) | Needs self.master.cfg |
+| D1 reading_metrics | Module function | 1963–2004 | Add wpm arg; keep bands |
+| D2 config | DEFAULT_CONFIG / normalise_config | DEFAULT_CONFIG 799–819; normalise_config 859–909 | Clamp 100..400 |
+| D3 status | Scriptorium._refresh_status | 3444–3485; revision block 3472–3482 | Original metrics already at 3465 |
+| E streaming | Design record only | Seam docstring 1323–1328; call_ollama stream False 1466; call_anthropic body 1418–1433 | No code paste until P1/P2 |
+
+Additional verified anchors for implementers:
+  APP_VERSION                         88
+  WM_DROPFILES / DragAcceptFiles      308, 356–371
+  MAX_SELECTED_TONES / TONE_PICKER_LIMIT 472–473  (both 3)
+  WRITING_PRESETS                     621
+  DEFAULT_CONFIG user_presets         817
+  load_config / save_config           912 / 948
+  build_tone_instruction              1013
+  _request_with_retries               1315
+  call_anthropic / call_ollama / run_backend  1409 / 1463 / 1500
+  read_docx / write_docx               1563 / 1574
+  build_markdown_diff / annotated     1698 / 1715
+  set_html_clipboard                  1880
+  reading_metrics                     1963
+  TonePickerDialog                    2253 (cap uses TONE_PICKER_LIMIT)
+  PresetManagerDialog                 2793
+  HistoryDialog                       2883
+  self.cfg = load_config()            2962
+  self.after_idle(_enable_file_drops) 3012
+  self.original_box construction      3265–3276
+  export_diff_file                    3980–4021
+  _enable_file_drops                  4206
+
+
+5. Feature status (one line each)
+---------------------------------
+A. Multi-file/folder drop → batch handoff — designed (clear gap at 4396–4412)
+B. Preset pack import/export — designed
+C. Soft tone conflicts — designed (calibration required before ship)
+D. reading_wpm + revision readability — designed
+E. Streaming preparation notes — designed / blocked from implementation pending Mark’s P1/P2 (ROADMAP deferred)
+
+Stale brief items 1–5 — already shipped (not designed again); insertion-line uncertainty: none for the verified anchors above; TonePicker Apply exact soft-gate line (~2365) should be re-read at implementation time in case the method shifts by a few lines.
+
+
+End of note. Ideation only — scriptorium.py untouched.
