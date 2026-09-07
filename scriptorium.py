@@ -85,7 +85,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.27"
+APP_VERSION = "2.28"
 
 # A small shared palette (notes_017, v2.10) so the two text panes, the diff
 # tags and the notice banner read as one surface instead of drifting
@@ -1649,6 +1649,13 @@ def render_diff(text_widget, original, revised, inline=False):
     show the deleted or replaced original words, struck through in red, so it
     is clear what was removed. Either way the accepted/exported text is always
     the clean revision — the strikethrough is a display aid only.
+
+    Returns a list of (start, end) Tk text-index pairs, one per displayed
+    non-equal region, in document order (notes_023 E2) -- used by the
+    change navigator to step through and highlight each change in turn. A
+    pure deletion in Clean view has a zero-width range (nothing is actually
+    displayed for it there), but its start index is still a valid anchor to
+    scroll to.
     """
     text_widget.configure(state="normal")
     text_widget.delete("1.0", "end")
@@ -1656,20 +1663,25 @@ def render_diff(text_widget, original, revised, inline=False):
     a, b = _tokenise(original), _tokenise(revised)
     matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
 
+    change_ranges = []
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        start = text_widget.index("end-1c")
         if tag == "equal":
             text_widget.insert("end", "".join(b[j1:j2]))
-        elif tag == "insert":
+            continue
+        if tag == "insert":
             text_widget.insert("end", "".join(b[j1:j2]), "changed")
         elif tag == "delete":
             if inline:
                 text_widget.insert("end", "".join(a[i1:i2]), "deleted")
-        elif tag == "replace":
+        else:  # replace
             if inline:
                 text_widget.insert("end", "".join(a[i1:i2]), "deleted")
             text_widget.insert("end", "".join(b[j1:j2]), "changed")
+        change_ranges.append((start, text_widget.index("end-1c")))
 
     text_widget.configure(state="disabled")
+    return change_ranges
 
 
 def summarise_diff(original, revised):
@@ -1772,6 +1784,68 @@ def build_annotated_markdown_diff(original, revised):
         "# Scriptorium annotated revision\n\n"
         "Deleted text is struck through; inserted text is bold.\n\n"
         "<pre>" + "".join(output) + "</pre>\n"
+    )
+
+
+def _markdown_fenced_section(heading, body, language="text"):
+    """Return a heading and a fence long enough that source backticks
+    inside body cannot terminate it early."""
+    text = body if isinstance(body, str) else str(body)
+    fence = _safe_markdown_fence(text)
+    return f"## {heading}\n\n{fence}{language}\n{text}\n{fence}\n"
+
+
+def build_review_record(original, revised, request_context, ambiguities=(),
+                         notices=(), note=""):
+    """Return a self-contained Markdown record for explicit human review.
+
+    Combines everything a reader needs to judge one suggested revision on
+    its own -- provenance, every ambiguity/notice, and both texts plus a
+    unified diff -- without ever serialising configuration wholesale, so it
+    cannot leak an API key or the system prompt (notes_023 E3).
+    request_context is exactly what build_request_context() captured for
+    this result (v2.26); ambiguities/notices are the durable review
+    evidence collect_revision_notices() produced, the same ones the
+    ambiguity banner and history restoration already show.
+    """
+    tones = " + ".join(request_context.get("tones", ())) or "(keep original)"
+    provenance = "\n".join((
+        f"Generated: {request_context.get('created_at', 'unknown')}",
+        f"Backend: {request_context.get('backend', 'unknown')}",
+        f"Model: {request_context.get('model', 'unknown')}",
+        f"Scope: {request_context.get('scope', 'full')}",
+        f"Mode: {request_context.get('mode', 'unknown')}",
+        f"Strength: {request_context.get('strength', 'unknown')}",
+        f"Role: {request_context.get('role', '(none)')}",
+        f"Tones: {tones}",
+    ))
+
+    review_items = [
+        *(f"Ambiguity: {item}" for item in ambiguities),
+        *(f"Review notice: {item}" for item in notices),
+    ]
+    if note:
+        review_items.append(f"Model note: {note}")
+    review_body = "\n".join(review_items) or "No review notices were reported."
+
+    unified = "\n".join(difflib.unified_diff(
+        original.splitlines(), revised.splitlines(),
+        fromfile="Original", tofile="Suggested revision", lineterm="",
+    )) or "(no wording changes)"
+
+    return (
+        "# Scriptorium review record\n\n"
+        "Status: Suggested revision — not accepted automatically.\n\n"
+        f"Change summary: {summarise_diff(original, revised)}\n\n"
+        + _markdown_fenced_section("Request provenance", provenance)
+        + "\n"
+        + _markdown_fenced_section("Review notices", review_body)
+        + "\n"
+        + _markdown_fenced_section("Original", original)
+        + "\n"
+        + _markdown_fenced_section("Suggested revision", revised)
+        + "\n"
+        + _markdown_fenced_section("Unified diff", unified, "diff")
     )
 
 
@@ -2501,27 +2575,31 @@ class ShortcutsDialog(ctk.CTkToplevel):
 
 
 class DiffExportFormatDialog(ctk.CTkToplevel):
-    """Choose between the two review-oriented Markdown diff formats.
+    """Choose between the review-oriented Markdown export formats.
 
     notes_021 §2.4/3.4: unified diff (the existing default) suits source
     control and technical review; annotated prose reads more naturally as
-    an ordinary document. Cancelling (Escape or the window close button)
-    leaves self.result as None, which export_diff_file() treats as "export
-    cancelled", same as declining the save-path dialog that follows it.
+    an ordinary document. Review record (notes_023 E3) is the third
+    option: a self-contained record with full provenance and every review
+    notice, for someone who needs the complete picture in one file rather
+    than just the wording change. Cancelling (Escape or the window close
+    button) leaves self.result as None, which export_diff_file() treats as
+    "export cancelled", same as declining the save-path dialog that
+    follows it.
     """
 
     def __init__(self, master):
         super().__init__(master)
         self.result = None
         self.title("Export diff")
-        self.geometry("430x210")
+        self.geometry("560x210")
         self.resizable(False, False)
         self.transient(master)
         self.grab_set()  # modal (notes_023 F6) -- Reject/History behind this
                          # dialogue must not be able to change state export
                          # is about to read
         bind_dialog_chrome(self, on_close=self.destroy)
-        position_over_parent(self, master, 430, 210)
+        position_over_parent(self, master, 560, 210)
 
         ctk.CTkLabel(
             self, text="Choose a Markdown review format",
@@ -2530,8 +2608,9 @@ class DiffExportFormatDialog(ctk.CTkToplevel):
         ctk.CTkLabel(
             self,
             text=("Unified diff suits source control. Annotated prose is "
-                  "easier to read as an ordinary document."),
-            wraplength=390, justify="left", text_color="gray65",
+                  "easier to read as an ordinary document. Review record "
+                  "adds full provenance and every review notice."),
+            wraplength=520, justify="left", text_color="gray65",
         ).pack(anchor="w", padx=18, pady=(0, 14))
 
         buttons = ctk.CTkFrame(self, fg_color="transparent")
@@ -2543,6 +2622,10 @@ class DiffExportFormatDialog(ctk.CTkToplevel):
         ctk.CTkButton(
             buttons, text="Annotated prose",
             command=lambda: self._choose("annotated"),
+        ).pack(side="left", expand=True, fill="x", padx=4)
+        ctk.CTkButton(
+            buttons, text="Review record",
+            command=lambda: self._choose("record"),
         ).pack(side="left", expand=True, fill="x", padx=(4, 0))
 
     def _choose(self, value):
@@ -2551,7 +2634,7 @@ class DiffExportFormatDialog(ctk.CTkToplevel):
 
 
 def choose_diff_export_format(master):
-    """Return 'unified', 'annotated', or None if the dialogue was closed."""
+    """Return 'unified', 'annotated', 'record', or None if closed."""
     dialogue = DiffExportFormatDialog(master)
     master.wait_window(dialogue)
     return dialogue.result
@@ -3097,6 +3180,8 @@ class Scriptorium(ctk.CTk):
         self._result_source = ""      # the text last_result was generated from
         self._result_context = {}     # build_request_context() for last_result
         self._review_notices = []     # durable notices for last_result (F3)
+        self._change_ranges = []      # render_diff()'s ranges for last_result (E2)
+        self._change_cursor = -1      # index into _change_ranges, -1 = none active
         # In-session revision history (v2.20, notes_019 §2.5) -- deliberately
         # in-memory only, never persisted to scriptorium_config.json or any
         # other file. This project has an existing, deliberate principle,
@@ -3385,6 +3470,23 @@ class Scriptorium(ctk.CTk):
             rev_header, values=["Clean", "Inline"], variable=self.diff_view_var,
             command=self._on_diff_view_change, width=160).pack(side="right")
 
+        # Change-by-change navigator (notes_023 E2) -- steps through each
+        # displayed non-equal diff region in turn, so reviewing a long
+        # revision doesn't mean hunting through the pane by eye alone.
+        change_nav = ctk.CTkFrame(rev_header, fg_color="transparent")
+        change_nav.pack(side="right", padx=(0, 8))
+        self.previous_change_btn = ctk.CTkButton(
+            change_nav, text="Prev", width=48, state="disabled",
+            fg_color="gray30", command=lambda: self._go_to_change(-1))
+        self.previous_change_btn.pack(side="left")
+        self.change_position_label = ctk.CTkLabel(
+            change_nav, text="0 / 0", width=48)
+        self.change_position_label.pack(side="left", padx=4)
+        self.next_change_btn = ctk.CTkButton(
+            change_nav, text="Next", width=48, state="disabled",
+            fg_color="gray30", command=lambda: self._go_to_change(1))
+        self.next_change_btn.pack(side="left")
+
         # Original: editable CTk textbox. Matched to Revised's face, size and
         # background (PANE_FONT/PANE_BG/PANE_FG) so the two panes read as one
         # surface rather than the left looking like a different, "lighter"
@@ -3427,6 +3529,9 @@ class Scriptorium(ctk.CTk):
         self.revised_box.tag_config(
             "deleted", foreground=DIFF_DEL_FG, background=DIFF_DEL_BG,
             overstrike=1)
+        # Supplements, never replaces, the insert/delete colours above --
+        # marks whichever change the navigator has just scrolled to.
+        self.revised_box.tag_config("active_change", underline=True)
         self.revised_box.bind(
             "<Button-3>",
             lambda event: self._show_text_context_menu(event, self.revised_box,
@@ -3991,8 +4096,7 @@ class Scriptorium(ctk.CTk):
         self._result_source = original
         self._result_context = dict(request_context)
         self._review_notices = list(durable_notices)
-        render_diff(self.revised_box, original, result["revised"],
-                    inline=(self.diff_view_var.get() == "Inline"))
+        self._render_active_revision()
         self._show_ambiguities(
             list(result.get("ambiguities", [])) + live_notices)
         self._remember_for_history(
@@ -4054,12 +4158,57 @@ class Scriptorium(ctk.CTk):
         """True if the original box no longer matches the live revision."""
         return self.original_box.get("1.0", "end-1c") != self._result_source
 
+    def _render_active_revision(self):
+        """Render self.last_result and reset the change navigator to match.
+
+        Centralises every render_diff() call site (notes_023 E2) --
+        _on_success, _on_diff_view_change and _restore_from_history all go
+        through this now, so the navigator's ranges can never fall out of
+        sync with what is actually on screen.
+        """
+        if not self.last_result:
+            self._change_ranges = []
+        else:
+            self._change_ranges = render_diff(
+                self.revised_box, self._result_source,
+                self.last_result["revised"],
+                inline=(self.diff_view_var.get() == "Inline"))
+        self._change_cursor = -1
+        self._refresh_change_navigation()
+
+    def _refresh_change_navigation(self):
+        """Synchronise the Prev/Next buttons and position label."""
+        count = len(self._change_ranges)
+        state = "normal" if count else "disabled"
+        self.previous_change_btn.configure(state=state)
+        self.next_change_btn.configure(state=state)
+        position = self._change_cursor + 1 if self._change_cursor >= 0 else 0
+        self.change_position_label.configure(text=f"{position} / {count}")
+        self.revised_box.tag_remove("active_change", "1.0", "end")
+
+    def _go_to_change(self, direction):
+        """Cycle to the previous (-1) or next (+1) change and reveal it.
+
+        Wraps at both ends. A zero-width range (a pure deletion in Clean
+        view, where nothing is actually displayed) still scrolls to its
+        anchor point without pretending deleted text is present there.
+        """
+        if not self._change_ranges:
+            return
+        self._change_cursor = (
+            self._change_cursor + direction) % len(self._change_ranges)
+        start, end = self._change_ranges[self._change_cursor]
+        self.revised_box.tag_remove("active_change", "1.0", "end")
+        if self.revised_box.compare(start, "!=", end):
+            self.revised_box.tag_add("active_change", start, end)
+            self.revised_box.tag_raise("active_change")
+        self.revised_box.see(start)
+        self.change_position_label.configure(
+            text=f"{self._change_cursor + 1} / {len(self._change_ranges)}")
+
     def _on_diff_view_change(self, _value=None):
         """Re-render the current revision when the Clean/Inline toggle changes."""
-        if self.last_result:
-            render_diff(self.revised_box, self._result_source,
-                        self.last_result["revised"],
-                        inline=(self.diff_view_var.get() == "Inline"))
+        self._render_active_revision()
 
     def accept(self):
         """Replace the original with the accepted revision (chains edits)."""
@@ -4090,6 +4239,9 @@ class Scriptorium(ctk.CTk):
         self._result_source = ""
         self._result_context = {}
         self._review_notices = []
+        self._change_ranges = []
+        self._change_cursor = -1
+        self._refresh_change_navigation()
         self._show_ambiguities([])
         self._refresh_status("revision cleared")
 
@@ -4153,8 +4305,8 @@ class Scriptorium(ctk.CTk):
         wants the result; this is the explicitly review-oriented path,
         showing what changed and from what, for pasting into a PR
         description, a code-review tool, or an email summarising an edit.
-        Offers a choice of unified diff or annotated prose (notes_021
-        §2.4/3.4) since the latter reads far better for ordinary text.
+        Offers a choice of unified diff, annotated prose (notes_021
+        §2.4/3.4) or a full provenance-aware review record (notes_023 E3).
         """
         if not self.last_result:
             self._refresh_status("nothing to export as a diff")
@@ -4184,7 +4336,12 @@ class Scriptorium(ctk.CTk):
             filetypes=[("Markdown", "*.md")])
         if not path:
             return
-        if export_format == "annotated":
+        if export_format == "record":
+            document = build_review_record(
+                source, revised, request_context,
+                ambiguities=result.get("ambiguities", []),
+                notices=notices, note=result.get("note", ""))
+        elif export_format == "annotated":
             document = build_annotated_markdown_diff(source, revised)
         else:
             document = build_markdown_diff(source, revised)
@@ -4706,8 +4863,7 @@ class Scriptorium(ctk.CTk):
         self._result_source = entry["original"]
         self._result_context = context
         self._review_notices = notices
-        render_diff(self.revised_box, entry["original"], entry["revised"],
-                    inline=(self.diff_view_var.get() == "Inline"))
+        self._render_active_revision()
         self._show_ambiguities(ambiguities + notices)
         self._refresh_status(f"restored from history ({entry['time']})")
 
