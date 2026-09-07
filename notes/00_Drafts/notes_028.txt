@@ -1,0 +1,490 @@
+Date: 7 September 2026
+Review: UI/UX remaining-work audit for Scriptorium 2.32
+Author: Grok (Lead UI/UX)
+Scope: Read-only review of scriptorium.py (APP_VERSION = "2.32").
+       No source, config or asset files were modified.
+
+Checked first (so this is not a restatement of notes_027):
+- ROADMAP.md v2.10 (shipped visual pass), v2.14 (action-bar/status visibility),
+  v2.32 (notes_027 items 1–5 implemented, pending Mark's hand-test), and the
+  Deferred sections (toolbar wrap at 920px; character-level diffs; extra
+  status-bar metrics; streaming).
+- notes_027 in full. Items 1–5 are present in the live source (shared pane
+  metrics, calmer diff/active colours, split notice banner, 600ms busy pulse,
+  Settings/Tone-picker focus and Return). Item 6 (action-bar regrouping) is
+  deliberately not shipped.
+- Live palette, `_build_toolbar()`, `_build_panes()`, `_build_actionbar()`,
+  `_set_busy()`, `_go_to_change()`, `SettingsDialog`, `TonePickerDialog`.
+
+This note only proposes what is still open, plus two findings that have
+worsened since v2.10 deferred them.
+
+
+1. UI/UX Audit & Visual Hierarchy Breakdown
+
+Overall state
+
+Scriptorium 2.32 already reads as one dark Windows 11 surface. The dual pane
+shares `PANE_BG` / `PANE_FG` / `PANE_FONT` / `PANE_INSET_*` / `PANE_SPACING_*`.
+Diff tags use fills, not only ink. The notice banner is a titled, dismissible
+amber frame. Working… has a 4px indeterminate bar and a 600ms Process pulse.
+Dialogs bind Escape, sit over the parent, and (Settings, Tone picker) take
+initial focus.
+
+The remaining problem is crowding and chrome mismatch, not missing widgets.
+Hierarchy is still fairly flat: toolbar knobs, review actions, file utilities
+and a dense status line all compete at similar weight. At the advertised
+default 1180×760 the toolbar itself no longer fits; at the 920px minimum the
+action bar does not fit either. That is no longer a "maybe if Mark resizes
+down" issue.
+
+1.1 Dual-pane layout and typography
+
+Current implementation (`_build_panes`, ~3867–3960):
+- Shared constants: `PANE_BG = "#1e1e1e"`, `PANE_FG = "#e6e6e6"`,
+  `PANE_FONT = ("Segoe UI", 13)`, inset 14/12, spacing 4/7.
+- Original: `CTkTextbox` + `configure_ctk_textbox_text_metrics()` reaching
+  into `_textbox`.
+- Revised: `tk.Text` with matching padx/pady/spacing, plus an explicit
+  `CTkScrollbar` in a neighbour column.
+- Right header is taller than left (Clean/Inline + Prev / 0 / 0 / Next).
+  Grid row 0 equalises that, so the text baselines still line up.
+
+Still open:
+- Inner cadence matches; outer chrome does not. Original is a borderless
+  CTkTextbox. Revised sits in a default `CTkFrame` (CTk's grey, not `PANE_BG`)
+  with no `border_width` / `corner_radius`. The pair still reads as two
+  different widget families from a foot away.
+- `configure_ctk_textbox_text_metrics()` does not set `insertbackground`
+  (notes_027 snippet B had it; v2.32 omitted it). The caret on Original can
+  therefore pick up a light-theme default against `#1e1e1e`.
+- Revised `tk.Text` never sets `selectbackground` / `selectforeground`. On
+  Windows 11 that often means a bright system-blue selection against the
+  custom dark pane, while Original uses CTk's selection. Same document,
+  two highlight colours.
+- Only Revised has an external scrollbar. Original's is CTk's internal one.
+  Width, gutter and hover do not match.
+
+Do not change: word-level tokenisation (notes_017 §5 / ROADMAP v2.10
+deferred character-level diffs). Header copy is already British English.
+
+1.2 Visual diff highlighting and contrast
+
+Live values against `PANE_BG` `#1e1e1e` (v2.32 verified these rather than
+notes_027's `#1d1e1e` figures):
+
+| Token            | Hex       | Role                          | Approx. contrast |
+|------------------|-----------|-------------------------------|------------------|
+| DIFF_INS_FG      | #7ee0c3   | inserted / replaced words     | ~10.6:1          |
+| DIFF_INS_BG      | #12342d   | insert fill                   | fill, not text   |
+| DIFF_DEL_FG      | #ffb3ba   | deleted words + overstrike    | ~9.85:1          |
+| DIFF_DEL_BG      | #3a1d24   | delete fill                   | fill, not text   |
+| DIFF_ACTIVE_FG   | #d6e4ff   | navigator current range       | ~9.4:1 vs its BG |
+| DIFF_ACTIVE_BG   | #26384a   | navigator fill + underline    |                  |
+
+These already exceed WCAG AA. No further palette shift is proposed.
+
+Still open:
+- Clean view still records a zero-width range for a pure deletion
+  (`render_diff` ~1887–1892; `_go_to_change` ~4685–4698). The navigator
+  scrolls to the anchor and skips `tag_add` when start == end, which is
+  correct, but the label still reads `3 / 12` with no hint that nothing is
+  drawn. notes_027 asked for "deletion only — hidden in Clean view". Not
+  done.
+- Inline replacements are deleted-span then inserted-span with no extra
+  punctuation. Keep that. The `active_change` raise already makes the
+  current replacement findable.
+- Leftover `#e06c75` on `TonePickerDialog` conflict flashes (~2742, ~2755)
+  and `SettingsDialog.save_status` (~3356 in nested copy; live Settings
+  uses the same hex). That is the pre-v2.10 5.23:1 red the palette was
+  retired to replace. Dialog warnings should use `DIFF_DEL_FG`.
+
+1.3 Action bar and toolbar harmony
+
+Toolbar (`_build_toolbar` ~3676–3711) is one grid row:
+
+Mode label + 3-segment (Paraphrase / Correct / Clarify)
++ Strength label + 3-segment (Light / Standard / Substantial)
++ Role label + 170px menu (longest item "Legal & Compliance")
++ Tone label + 150px button
++ Preset label + 145px menu.
+
+Static request width is about 1400–1450px. The default window is 1180px.
+The comment at `_build_actionbar` ~4068–4072 already admits this: Settings
+was moved to row 2 because "the toolbar's own content (Mode..Preset)
+already exceeds the app's default 1180px window". That overflow is still
+there. v2.10 deferred a wrap "at 920px" as marginal; at 1180px it is the
+default first-run layout, not an edge case. Role, Tone and Preset clip on
+the right unless the user widens the window.
+
+Action bar (`_build_actionbar` ~3994–4078) is two pack() rows, membership
+set by Mark in v2.14:
+
+Row 1 left:  Process (100), − Softer (80), + Stronger (90),
+             Accept → (110), Reject (90), Copy revision (120),
+             Copy summary (110), Undo (80)
+Row 1 right: Clear (80), Import… (90), Export… (90)
+Row 2 left:  Paste, Copy, History, Copy rich diff
+Row 2 right: Export diff…, ⚙ Settings
+
+Approximate row-1 request: ~1100px of buttons plus 24px padx ≈ 1124px.
+Fits 1180; overflows 920 by ~180px (buttons collide or clip).
+
+notes_027 item 6 wanted to *move* Copy revision / Copy summary / Undo onto
+row 2 and regroup with a centre Accept cluster. That would undo Mark's
+v2.14 workflow (review actions stay on row 1). Do not do that. Group in
+place: same buttons, same rows, transparent frames for spacing only.
+
+1.4 Interactive states and micro-feedback
+
+`_set_busy` (~4300–4339): Process label becomes "Working…", Process / Accept
+/ Softer / Stronger disable, 4px bar packs above the status, pulse every
+600ms. Reject stays enabled (it is the cancel path). Copy Original / History
+stay enabled. Phase copy is already supplied by `_begin_processing()`
+("processing the selected passage…", "protecting N placeholder(s)…"). No
+second phase-label system.
+
+Still open:
+- Pulse restores `fg_color=["#3a7ebf", BUSY_BLUE]` — a light/dark pair —
+  rather than `BUSY_BLUE` alone. Harmless, but the light value is a leftover
+  CTk default and is never shown in dark mode.
+- Status (`gray65`, size 12) concatenates backend, privacy, counts,
+  readability, revision delta and extra into one line (`_refresh_status`
+  ~4106–4147). At 920px this ellipsises. ROADMAP already deferred a second
+  status line (notes_022 D). Do not add metrics. Do allow the existing line
+  to wrap to two lines when the window is narrow (`wraplength` bound to
+  width), or drop the privacy clause while `busy` is true so Working… is
+  visible.
+
+1.5 Notice banner
+
+Split title/body, `AMBER_*` colours, 32px "✕" dismiss: shipped. Remaining:
+- `wraplength=880` is a constant (~3986). At 920px the banner is ~920 − 24
+  padx − 4 rule − 32 dismiss − 20 inner ≈ 840px. The label will overflow
+  rather than wrap. Bind wraplength to the frame width on `<Configure>`.
+- Dismiss uses `fg_color="gray30"` rather than an amber-tinted chip
+  (`#3a3324` / hover `#4a402c`). Functional; slightly less "belongs to this
+  banner".
+
+1.6 Dialog UX
+
+SettingsDialog (~2935–3113): 520×640, minsize 480×420, vertical resize,
+scrollable body, fixed Save/Cancel, Escape, parent-centred, Return-on-key
+saves, idle focus to key / Ollama combo / Save. Remaining:
+- `grab_set()` runs in `__init__` before the window is mapped. On Windows
+  this is the classic "modal grab on an unrealised toplevel" race.
+  `wait_visibility()` then `grab_set()` is the documented order.
+- API key, house-style entry and Ollama combo use fixed widths (480 / 340 /
+  360). At 150–200% DPI or a 480px minimum they clip. `pack(fill="x")` on
+  the entries, Detect staying a fixed 110px, is enough.
+- notes_027's 560×660 default is still a good idea for checkbox copy; not
+  shipped. Horizontal resize can stay off.
+
+TonePickerDialog (~2672–2809): 440×560, minsize 400×420, vertical resize,
+Apply/Cancel/Clear outside the scroll list, Return/Escape, focus_set on
+the window. Remaining:
+- Checkboxes are not stored, so first-selected-tone focus was declined in
+  v2.32. Storing the widget next to the BooleanVar is a five-line change.
+- Supporting copy `wraplength=380` will clip if the user stretches height
+  only; bind wraplength to dialog width if horizontal stays locked at 440.
+  Fine as-is if width stays fixed.
+
+Other dialogs (Shortcuts 340×360, Diff export 560×210, Preset manager)
+already use `bind_dialog_chrome` and `position_over_parent`. Out of scope
+beyond using `DIFF_DEL_FG` for error labels.
+
+1.7 British English
+
+UI labels already use *summarise* (in prompts), *minimised*, *behaviour*,
+ellipsis "…", "Colour" is not on a label. Keep `dialog` out of user-facing
+strings (code comments mix "dialog" / "dialogue"; that is fine). Do not
+introduce *Organize*, *color*, *canceled*.
+
+
+2. Proposed Visual Improvements
+
+Recommended order, ascending blast radius. Do not bundle with prompt or
+backend work. Item A is independent of Mark's v2.32 look-and-feel sign-off;
+B–D can wait until that hand-test lands.
+
+A. Pane chrome + selection (small, visual only)
+- Original `CTkTextbox`: `border_width=1`, `border_color="#2d3033"`,
+  `corner_radius=6`.
+- Revised frame: `fg_color=PANE_BG`, `border_width=1`,
+  `border_color="#2d3033"`, `corner_radius=6`.
+- Inner Original: `insertbackground=PANE_FG` in
+  `configure_ctk_textbox_text_metrics()`.
+- Revised `tk.Text`: `selectbackground="#264f78"` (VS Code / Win11 dark
+  convention), `selectforeground=PANE_FG`, `inactiveselectbackground="#264f78"`.
+- Keep word-level diffs. Keep current `DIFF_*` hexes.
+
+B. Honest overflow: compact the toolbar so 1180px shows every knob
+Do not hide controls. Do not add a second toolbar row yet (that is still
+the v2.10 wrap, just now justified — treat as C if A+B are not enough).
+
+- Drop the "Mode" and "Strength" labels. The segmented values are the
+  labels.
+- Tighten padx from 20px between groups to 10px.
+- Role menu 170 → 160, Tone 150 → 140, Preset 145 → 140.
+- Estimated saving ~200px, bringing request width under 1180.
+
+C. Toolbar wrap only if B is still short at 1180, or when width < 1100
+Second toolbar row: Role + Tone + Preset. Bind `<Configure>` on the toolbar
+frame, not a timer. Revisit only after B is measured on the real .exe at
+100% and 150% DPI. This is the deferred v2.10 wrap, reopened with evidence
+it overflows the *default* size.
+
+D. Action bar groups in place (notes_027 item 6, membership unchanged)
+Transparent group frames, still two rows, still Mark's v2.14 buttons:
+
+Row 1: [Process | − Softer | + Stronger]  [Accept → | Reject |
+        Copy revision | Copy summary | Undo]  [Clear | Import… | Export…]
+Row 2: [Paste | Copy | History | Copy rich diff]     [Export diff… | Settings]
+
+Gaps: 6px inside a group, 14px between groups. No label shortening unless
+a 920px / 150% DPI hand-test still clips after grouping (then
+"Copy summary" → "Summary", "Copy rich diff" → "Rich diff" only).
+
+E. Micro-copy leftovers (can ride with A)
+- Notice `wraplength` follows banner width.
+- Clean-view navigator: if start == end, label
+  `{n} / {count}  ·  deletion hidden in Clean view`.
+- Replace `#e06c75` in dialog warning labels with `DIFF_DEL_FG`.
+- `_set_busy(False)` restore `fg_color=BUSY_BLUE` (no light/dark pair).
+- Settings: `wait_visibility()` then `grab_set()`; entries `fill="x"`;
+  default geometry `560x660`.
+- Tone picker: keep a `self.tone_checks = {}` map and focus the first
+  selected (or first) checkbox.
+
+Out of scope, still:
+- Character-level diffs.
+- Extra always-on status metrics (notes_022 D).
+- Streaming into the revision pane.
+- Renaming the whole palette to SURFACE_0…3. Values already moved; a
+  second name layer is churn.
+
+
+3. CustomTkinter Code Snippets
+
+Snippet A — caret + selection (helper already at ~2630)
+
+In `configure_ctk_textbox_text_metrics()`, add `insertbackground`:
+
+    inner.configure(
+        padx=PANE_INSET_X, pady=PANE_INSET_Y,
+        spacing1=PANE_SPACING_BEFORE, spacing3=PANE_SPACING_AFTER,
+        insertbackground=PANE_FG,
+    )
+
+On `self.revised_box = tk.Text(...)` add:
+
+    selectbackground="#264f78",
+    selectforeground=PANE_FG,
+    inactiveselectbackground="#264f78",
+
+On `self.original_box = ctk.CTkTextbox(...)` add:
+
+    border_width=1, border_color="#2d3033", corner_radius=6,
+
+On `revised_frame = ctk.CTkFrame(panes)`:
+
+    revised_frame = ctk.CTkFrame(
+        panes, fg_color=PANE_BG, border_width=1,
+        border_color="#2d3033", corner_radius=6)
+
+Snippet B — compact toolbar (replace interior of `_build_toolbar`)
+
+    def _build_toolbar(self):
+        bar = ctk.CTkFrame(self, corner_radius=0)
+        bar.pack(fill="x", side="top")
+
+        self.mode_var = ctk.StringVar(
+            value=self.cfg.get("default_mode", "Paraphrase"))
+        ctk.CTkSegmentedButton(
+            bar, values=MODES, variable=self.mode_var
+        ).grid(row=0, column=0, padx=(14, 6), pady=10)
+
+        self.strength_var = ctk.StringVar(
+            value=self.cfg.get("default_strength", "Substantial"))
+        ctk.CTkSegmentedButton(
+            bar, values=STRENGTHS, variable=self.strength_var
+        ).grid(row=0, column=1, padx=6, pady=10)
+
+        ctk.CTkLabel(bar, text="Role").grid(
+            row=0, column=2, padx=(12, 4))
+        self.role_var = ctk.StringVar(
+            value=self.cfg.get("default_role", "Academic"))
+        ctk.CTkOptionMenu(
+            bar, values=ROLES, variable=self.role_var, width=160
+        ).grid(row=0, column=3, padx=4)
+
+        ctk.CTkLabel(bar, text="Tone").grid(
+            row=0, column=4, padx=(12, 4))
+        self.tone_button = ctk.CTkButton(
+            bar, text="", width=140, fg_color="gray30",
+            command=self._open_tone_picker)
+        self.tone_button.grid(row=0, column=5, padx=4)
+        self._refresh_tone_button()
+
+        ctk.CTkLabel(bar, text="Preset").grid(
+            row=0, column=6, padx=(12, 4))
+        self.preset_var = ctk.StringVar(value="(none)")
+        self.preset_menu = ctk.CTkOptionMenu(
+            bar, values=preset_menu_names(self.cfg),
+            variable=self.preset_var, width=140,
+            command=self._apply_writing_preset,
+        )
+        self.preset_menu.grid(row=0, column=7, padx=(4, 14))
+
+Snippet D — action-bar groups without moving buttons
+
+    def _pack_button_group(self, parent, side, padx=0):
+        group = ctk.CTkFrame(parent, fg_color="transparent")
+        group.pack(side=side, padx=padx)
+        return group
+
+Inside `_build_actionbar`, after `bar = ctk.CTkFrame(...)` / `bar.pack(...)`:
+
+    review = self._pack_button_group(bar, "left")
+    files = self._pack_button_group(bar, "right")
+
+    self.process_btn = ctk.CTkButton(
+        review, text="Process", width=100, command=self.process)
+    self.process_btn.pack(side="left")
+    self.softer_btn = ctk.CTkButton(
+        review, text="− Softer", width=80, fg_color="gray30",
+        command=lambda: self._nudge_strength(-1))
+    self.softer_btn.pack(side="left", padx=(8, 4))
+    self.stronger_btn = ctk.CTkButton(
+        review, text="+ Stronger", width=90, fg_color="gray30",
+        command=lambda: self._nudge_strength(1))
+    self.stronger_btn.pack(side="left", padx=4)
+
+    self.accept_btn = ctk.CTkButton(
+        review, text="Accept →", width=110, fg_color="#2f7d4f",
+        hover_color="#276a43", command=self.accept)
+    self.accept_btn.pack(side="left", padx=(14, 4))
+    ctk.CTkButton(
+        review, text="Reject", width=90, fg_color="gray30",
+        command=self.reject).pack(side="left", padx=4)
+    ctk.CTkButton(
+        review, text="Copy revision", width=120, fg_color="gray30",
+        command=self.copy_revision).pack(side="left", padx=4)
+    ctk.CTkButton(
+        review, text="Copy summary", width=110, fg_color="gray30",
+        command=self.copy_change_summary).pack(side="left", padx=4)
+    ctk.CTkButton(
+        review, text="Undo", width=80, fg_color="gray30",
+        command=self.undo).pack(side="left", padx=4)
+
+    ctk.CTkButton(
+        files, text="Export…", width=90, fg_color="gray30",
+        command=self.export_file).pack(side="right")
+    ctk.CTkButton(
+        files, text="Import…", width=90, fg_color="gray30",
+        command=self.import_file).pack(side="right", padx=4)
+    ctk.CTkButton(
+        files, text="Clear", width=80, fg_color="gray30",
+        command=self.clear_all).pack(side="right", padx=4)
+
+Row 2 the same pattern: `originals` packed left, `meta` packed right.
+Do not move Copy revision off row 1.
+
+Snippet E — Clean-view navigator hint
+
+In `_go_to_change`, after `see(start)`:
+
+    count = len(self._change_ranges)
+    position = self._change_cursor + 1
+    if self.revised_box.compare(start, "==", end):
+        self.change_position_label.configure(
+            text=f"{position} / {count}  ·  deletion hidden in Clean view")
+        self._refresh_status("deletion only at cursor — switch to Inline to see it")
+    else:
+        self.change_position_label.configure(text=f"{position} / {count}")
+
+Snippet F — notice wraplength follows the banner
+
+After building `self.notice_label`, bind:
+
+    def _on_notice_configure(event):
+        # 4px rule + 32px dismiss + inner padx ~ 60
+        usable = max(200, event.width - 60)
+        if int(self.notice_label.cget("wraplength") or 0) != usable:
+            self.notice_label.configure(wraplength=usable)
+
+    self.notice_frame.bind("<Configure>", _on_notice_configure)
+
+Snippet G — Settings grab and fill-x
+
+In `SettingsDialog.__init__`, replace immediate `self.grab_set()` with:
+
+    self.transient(master)
+    bind_dialog_chrome(self, self.destroy)
+    self.after_idle(lambda: position_over_parent(self, master, 560, 660))
+
+    def _arm_modal():
+        if not self.winfo_exists():
+            return
+        try:
+            self.wait_visibility()
+            self.grab_set()
+        except tk.TclError:
+            pass
+    self.after_idle(_arm_modal)
+
+Default geometry: `560x660`. Key entry:
+
+    self.key_entry = ctk.CTkEntry(body, show="*")
+    self.key_entry.pack(fill="x", padx=16, pady=(2, 0))
+
+Ollama combo: drop `width=360`, `pack(side="left", fill="x", expand=True)`
+on the combo, Detect stays `width=110`.
+
+
+4. Insertion Matrix
+
+All paths are `scriptorium.py` (v2.32, this tree). Line numbers from this
+audit's copy; they will shift by a few lines if v2.32 is still uncommitted
+relative to another machine.
+
+| Snippet | Target | Class / function | Nearby landmark |
+|---------|--------|------------------|-----------------|
+| A caret | ~2642 | `configure_ctk_textbox_text_metrics` | existing `inner.configure(...)` |
+| A select | ~3930 | `Scriptorium._build_panes` | `self.revised_box = tk.Text(` |
+| A border Original | ~3908 | `Scriptorium._build_panes` | `self.original_box = ctk.CTkTextbox(` |
+| A border Revised | ~3925 | `Scriptorium._build_panes` | `revised_frame = ctk.CTkFrame(panes)` |
+| B toolbar | ~3676 | `Scriptorium._build_toolbar` | whole method body |
+| D groups helper | near ~3994 | `Scriptorium._pack_button_group` | new, just above `_build_actionbar` |
+| D row 1/2 | ~4018–4078 | `Scriptorium._build_actionbar` | the two `bar` / `bar2` pack blocks |
+| E navigator | ~4695 | `Scriptorium._go_to_change` | after `see(start)` |
+| F wraplength | ~3984 | `Scriptorium._build_panes` | `self.notice_label = ctk.CTkLabel` |
+| G grab / fill | ~2941–3013 | `SettingsDialog.__init__` | `grab_set`, `key_entry`, `ollama_combo` |
+| E colour leftover | ~2742, ~2755 | `TonePickerDialog._toggle_tone` | `text_color="#e06c75"` → `DIFF_DEL_FG` |
+| pulse restore | ~4326 | `Scriptorium._set_busy` | `fg_color=["#3a7ebf", BUSY_BLUE]` → `BUSY_BLUE` |
+
+References that must stay intact (do not rename or drop):
+`self.process_btn`, `self.softer_btn`, `self.stronger_btn`,
+`self.accept_btn`, `self.progress`, `self.original_box`,
+`self.revised_box`, `self.notice_frame`, `self.notice_title_label`,
+`self.notice_label`, `self.tone_button`, `self.preset_menu`.
+
+
+5. Suggested next version slice
+
+If Mark is happy with the v2.32 look:
+
+- v2.33: snippets A + E-colour + F + G + pulse restore. Visual only.
+  Same regression suite. Needs Mark's 100%/150% DPI look, not a script.
+- v2.34: snippet B (compact toolbar) measured at 1180px. Wrap (C) only if
+  B still clips.
+- v2.35: snippet D (action-bar groups, membership unchanged). Hand-test at
+  920px before calling it done.
+
+Do not combine D with B in one pass — that is how v2.8 lost the action bar
+behind the panes.
+
+This environment cannot open the Windows GUI. Contrast figures for the
+already-shipped `DIFF_*` values are taken from ROADMAP v2.32's own
+verification. Overflow widths are static sums of the live `width=` and
+`padx=` literals, not a rendered screenshot.

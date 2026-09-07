@@ -3081,6 +3081,143 @@ RAM upgrade — not a blocker for this release.
 
 ---
 
+## v2.32 — Visual-polish bundle (notes_027, all six items) ✅ shipped 2026-09-07
+
+**Goal:** notes_027 (Codex, read-only UI/UX audit of live v2.31 source) —
+a low-risk visual/typography tightening pass, not a redesign: one named
+palette, equal pane typography, calmer diff/notice colours, calmer busy
+motion, two dialogs made a little more keyboard-friendly, and the action
+bar regrouped into explicit clusters. The note's own recommended order put
+six items in ascending risk; items 1–5 landed first, then item 6 (the
+note's own "largest layout blast radius" item) once 1–5 were verified —
+both landed in the same session before either was hand-tested, so they
+ship together in one `.exe` for one review pass rather than fragmenting
+Mark's hand-test into two rounds.
+
+1. **Shared pane metrics.** New `PANE_INSET_X`/`PANE_INSET_Y`/
+   `PANE_SPACING_BEFORE`/`PANE_SPACING_AFTER` constants (14/12/4/7) and a
+   new guarded helper, `configure_ctk_textbox_text_metrics()`, that reaches
+   into `CTkTextbox`'s private inner `tk.Text` (`_textbox`) to apply them —
+   called on the Original pane right after it's gridded. The Revised
+   pane's own `tk.Text` construction now uses the same named constants
+   instead of separate hardcoded `12`/`4`/`6` literals, so both panes
+   share one cadence instead of each defaulting independently (notes_017's
+   original complaint, still only half-closed until now).
+2. **Diff/active-change tag polish.** `DIFF_INS_FG/BG`, `DIFF_DEL_FG/BG`
+   softened to lower-chroma, higher-contrast values (verified by
+   computing WCAG contrast directly rather than trusting the note's own
+   numbers, since `PANE_BG` here is `#1e1e1e`, not the note's proposed
+   `#1d1e1e`: new `DIFF_INS_FG` ~10.6:1, `DIFF_DEL_FG` ~9.85:1, both
+   comfortably above the previous values). New `DIFF_ACTIVE_FG`/
+   `DIFF_ACTIVE_BG` (~9.4:1 against each other) added to the
+   `active_change` tag's own `tag_config()` — previously underline-only,
+   now a real highlight — confirmed safe because `_go_to_change()` already
+   calls `tag_raise("active_change")` every time it applies the tag, so it
+   already wins tag-priority over `changed`/`deleted` on an overlapping
+   range; no new raise call was needed.
+3. **Notice banner split title/body.** `self.notice_title_label` (bold,
+   new `AMBER_TITLE`) and `self.notice_label` (body, `AMBER_FG`) replace
+   the old single combined-string label; `AMBER_BG`/`AMBER_RULE` darkened
+   for a calmer surface (~10.9:1 and ~12.9:1 respectively). Dismiss is now
+   a compact 32px "✕" button instead of a full-width "Dismiss" label.
+   `_show_ambiguities()` updated to set both labels instead of
+   interpolating one combined string.
+4. **Calmer busy pulse.** `_set_busy()`/`_pulse_process()`'s
+   `self.after(400, ...)` → `self.after(600, ...)` (both occurrences) —
+   the note's suggested 500–650ms range for a less frantic Windows 11
+   feel. The note's separate "phase label" idea (preparing/waiting/
+   retrying) wasn't added: v2.31's own `_begin_processing()` busy-note
+   messages ("processing the selected passage…", "protecting N
+   placeholder(s), contacting the model…") already cover that ground.
+5. **Dialog focus/keyboard polish.**
+   `SettingsDialog._focus_initial_control()` (new) focuses the API key
+   entry, the Ollama combo, or Save, depending on which backend is
+   already selected — called via `after_idle` right after `_refresh_state()`
+   at the end of `__init__`. Return now saves from the API key entry.
+   `TonePickerDialog` gained a matching (deliberately conservative —
+   `self.variables` maps tone name to `BooleanVar`, not to the checkbox
+   widget itself, so there's no direct reference to a specific checkbox to
+   focus without a wider refactor) `_focus_initial_control()`, a Return
+   binding to Apply, and — since its geometry needed touching anyway —
+   `440x560` (was `420x540`) with `minsize(400, 420)` and
+   `resizable(False, True)` (was fixed both axes), matching the note's
+   own snippet.
+6. **Action-bar regroup.** Both action-bar rows rebuilt around a new
+   `_pack_button_group()` helper (a transparent grid cell per cluster,
+   left/centre/right) instead of one long packed row each:
+   - Row 1: left = Process/Softer/Stronger, centre = Accept/Reject,
+     right = Clear/Import/Export (unchanged grouping and pack order from
+     before, just now grid-columned rather than flowing through a single
+     packed frame).
+   - Row 2: left = Paste/Copy/History/**Undo**, centre = Copy revision/
+     Copy summary/Copy rich diff/Export diff, right = Settings alone.
+   Widths nudged to the note's own suggested values (Process 112, Accept
+   104, nudge buttons 82 each, Reject 86, Settings 104) where it gave one,
+   left as-is elsewhere. **One gap in the note's own proposed grouping**:
+   its Snippet E regrouping omitted Undo entirely — placed it in row 2's
+   left group (original-text/session actions) rather than row 1, since
+   that's a better conceptual fit and keeps row 1 purely the process/
+   review/file workflow the note itself describes wanting.
+
+### Acceptance checklist
+- [x] `ast.parse()` clean; full regression pass (66/66,
+      `test_calibration_e1_deterministic.py`).
+- [x] A scripted hand-test against a real `Scriptorium()` instance
+      confirmed: Original/Revised pane inner metrics now match; the
+      `changed`/`deleted`/`active_change` tags carry the new colours;
+      `_show_ambiguities()` correctly populates and clears both the title
+      and body labels; the busy-pulse interval is genuinely 600ms in both
+      places it's scheduled (grepped the live source, not just the
+      constant); `SettingsDialog`'s key-entry Return binding and
+      `TonePickerDialog`'s new geometry/Return binding are both present
+      on the real inner widgets. One test-script-only gotcha hit and
+      fixed along the way: `CTkEntry.bind(sequence)` in query form (no
+      `command` arg) always returns `None` in this installed
+      customtkinter version — it forwards the *set* form to the private
+      inner `tkinter.Entry` (`_entry`) but has no `return` statement for
+      the query form — so verifying a binding exists means querying
+      `widget._entry.bind(sequence)` directly, the same pattern already
+      known for `CTkTextbox._textbox` (notes_026/031 session). Not an
+      application bug.
+- [x] **Item 6 verified at both documented widths, not just the default.**
+      A scripted hand-test built a real `Scriptorium()`, resized it to
+      1180x760 and to the documented 920x600 minimum, and checked actual
+      on-screen widget geometry (bounding boxes) for overlaps and for any
+      button extending past the visible window edge — neither occurred at
+      either width, and group left-to-right ordering matched the intended
+      clusters exactly. One test-harness gotcha caught and fixed along
+      the way, not a real regression: resizing an *already-built* window
+      down with `.geometry()` needs a full `app.update()` before
+      `winfo_width()`/`winfo_rootx()` reflect the new layout, not just
+      `update_idletasks()` — the first pass at this test flagged a false
+      "Export… overflows the window" failure that a diagnostic against
+      the last-committed (pre-regroup) code, and a fresh instance built
+      directly at 920x600, both showed did not reproduce; a full `update()`
+      after the resize made the retest agree with those baselines. Also
+      confirmed `self.process_btn`/`softer_btn`/`stronger_btn`/`accept_btn`
+      — the four attributes `_set_busy()` depends on — are still real,
+      correctly-typed widgets after the restructure.
+- [x] **Mark's own visual look, since this is inherently subjective
+      polish a script can't judge**: pane typography now matches
+      left/right, diff colours read as calmer, the notice banner reads as
+      a heading plus detail with a compact dismiss, the busy pulse feels
+      less frantic, Settings/Tone-picker focus lands somewhere useful on
+      open, and the action bar's new grouping reads clearly at both a
+      normal window size and the 920px minimum. Confirmed: "genuinely
+      looks good... running perfectly."
+- [x] Rebuilt `.exe` confirmed `FileVersion`/`ProductVersion` `2.32.0.0`
+      via `Get-Item ... .VersionInfo`, smoke-launched (stayed alive,
+      closed cleanly, real packaged
+      `%LOCALAPPDATA%\Scriptorium\scriptorium_config.json` mtime
+      unchanged). Source files reconfirmed byte-identical (SHA-256)
+      between what was tested and what PyInstaller built from, both after
+      items 1–5 and again after item 6.
+
+Mark hand-tested the real `.exe` (all six notes_027 items) and confirmed
+it. `APP_VERSION`/`version_info.txt` stay at `2.32`.
+
+---
+
 ## Deferred from notes_022/023/024 planning (2026-09-07)
 
 - **notes_022 A — multi-file/folder drop → batch handoff.** Revisit only

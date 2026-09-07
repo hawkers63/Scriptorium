@@ -88,7 +88,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.31"
+APP_VERSION = "2.32"
 
 # A small shared palette (notes_017, v2.10) so the two text panes, the diff
 # tags and the notice banner read as one surface instead of drifting
@@ -97,15 +97,25 @@ APP_VERSION = "2.31"
 PANE_BG = "#1e1e1e"
 PANE_FG = "#e6e6e6"
 PANE_FONT = ("Segoe UI", 13)
-DIFF_INS_FG = "#5ee0c8"    # ~9.4:1 against PANE_BG
-DIFF_INS_BG = "#16352f"    # a fill, not just foreground ink -- easier to scan
-DIFF_DEL_FG = "#ffa0a8"    # ~7:1, a safer margin than the old #e06c75 (5.23:1)
-DIFF_DEL_BG = "#3a1f24"
-AMBER_BG = "#43361f"
-AMBER_FG = "#f5d589"
-AMBER_RULE = "#c9a227"
+# Shared inner-text metrics (notes_027 §2) so the CTkTextbox Original pane
+# and the tk.Text Revised pane read as one cadence instead of each widget
+# defaulting to its own padding/paragraph spacing.
+PANE_INSET_X = 14
+PANE_INSET_Y = 12
+PANE_SPACING_BEFORE = 4
+PANE_SPACING_AFTER = 7
+DIFF_INS_FG = "#7ee0c3"    # ~10.6:1 against PANE_BG
+DIFF_INS_BG = "#12342d"    # a fill, not just foreground ink -- easier to scan
+DIFF_DEL_FG = "#ffb3ba"    # ~9.9:1, a safer margin than the old #e06c75 (5.23:1)
+DIFF_DEL_BG = "#3a1d24"
+DIFF_ACTIVE_FG = "#d6e4ff"  # the change navigator's current-range highlight
+DIFF_ACTIVE_BG = "#26384a"  # ~9.4:1 against DIFF_ACTIVE_FG
+AMBER_BG = "#27200f"
+AMBER_FG = "#f4d06f"       # ~10.9:1 against AMBER_BG
+AMBER_TITLE = "#ffe3a3"    # ~12.9:1 against AMBER_BG
+AMBER_RULE = "#d6a529"
 BUSY_BLUE = "#1f6aa5"       # matches CTk's default blue accent
-BUSY_BLUE_DARK = "#144870"  # alternate shade for the busy-pulse animation
+BUSY_BLUE_DARK = "#15517d"  # alternate shade for the busy-pulse animation
 
 def _config_dir():
     """Return the folder that holds scriptorium_config.json.
@@ -2617,6 +2627,23 @@ def bind_dialog_chrome(window, on_close):
     window.protocol("WM_DELETE_WINDOW", on_close)
 
 
+def configure_ctk_textbox_text_metrics(textbox):
+    """Best-effort alignment of a CTkTextbox's inner text metrics with the
+    Revised pane's tk.Text (notes_027 §2): CTkTextbox wraps a private inner
+    tk.Text (_textbox) whose own padding/paragraph spacing otherwise drifts
+    from Revised's, so the two panes' text can start at a different x/y
+    offset and read with a different rhythm. Guarded because _textbox is a
+    CustomTkinter internal that could change or disappear.
+    """
+    try:
+        inner = textbox._textbox
+    except AttributeError:
+        return
+    inner.configure(
+        padx=PANE_INSET_X, pady=PANE_INSET_Y,
+        spacing1=PANE_SPACING_BEFORE, spacing3=PANE_SPACING_AFTER)
+
+
 def position_over_parent(window, master, width, height):
     """Place a modal centred on its parent's current monitor.
 
@@ -2652,12 +2679,15 @@ class TonePickerDialog(ctk.CTkToplevel):
         self.variables = {}
 
         self.title("Choose tones")
-        self.geometry("420x540")
-        self.resizable(False, False)
+        self.geometry("440x560")
+        self.minsize(400, 420)
+        self.resizable(False, True)
         self.transient(master)
         self.grab_set()
         bind_dialog_chrome(self, self.destroy)
-        self.after_idle(lambda: position_over_parent(self, master, 420, 540))
+        self.bind("<Return>", lambda _e: self._apply())
+        self.after_idle(lambda: position_over_parent(self, master, 440, 560))
+        self.after_idle(self._focus_initial_control)
 
         ctk.CTkLabel(
             self, text=f"Choose up to {TONE_PICKER_LIMIT} tones",
@@ -2744,6 +2774,23 @@ class TonePickerDialog(ctk.CTkToplevel):
         self.status_label.configure(
             text=f"{count} of {TONE_PICKER_LIMIT} selected: {description}",
             text_color="gray65")
+
+    def _focus_initial_control(self):
+        """Place keyboard focus somewhere useful on open (notes_027 §2).
+
+        Intentionally conservative: self.variables maps tone name -> its
+        BooleanVar, not the checkbox widget itself, so there is no direct
+        reference to focus the first *selected* checkbox without a wider
+        refactor of the checkbox-creation loop. Focusing the dialog itself
+        is enough to make Return-to-Apply and Escape-to-Cancel work
+        immediately without a mouse click first.
+        """
+        if not self.winfo_exists():
+            return
+        try:
+            self.focus_set()
+        except tk.TclError:
+            pass
 
     def _clear(self):
         self.selected_order.clear()
@@ -2940,6 +2987,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self.key_entry = ctk.CTkEntry(body, show="*", width=480)
         self.key_entry.insert(0, cfg.get("anthropic_api_key", ""))
         self.key_entry.pack(padx=16, pady=(2, 0))
+        self.key_entry.bind("<Return>", lambda _e: self._save())
         ctk.CTkLabel(body, text="Stored in plain text in the config file. "
                      "Leave blank to use the ANTHROPIC_API_KEY env variable.",
                      text_color="gray60",
@@ -3044,6 +3092,25 @@ class SettingsDialog(ctk.CTkToplevel):
         ).pack(anchor="w", padx=16, pady=(10, 18))
 
         self._refresh_state()
+        self.after_idle(self._focus_initial_control)
+
+    def _focus_initial_control(self):
+        """Place keyboard focus on the first useful Settings control
+        (notes_027 §2) -- the backend selector if none is chosen yet,
+        otherwise the field for whichever backend is already active.
+        """
+        if not self.winfo_exists():
+            return
+        backend = BACKEND_IDS.get(self.backend_var.get())
+        try:
+            if backend == "anthropic":
+                self.key_entry.focus_set()
+            elif backend == "ollama":
+                self.ollama_combo.focus_set()
+            else:
+                self.save_btn.focus_set()
+        except tk.TclError:
+            pass
 
     def _detect_models(self):
         """Ask Ollama which models are installed, without freezing Settings.
@@ -3842,6 +3909,7 @@ class Scriptorium(ctk.CTk):
             panes, wrap="word", fg_color=PANE_BG, text_color=PANE_FG,
             font=ctk.CTkFont(family=PANE_FONT[0], size=PANE_FONT[1]))
         self.original_box.grid(row=1, column=0, sticky="nsew", padx=(0, 6), pady=4)
+        configure_ctk_textbox_text_metrics(self.original_box)
         # <<Modified>> covers every kind of change (typing, cut, paste,
         # undo) so the live word/character count in _refresh_status()
         # never falls out of sync with what is actually on screen.
@@ -3860,10 +3928,12 @@ class Scriptorium(ctk.CTk):
         revised_frame.grid_columnconfigure(0, weight=1)
 
         self.revised_box = tk.Text(
-            revised_frame, wrap="word", bd=0, padx=12, pady=12,
+            revised_frame, wrap="word", bd=0,
+            padx=PANE_INSET_X, pady=PANE_INSET_Y,
             font=PANE_FONT, background=PANE_BG, foreground=PANE_FG,
             insertbackground=PANE_FG, relief="flat", state="disabled",
-            highlightthickness=0, spacing1=4, spacing3=6)
+            highlightthickness=0, spacing1=PANE_SPACING_BEFORE,
+            spacing3=PANE_SPACING_AFTER)
         self.revised_box.grid(row=0, column=0, sticky="nsew")
         scroll = ctk.CTkScrollbar(revised_frame, command=self.revised_box.yview)
         scroll.grid(row=0, column=1, sticky="ns")
@@ -3877,9 +3947,13 @@ class Scriptorium(ctk.CTk):
         self.revised_box.tag_config(
             "deleted", foreground=DIFF_DEL_FG, background=DIFF_DEL_BG,
             overstrike=1)
-        # Supplements, never replaces, the insert/delete colours above --
-        # marks whichever change the navigator has just scrolled to.
-        self.revised_box.tag_config("active_change", underline=True)
+        # Marks whichever change the navigator has just scrolled to --
+        # tag_raise()'d above "changed"/"deleted" in _go_to_change() so its
+        # own colours win over theirs for an overlapping range, rather than
+        # only adding an underline on top of the existing insert/delete ink.
+        self.revised_box.tag_config(
+            "active_change", foreground=DIFF_ACTIVE_FG,
+            background=DIFF_ACTIVE_BG, underline=True)
         self.revised_box.bind(
             "<Button-3>",
             lambda event: self._show_text_context_menu(event, self.revised_box,
@@ -3898,23 +3972,46 @@ class Scriptorium(ctk.CTk):
         rule = ctk.CTkFrame(self.notice_frame, width=4, fg_color=AMBER_RULE,
                             corner_radius=0)
         rule.pack(side="left", fill="y")
+        # Title and body as two labels, not one combined string (notes_027
+        # §2), so the banner reads as a heading plus detail rather than one
+        # dense block at uniform weight.
+        notice_text = ctk.CTkFrame(self.notice_frame, fg_color="transparent")
+        notice_text.pack(side="left", fill="x", expand=True, padx=10, pady=8)
+        self.notice_title_label = ctk.CTkLabel(
+            notice_text, text="", justify="left", anchor="w",
+            text_color=AMBER_TITLE, font=ctk.CTkFont(size=12, weight="bold"))
+        self.notice_title_label.pack(fill="x", anchor="w")
         self.notice_label = ctk.CTkLabel(
-            self.notice_frame, text="", justify="left", anchor="w",
-            text_color=AMBER_FG, font=ctk.CTkFont(size=12), wraplength=900)
-        self.notice_label.pack(side="left", fill="x", expand=True,
-                               padx=10, pady=8)
+            notice_text, text="", justify="left", anchor="w",
+            text_color=AMBER_FG, font=ctk.CTkFont(size=12), wraplength=880)
+        self.notice_label.pack(fill="x", anchor="w", pady=(2, 0))
         ctk.CTkButton(
-            self.notice_frame, text="Dismiss", width=80, fg_color="gray30",
+            self.notice_frame, text="✕", width=32, fg_color="gray30",
             command=self.notice_frame.pack_forget
-        ).pack(side="right", padx=8, pady=8)
+        ).pack(side="right", padx=(0, 8), pady=8)
         # packed on demand in _show_ambiguities()
+
+    def _pack_button_group(self, row, column, sticky, padx=0):
+        """A transparent grid cell holding one left-to-right button cluster
+        (notes_027 §2/3.5, item 6). Grouping is expressed through the gap
+        between clusters, not an extra visible box, so the bar stays quiet
+        rather than gaining new chrome. Buttons are packed left-to-right
+        *inside* the returned frame by the caller.
+        """
+        group = ctk.CTkFrame(row, fg_color="transparent")
+        group.grid(row=0, column=column, sticky=sticky, padx=padx)
+        return group
 
     def _build_actionbar(self):
         # Two rows: thirteen buttons on one row overran the 1180px window and
         # overlapped in the middle (the "Copy" button rendering as a sliver
         # next to Undo was that overlap, not a rendering bug in Copy itself).
         # Row 1 is the review/process workflow; row 2 is original-text and
-        # file operations.
+        # file operations. Each row is a 3-column grid (left/centre/right
+        # groups, notes_027 §2 item 6) rather than one long packed row, so
+        # priority reads by position -- generate/nudge, then accept/reject,
+        # then file ops on row 1; original-text ops, then clipboard/export
+        # utilities, then Settings alone on row 2.
         #
         # Both rows (and the status bar, built into this same frame by
         # _build_statusbar()) live in one wrapper packed to the *bottom* of
@@ -3935,65 +4032,84 @@ class Scriptorium(ctk.CTk):
 
         bar = ctk.CTkFrame(self._bottom_frame, fg_color="transparent")
         bar.pack(fill="x", padx=12, pady=(8, 4))
+        bar.grid_columnconfigure(1, weight=1)  # gives the gap, not the groups, the slack
 
-        self.process_btn = ctk.CTkButton(bar, text="Process", width=100,
+        bar_left = self._pack_button_group(bar, 0, "w")
+        bar_centre = self._pack_button_group(bar, 1, "w", padx=(14, 0))
+        bar_right = self._pack_button_group(bar, 2, "e")
+
+        self.process_btn = ctk.CTkButton(bar_left, text="Process", width=112,
                                          command=self.process)
         self.process_btn.pack(side="left")
-
         self.softer_btn = ctk.CTkButton(
-            bar, text="− Softer", width=80, fg_color="gray30",
+            bar_left, text="− Softer", width=82, fg_color="gray30",
             command=lambda: self._nudge_strength(-1))
-        self.softer_btn.pack(side="left", padx=(8, 4))
+        self.softer_btn.pack(side="left", padx=(8, 6))
         self.stronger_btn = ctk.CTkButton(
-            bar, text="+ Stronger", width=90, fg_color="gray30",
+            bar_left, text="+ Stronger", width=82, fg_color="gray30",
             command=lambda: self._nudge_strength(1))
-        self.stronger_btn.pack(side="left", padx=4)
+        self.stronger_btn.pack(side="left")
 
         self.accept_btn = ctk.CTkButton(
-            bar, text="Accept →", width=110, fg_color="#2f7d4f",
+            bar_centre, text="Accept →", width=104, fg_color="#2f7d4f",
             hover_color="#276a43", command=self.accept)
-        self.accept_btn.pack(side="left", padx=(12, 4))
-        ctk.CTkButton(bar, text="Reject", width=90, fg_color="gray30",
-                      command=self.reject).pack(side="left", padx=4)
-        ctk.CTkButton(bar, text="Copy revision", width=120, fg_color="gray30",
-                      command=self.copy_revision).pack(side="left", padx=4)
-        ctk.CTkButton(bar, text="Copy summary", width=110, fg_color="gray30",
-                      command=self.copy_change_summary).pack(side="left", padx=4)
-        ctk.CTkButton(bar, text="Undo", width=80, fg_color="gray30",
-                      command=self.undo).pack(side="left", padx=4)
+        self.accept_btn.pack(side="left")
+        ctk.CTkButton(bar_centre, text="Reject", width=86, fg_color="gray30",
+                      command=self.reject).pack(side="left", padx=(6, 0))
 
         # Clear/Import/Export on row 1 (right-aligned), per Mark's request --
-        # row 2 is Original-pane copy/paste only.
-        ctk.CTkButton(bar, text="Export…", width=90, fg_color="gray30",
+        # row 2 is Original-pane copy/paste only. Packed right-to-left, so
+        # Clear ends up leftmost of the three, Export rightmost.
+        ctk.CTkButton(bar_right, text="Export…", width=90, fg_color="gray30",
                       command=self.export_file).pack(side="right")
-        ctk.CTkButton(bar, text="Import…", width=90, fg_color="gray30",
-                      command=self.import_file).pack(side="right", padx=4)
-        ctk.CTkButton(bar, text="Clear", width=80, fg_color="gray30",
-                      command=self.clear_all).pack(side="right", padx=4)
+        ctk.CTkButton(bar_right, text="Import…", width=90, fg_color="gray30",
+                      command=self.import_file).pack(side="right", padx=(0, 6))
+        ctk.CTkButton(bar_right, text="Clear", width=80, fg_color="gray30",
+                      command=self.clear_all).pack(side="right", padx=(0, 6))
 
         bar2 = ctk.CTkFrame(self._bottom_frame, fg_color="transparent")
         bar2.pack(fill="x", padx=12, pady=(0, 8))
+        bar2.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkButton(bar2, text="Paste", width=80, fg_color="gray30",
+        bar2_left = self._pack_button_group(bar2, 0, "w")
+        bar2_centre = self._pack_button_group(bar2, 1, "w", padx=(14, 0))
+        bar2_right = self._pack_button_group(bar2, 2, "e")
+
+        ctk.CTkButton(bar2_left, text="Paste", width=80, fg_color="gray30",
                       command=self.paste_original).pack(side="left")
-        ctk.CTkButton(bar2, text="Copy", width=80, fg_color="gray30",
-                      command=self.copy_original).pack(side="left", padx=4)
-        ctk.CTkButton(bar2, text="History", width=80, fg_color="gray30",
-                      command=self._open_history).pack(side="left", padx=4)
-        ctk.CTkButton(bar2, text="Copy rich diff", width=115, fg_color="gray30",
-                      command=self.copy_rich_diff).pack(side="left", padx=4)
+        ctk.CTkButton(bar2_left, text="Copy", width=80, fg_color="gray30",
+                      command=self.copy_original).pack(side="left", padx=(6, 0))
+        ctk.CTkButton(bar2_left, text="History", width=80, fg_color="gray30",
+                      command=self._open_history).pack(side="left", padx=(6, 0))
+        # Undo lives here, not in notes_027's own proposed grouping (which
+        # omitted it entirely) -- grouped with the other original-text/
+        # session actions rather than left on the review-workflow row.
+        ctk.CTkButton(bar2_left, text="Undo", width=80, fg_color="gray30",
+                      command=self.undo).pack(side="left", padx=(6, 0))
+
+        ctk.CTkButton(bar2_centre, text="Copy revision", width=120,
+                      fg_color="gray30", command=self.copy_revision
+                      ).pack(side="left")
+        ctk.CTkButton(bar2_centre, text="Copy summary", width=110,
+                      fg_color="gray30", command=self.copy_change_summary
+                      ).pack(side="left", padx=(6, 0))
+        ctk.CTkButton(bar2_centre, text="Copy rich diff", width=115,
+                      fg_color="gray30", command=self.copy_rich_diff
+                      ).pack(side="left", padx=(6, 0))
+        ctk.CTkButton(bar2_centre, text="Export diff…", width=105,
+                      fg_color="gray30", command=self.export_diff_file
+                      ).pack(side="left", padx=(6, 0))
 
         # Was a far-right toolbar button pushed there by a weighted grid
         # spacer column -- fine in principle, but the toolbar's own content
         # (Mode..Preset) already exceeds the app's default 1180px window
         # width, so the spacer collapsed to zero and Settings landed past
         # the visible edge, only reachable by manually widening the window.
-        # Moved here (row 2, right-aligned under Export) per Mark's own
+        # Moved here (row 2, right group, alone) per Mark's own
         # hand-testing report, where it always has real room.
-        ctk.CTkButton(bar2, text="⚙ Settings", width=100, fg_color="gray30",
-                      command=self.open_settings).pack(side="right")
-        ctk.CTkButton(bar2, text="Export diff…", width=105, fg_color="gray30",
-                      command=self.export_diff_file).pack(side="right", padx=4)
+        ctk.CTkButton(bar2_right, text="⚙ Settings", width=104,
+                      fg_color="gray30", command=self.open_settings
+                      ).pack(side="right")
 
         # Working… motion (notes_017 §1.5/2.6): a static "Working…" label was
         # the only feedback during a long Ollama call, which reads as frozen.
@@ -4203,9 +4319,10 @@ class Scriptorium(ctk.CTk):
     def _show_ambiguities(self, items):
         """Show model ambiguities and deterministic review notices, or hide it."""
         if items:
-            title = "Review notices (not silently changed)"
-            body = "\n".join(f"• {a}" for a in items)
-            self.notice_label.configure(text=f"{title}\n{body}")
+            self.notice_title_label.configure(
+                text="Review notices (not silently changed)")
+            self.notice_label.configure(
+                text="\n".join(f"• {a}" for a in items))
             if not self.notice_frame.winfo_ismapped():
                 self.notice_frame.pack(fill="x", padx=12, pady=(0, 4),
                                        before=self.status)
@@ -4235,7 +4352,7 @@ class Scriptorium(ctk.CTk):
             self.progress.pack(fill="x", padx=12, pady=(0, 4),
                                before=self.status)
             self.progress.start()
-            self._pulse_job = self.after(400, self._pulse_process)
+            self._pulse_job = self.after(600, self._pulse_process)
         else:
             if self._pulse_job is not None:
                 self.after_cancel(self._pulse_job)
@@ -4253,7 +4370,7 @@ class Scriptorium(ctk.CTk):
         dark = current[1] if isinstance(current, (list, tuple)) else current
         next_colour = BUSY_BLUE_DARK if dark != BUSY_BLUE_DARK else BUSY_BLUE
         self.process_btn.configure(fg_color=next_colour)
-        self._pulse_job = self.after(400, self._pulse_process)
+        self._pulse_job = self.after(600, self._pulse_process)
 
     def _nudge_strength(self, delta):
         """Move Strength one notch (Softer/Stronger) and immediately re-run.

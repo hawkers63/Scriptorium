@@ -6,6 +6,90 @@ Mark saying "lets get started").
 
 ---
 
+## 2026-09-07 (later night) — v2.32 shipped: notes_027's full visual-polish bundle (all six items), a DeepSeek retry-transport note assessed with no code change
+
+New session, cued by "lets get started" plus two notes for review:
+notes_027 (already partly actioned in the prior session -- items 1-5 sat
+implemented but uncommitted) and a note read from `notes_028.txt` at the
+time (DeepSeek's read-only retry-transport analysis). Rather than assume
+what was "next," asked which backlog item to pick up; Mark selected all
+three real options on offer: ship v2.32, notes_027's remaining item 6
+(action-bar regroup), and a decision on that note's one optional idea.
+
+**A filename collision surfaced while preparing this commit**: a
+*different* document -- Grok's UI/UX audit of live v2.32, staged in git
+as `notes_028.txt` -- had been overwritten in the working tree by the
+DeepSeek report above, both under the same filename. Mark's call: Grok's
+audit is the real `notes_028.txt` (restored from the git index); the
+DeepSeek report was saved on as `notes_029.txt` instead. See
+[[git_workflow_scriptorium]] for the general lesson; a note number is not
+a reliable identity check on its own if more than one drafting path can
+write to `notes/00_Drafts/` -- confirm the *content*, not just the
+filename, before treating "notes_0NN" as settled.
+
+**DeepSeek's retry-transport report (`notes_029.txt`) — no code change.**
+Cross-checked its specific claims (`_invalidate_inflight()`,
+`MAX_REQUEST_ATTEMPTS = 3`, `MAX_RETRY_DELAY = 10.0`) against the live
+source; all accurate. The note's own conclusion is that no modification
+is necessary for sudden-network-loss handling; its only idea (retry once
+on a truncated/empty 200 that fails JSON parsing) is explicitly flagged
+as needing a product decision, since retrying risks a duplicate paid API
+call. Mark then said directly: "execute the 028 notes as you see fit...
+if no modifications are necessary, refrain... don't make changes that
+will make things worse." Left the retry transport untouched.
+
+**Grok's UI/UX audit (`notes_028.txt`) — read, not yet actioned.** A
+detailed follow-up review of the *same* v2.32 work, written against the
+state before the action-bar regroup (item 6). Flags several further
+items (pane border/selection-colour mismatch between Original/Revised,
+`insertbackground` missing from `configure_ctk_textbox_text_metrics()`,
+the toolbar itself already overflowing the *default* 1180px width -- a
+more serious claim than the existing 920px-minimum deferral --
+`SettingsDialog`'s `grab_set()` race before the window is mapped, notice
+`wraplength` not following the banner's actual width, a leftover
+pre-v2.10 red `#e06c75` on two dialog warning labels) and proposes its
+own version slice (v2.33 small polish, v2.34 toolbar compaction, v2.35
+action-bar grouping). **Directly disagrees with one already-shipped
+decision**: it argues Copy revision/Copy summary/Undo should stay on row
+1 (preserving what it describes as a deliberate v2.14 workflow decision),
+whereas the action-bar regroup just shipped moved them to row 2. Put to
+Mark directly since he'd just hand-approved the running `.exe`: he chose
+to keep the shipped layout as-is on this specific point. The rest of
+Grok's note is unactioned, not yet decided.
+
+**notes_027 item 6 (action-bar regroup) implemented and folded into
+v2.32** rather than a separate v2.33, since both landed before either was
+hand-tested and Mark only needed to look at one `.exe`. New
+`_pack_button_group()` helper; both rows rebuilt as 3-column grids
+(left/centre/right) instead of one long packed row. Caught a real gap in
+notes_027's own proposed grouping along the way: its snippet never placed
+Undo in either row -- put it with Paste/Copy/History on row 2's left,
+the better conceptual fit. Verified with a scripted hand-test measuring
+actual on-screen widget bounding boxes at both 1180x760 and the documented
+920x600 minimum: no overlaps, nothing off-window, correct group order, at
+both sizes -- caught and resolved one test-harness-only false alarm along
+the way (shrinking an already-built window via `.geometry()` needs a full
+`app.update()`, not just `update_idletasks()`, before geometry queries
+reflect the new layout; confirmed against the last-committed code and a
+fresh same-size instance that no real regression existed).
+
+Rebuild hit two operational snags, both resolved: an orphaned Scriptorium
+process from an earlier smoke-launch (`Stop-Process` against
+`Start-Process`'s returned PID didn't reach the PyInstaller onefile
+build's actual child process) blocked the next build with a file-lock
+`PermissionError` until found via `tasklist`/`Get-Process` and stopped;
+and an auto-mode classifier block on the identical rebuild command that
+had been allowed minutes earlier -- reported to the user rather than
+worked around, and a plain retry succeeded.
+
+**Mark hand-tested the real `.exe` (all six items) and confirmed: "it
+genuinely looks good... running perfectly."** `ROADMAP.md`'s v2.32 section
+marked shipped; this entry logs it. `APP_VERSION`/`version_info.txt` stay
+at `2.32` (no rebuild needed post-approval -- the `.exe` he tested is the
+one being shipped). Full detail in `ROADMAP.md`'s v2.32 section.
+
+---
+
 ## 2026-09-07 (night) — v2.31 shipped: UI wiring, version bump, rebuild, Mark's hand-test
 
 Final step of the day's v2.31 arc. With the precondition re-confirmed
