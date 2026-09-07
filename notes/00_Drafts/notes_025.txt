@@ -1,0 +1,43 @@
+**Date: 7 September 2026**
+
+**Subject: Calibration File Overview**
+
+In relation to the calibration file, it is imperative to establish a clear approach in advance, as the appropriate structure is crucial for differentiating between a temporary script and a solution that consistently delivers value upon revisiting the selection logic.
+
+The core principle revolves around two layers sharing a unified corpus.
+
+The calibration process evaluates two distinct dimensions, which should be assessed through separate tests:
+
+1. **Mechanical Guarantees**: This dimension addresses whether the splice operates as intended. It requires verification that every byte outside the selection remains unchanged and that boundary whitespace is properly handled. These are inherent characteristics of the functions `make_processing_scope()` and `assemble_scoped_revision()`. They are deterministic and do not necessitate a model; therefore, they should be perpetually included in your regression suite. Your existing 28 deterministic checks already encompass most of these requirements.
+
+2. **Model Behaviour**: This dimension assesses whether the meaning is preserved in response to a live model, ensuring that no extraneous content is generated, protected inventory is maintained, and ambiguity is highlighted rather than conjectured. Conducting this analysis requires a live model, which incurs costs and time, and its pass/fail determination is partially subjective. This represents the essence of calibration, which should not be integrated into Continuous Integration (CI) — an unreliable model must not interfere with your regression runs, and a misleading "green" result should not be permitted to automatically pass a gate.
+
+In summary, three files will be required, all utilising a shared corpus:
+
+1. **tests/calibration_corpus.py**: This file will contain twelve cases as data. For each case, it will include the complete original input, the precise prefix/selected/suffix segmentation, a category label, and expectations for each case (specifying which protected tokens must remain intact, which invented content is prohibited, and whether it falls under the "ambiguous" or "already-correct" category).
+
+2. **tests/test_calibration_e1_deterministic.py**: This file will manage the mechanical layer. It will process the corpus through `make_processing_scope` and `assemble_scoped_revision` using a stubbed backend response, asserting the identity of external bytes, confirming clean boundaries, ensuring the preservation of protected tokens, and identifying scope-validation errors. This will be incorporated into the regression suite.
+
+3. **tests/calibration_e1.py**: This file will function as the live harness. It will execute the same corpus through `run_backend` against a selected backend multiple times, capturing the exact output, conducting automated checks on verifiable aspects, flagging any remaining items for review, and generating a committed results file.
+
+### Requirements for the Live Harness
+
+The live harness must adhere to four guiding principles, derived from your project's historical practices:
+
+- **Preserve Live Configuration**: Create a snapshot of `scriptorium_config.json` into an isolated configuration dictionary, ensuring that all operations derive from this (with an explicit `--backend` override). Furthermore, confirm that the modification time of the original file remains unchanged upon completion — mirroring the approach taken in the v2.18/v2.19 calibration.
+
+- **Utilise `run_backend`**: Avoid custom calls; instead, leverage `run_backend` to ensure that backend selection adheres to the application’s logic. This allows calibration to test the actual dispatch process rather than a parallel one.
+
+- **Repeat Each Case**: Default to executing each case three times. A probabilistic system cannot be validated by a single successful run. This discipline was instrumental in identifying the embellishment bug in v2.18. Provide reports on a per-case and per-run basis.
+
+- **Commit Raw Transcripts**: The verbatim output from the model should be recorded in `tests/results/calibration_e1_<backend>_<timestamp>.json`. Previous issues highlighted that results from 7 September were provisional and had to be reconstructed — this friction must be avoided. Committing these results ensures that subsequent reruns yield diffs rather than necessitating reconstruction.
+
+Additionally, the system should automatically classify each case as PASS, DRIFT (indicating a fidelity audit triggered), FAIL (indicating invented content), or REVIEW (indicating a judgement case). It should also explicitly highlight three known problem cases: the brief imperative list item, the omission of the trailing comma, and the direct substitution of straight quotes with smart quotes, providing immediate visibility into whether Claude successfully navigates the issues that llama3.2:3b encountered.
+
+### An Important Constraint: Maintain Additivity
+
+As the calibration aims to assess the readiness for v2.31, it is crucial that the application remains unchanged during this session — no modifications to `scriptorium.py`, no alterations to UI wiring, and no increments to the APP_VERSION. The harness should reuse your existing pipeline functions in the same sequence as invoked by `_begin_processing` and `_on_success`:
+
+`make_processing_scope → mask_placeholders → build_system_prompt → run_backend → restore_placeholders → assemble_scoped_revision → audit_revision_fidelity`.
+
+There is a minor risk of drift in a harness that replays this sequence instead of invoking a singular shared function. Therefore, it is advisable to introduce a deterministic test that aligns the output assembled by the harness with a genuine `_on_success()` result for a fixed stubbed response. This will safeguard against any future discrepancies without necessitating alterations to the shipping code. While extracting this entire sequence into a single module-level function, similar to the tidy-up performed for `read_document_path` in v2.19, is a prudent long-term strategy, such changes should be deferred until after the E1 shipping, not during its calibration phase.

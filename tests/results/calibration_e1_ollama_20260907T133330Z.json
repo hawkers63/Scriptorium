@@ -1,0 +1,1019 @@
+{
+  "backend": "ollama",
+  "generated_at": "20260907T133330Z",
+  "app_version": "2.30",
+  "records": [
+    {
+      "case": "mid_sentence_leading_punctuation",
+      "category": "mid-sentence selection, leading punctuation boundary",
+      "mode": "Correct",
+      "strength": "Standard",
+      "role": "(none)",
+      "tones": [],
+      "known_problem": null,
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "and the team worked through the weekend to finish it before the board meeting on Friday.",
+        "ambiguities": [
+          "Ambiguous verb form: 'finsh' vs 'finish'",
+          "Possibly incorrect use of 'finsh' instead of 'finish' in a formal context"
+        ],
+        "note": "Corrected 'finsh' to 'finish' to conform to standard British English usage"
+      },
+      "revised_selection_text": "and the team worked through the weekend to finish it before the board meeting on Friday.",
+      "assembled_revision": "The quarterly report was late, and the team worked through the weekend to finish it before the board meeting on Friday.",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [],
+      "forbidden_hits": [],
+      "run": 1,
+      "verdict": "PASS"
+    },
+    {
+      "case": "mid_sentence_leading_punctuation",
+      "category": "mid-sentence selection, leading punctuation boundary",
+      "mode": "Correct",
+      "strength": "Standard",
+      "role": "(none)",
+      "tones": [],
+      "known_problem": null,
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "and the team worked through the weekend to finish it before the board meeting on Friday.",
+        "ambiguities": [],
+        "note": "Added -ise to -finish"
+      },
+      "revised_selection_text": "and the team worked through the weekend to finish it before the board meeting on Friday.",
+      "assembled_revision": "The quarterly report was late, and the team worked through the weekend to finish it before the board meeting on Friday.",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [],
+      "forbidden_hits": [],
+      "run": 2,
+      "verdict": "PASS"
+    },
+    {
+      "case": "mid_sentence_leading_punctuation",
+      "category": "mid-sentence selection, leading punctuation boundary",
+      "mode": "Correct",
+      "strength": "Standard",
+      "role": "(none)",
+      "tones": [],
+      "known_problem": null,
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "and the team worked through the weekend to finish it before the board meeting on Friday.",
+        "ambiguities": [],
+        "note": "Added -ise to -finish"
+      },
+      "revised_selection_text": "and the team worked through the weekend to finish it before the board meeting on Friday.",
+      "assembled_revision": "The quarterly report was late, and the team worked through the weekend to finish it before the board meeting on Friday.",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [],
+      "forbidden_hits": [],
+      "run": 3,
+      "verdict": "PASS"
+    },
+    {
+      "case": "mid_sentence_trailing_comma_known_drift",
+      "category": "mid-sentence selection ending in a comma",
+      "mode": "Correct",
+      "strength": "Standard",
+      "role": "(none)",
+      "tones": [],
+      "known_problem": "2026-09-07 Ollama (llama3.2:3b) run: dropped the trailing comma at the selection boundary ('...12 March 2026,' -> '...12 March 2026'), leaving a small grammatical seam once spliced into the fixed suffix. Not caught by audit_revision_fidelity() (no bare-comma check exists), so this is exactly the kind of boundary drift the live harness's own trailing-character check exists to catch.",
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "no later than 12 March 2026",
+        "ambiguities": [],
+        "note": "Changed & to alt. spelling"
+      },
+      "revised_selection_text": "no later than 12 March 2026",
+      "assembled_revision": "The contract must be signed by the client no later than 12 March 2026 otherwise the offer will lapse automatically.",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [
+        "12 March 2026,"
+      ],
+      "forbidden_hits": [],
+      "run": 1,
+      "verdict": "DRIFT"
+    },
+    {
+      "case": "mid_sentence_trailing_comma_known_drift",
+      "category": "mid-sentence selection ending in a comma",
+      "mode": "Correct",
+      "strength": "Standard",
+      "role": "(none)",
+      "tones": [],
+      "known_problem": "2026-09-07 Ollama (llama3.2:3b) run: dropped the trailing comma at the selection boundary ('...12 March 2026,' -> '...12 March 2026'), leaving a small grammatical seam once spliced into the fixed suffix. Not caught by audit_revision_fidelity() (no bare-comma check exists), so this is exactly the kind of boundary drift the live harness's own trailing-character check exists to catch.",
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "no later than 12 March 2026",
+        "ambiguities": [],
+        "note": "corrected spelling of 'later'"
+      },
+      "revised_selection_text": "no later than 12 March 2026",
+      "assembled_revision": "The contract must be signed by the client no later than 12 March 2026 otherwise the offer will lapse automatically.",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [
+        "12 March 2026,"
+      ],
+      "forbidden_hits": [],
+      "run": 2,
+      "verdict": "DRIFT"
+    },
+    {
+      "case": "mid_sentence_trailing_comma_known_drift",
+      "category": "mid-sentence selection ending in a comma",
+      "mode": "Correct",
+      "strength": "Standard",
+      "role": "(none)",
+      "tones": [],
+      "known_problem": "2026-09-07 Ollama (llama3.2:3b) run: dropped the trailing comma at the selection boundary ('...12 March 2026,' -> '...12 March 2026'), leaving a small grammatical seam once spliced into the fixed suffix. Not caught by audit_revision_fidelity() (no bare-comma check exists), so this is exactly the kind of boundary drift the live harness's own trailing-character check exists to catch.",
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "no later than 12 March 2026",
+        "ambiguities": [
+          "The ambiguity of the word 'at' versus 'to' in the sentence is left unaddressed"
+        ],
+        "note": "Corrected 'at' to 'to' for clarity"
+      },
+      "revised_selection_text": "no later than 12 March 2026",
+      "assembled_revision": "The contract must be signed by the client no later than 12 March 2026 otherwise the offer will lapse automatically.",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [
+        "12 March 2026,"
+      ],
+      "forbidden_hits": [],
+      "run": 3,
+      "verdict": "DRIFT"
+    },
+    {
+      "case": "pronoun_antecedent_outside_selection",
+      "category": "pronoun antecedent outside the selection",
+      "mode": "Paraphrase",
+      "strength": "Light",
+      "role": "Executive",
+      "tones": [
+        "Concise"
+      ],
+      "known_problem": null,
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "She had rechecked every figure twice before submitting it to the finance director.",
+        "ambiguities": [],
+        "note": "Added word 'rechecked'"
+      },
+      "revised_selection_text": "She had rechecked every figure twice before submitting it to the finance director.",
+      "assembled_revision": "Sarah finished the annual budget report last night. She had rechecked every figure twice before submitting it to the finance director.",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [],
+      "forbidden_hits": [],
+      "run": 1,
+      "verdict": "PASS"
+    },
+    {
+      "case": "pronoun_antecedent_outside_selection",
+      "category": "pronoun antecedent outside the selection",
+      "mode": "Paraphrase",
+      "strength": "Light",
+      "role": "Executive",
+      "tones": [
+        "Concise"
+      ],
+      "known_problem": null,
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "She had checked every figure twice before submitting it to the finance director.",
+        "ambiguities": [],
+        "note": "No changes made"
+      },
+      "revised_selection_text": "She had checked every figure twice before submitting it to the finance director.",
+      "assembled_revision": "Sarah finished the annual budget report last night. She had checked every figure twice before submitting it to the finance director.",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [],
+      "forbidden_hits": [],
+      "run": 2,
+      "verdict": "PASS"
+    },
+    {
+      "case": "pronoun_antecedent_outside_selection",
+      "category": "pronoun antecedent outside the selection",
+      "mode": "Paraphrase",
+      "strength": "Light",
+      "role": "Executive",
+      "tones": [
+        "Concise"
+      ],
+      "known_problem": null,
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "She had checked every figure twice before submitting it to the finance director.",
+        "ambiguities": [],
+        "note": ""
+      },
+      "revised_selection_text": "She had checked every figure twice before submitting it to the finance director.",
+      "assembled_revision": "Sarah finished the annual budget report last night. She had checked every figure twice before submitting it to the finance director.",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [],
+      "forbidden_hits": [],
+      "run": 3,
+      "verdict": "PASS"
+    },
+    {
+      "case": "negation_modality_hedges",
+      "category": "negation, modality and hedges",
+      "mode": "Clarify",
+      "strength": "Light",
+      "role": "Academic",
+      "tones": [
+        "Neutral"
+      ],
+      "known_problem": null,
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "It is possible that additional factors were involved, although this has not yet been confirmed.",
+        "ambiguities": [],
+        "note": "Changed sentence structure"
+      },
+      "revised_selection_text": "It is possible that additional factors were involved, although this has not yet been confirmed.",
+      "assembled_revision": "The results might not fully explain the delay. It is possible that additional factors were involved, although this has not yet been confirmed.",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [],
+      "forbidden_hits": [],
+      "run": 1,
+      "verdict": "PASS"
+    },
+    {
+      "case": "negation_modality_hedges",
+      "category": "negation, modality and hedges",
+      "mode": "Clarify",
+      "strength": "Light",
+      "role": "Academic",
+      "tones": [
+        "Neutral"
+      ],
+      "known_problem": null,
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "It is possible that additional factors were involved, although this has not yet been confirmed.",
+        "ambiguities": [],
+        "note": "Added commas for clarity"
+      },
+      "revised_selection_text": "It is possible that additional factors were involved, although this has not yet been confirmed.",
+      "assembled_revision": "The results might not fully explain the delay. It is possible that additional factors were involved, although this has not yet been confirmed.",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [],
+      "forbidden_hits": [],
+      "run": 2,
+      "verdict": "PASS"
+    },
+    {
+      "case": "negation_modality_hedges",
+      "category": "negation, modality and hedges",
+      "mode": "Clarify",
+      "strength": "Light",
+      "role": "Academic",
+      "tones": [
+        "Neutral"
+      ],
+      "known_problem": null,
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "It is possible that additional factors were involved, although this has not yet been confirmed.",
+        "ambiguities": [],
+        "note": "Changed sentence structure for clarity"
+      },
+      "revised_selection_text": "It is possible that additional factors were involved, although this has not yet been confirmed.",
+      "assembled_revision": "The results might not fully explain the delay. It is possible that additional factors were involved, although this has not yet been confirmed.",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [],
+      "forbidden_hits": [],
+      "run": 3,
+      "verdict": "PASS"
+    },
+    {
+      "case": "quantities_dates_money_percentages",
+      "category": "quantities, dates, money and percentages",
+      "mode": "Correct",
+      "strength": "Standard",
+      "role": "(none)",
+      "tones": [],
+      "known_problem": null,
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "up to form £204,220,000 the previous year.",
+        "ambiguities": [],
+        "note": "Changed 'to' to 'to' for consistency with standard British English."
+      },
+      "revised_selection_text": "up to form £204,220,000 the previous year.",
+      "assembled_revision": "Revenue grew by 12.5% to £4,750,000 in the year ending 31 March 2026, up to form £204,220,000 the previous year.",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [
+        "Protected number, amount or percentage content changed (missing '£4,220,000'; introduced '£204,220,000'). Check this change against the original before accepting it."
+      ],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [
+        "£4,220,000"
+      ],
+      "forbidden_hits": [],
+      "run": 1,
+      "verdict": "DRIFT"
+    },
+    {
+      "case": "quantities_dates_money_percentages",
+      "category": "quantities, dates, money and percentages",
+      "mode": "Correct",
+      "strength": "Standard",
+      "role": "(none)",
+      "tones": [],
+      "known_problem": null,
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "up from £4,220,000 the previous year.",
+        "ambiguities": [],
+        "note": "Changed 'up form' to 'up from'"
+      },
+      "revised_selection_text": "up from £4,220,000 the previous year.",
+      "assembled_revision": "Revenue grew by 12.5% to £4,750,000 in the year ending 31 March 2026, up from £4,220,000 the previous year.",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [],
+      "forbidden_hits": [],
+      "run": 2,
+      "verdict": "PASS"
+    },
+    {
+      "case": "quantities_dates_money_percentages",
+      "category": "quantities, dates, money and percentages",
+      "mode": "Correct",
+      "strength": "Standard",
+      "role": "(none)",
+      "tones": [],
+      "known_problem": null,
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "formed £4,220,000 the previous year.",
+        "ambiguities": [],
+        "note": "Changed 'up' to 'formed' for grammatical accuracy."
+      },
+      "revised_selection_text": "formed £4,220,000 the previous year.",
+      "assembled_revision": "Revenue grew by 12.5% to £4,750,000 in the year ending 31 March 2026, formed £4,220,000 the previous year.",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [],
+      "forbidden_hits": [],
+      "run": 3,
+      "verdict": "PASS"
+    },
+    {
+      "case": "quotation_straight_quotes_known_drift",
+      "category": "quotation containing straight quotation marks",
+      "mode": "Correct",
+      "strength": "Standard",
+      "role": "(none)",
+      "tones": [],
+      "known_problem": "2026-09-07 Ollama (llama3.2:3b) run: straight quotation marks around 'the foundations remain sound,' were silently replaced with smart/curly quotes -- caught by audit_revision_fidelity()'s protected-quote check, but still a real loss of exact punctuation fidelity inside supposedly-protected content.",
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "The foundations remain sound,",
+        "ambiguities": [
+          "ambiguous meaning of 'even dough'"
+        ],
+        "note": "Added comma after 'sound' for better clarity"
+      },
+      "revised_selection_text": "The foundations remain sound,",
+      "assembled_revision": "The site engineer confirmed that The foundations remain sound,",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [
+        "Protected quoted passage content changed (missing '\"the foundations remain sound,\"'). Check this change against the original before accepting it."
+      ],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [
+        "\"the foundations remain sound,\""
+      ],
+      "forbidden_hits": [],
+      "run": 1,
+      "verdict": "DRIFT"
+    },
+    {
+      "case": "quotation_straight_quotes_known_drift",
+      "category": "quotation containing straight quotation marks",
+      "mode": "Correct",
+      "strength": "Standard",
+      "role": "(none)",
+      "tones": [],
+      "known_problem": "2026-09-07 Ollama (llama3.2:3b) run: straight quotation marks around 'the foundations remain sound,' were silently replaced with smart/curly quotes -- caught by audit_revision_fidelity()'s protected-quote check, but still a real loss of exact punctuation fidelity inside supposedly-protected content.",
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "the foundations remain sound,",
+        "ambiguities": [],
+        "note": ""
+      },
+      "revised_selection_text": "the foundations remain sound,",
+      "assembled_revision": "The site engineer confirmed that the foundations remain sound,",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [
+        "Protected quoted passage content changed (missing '\"the foundations remain sound,\"'). Check this change against the original before accepting it."
+      ],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [
+        "\"the foundations remain sound,\""
+      ],
+      "forbidden_hits": [],
+      "run": 2,
+      "verdict": "DRIFT"
+    },
+    {
+      "case": "quotation_straight_quotes_known_drift",
+      "category": "quotation containing straight quotation marks",
+      "mode": "Correct",
+      "strength": "Standard",
+      "role": "(none)",
+      "tones": [],
+      "known_problem": "2026-09-07 Ollama (llama3.2:3b) run: straight quotation marks around 'the foundations remain sound,' were silently replaced with smart/curly quotes -- caught by audit_revision_fidelity()'s protected-quote check, but still a real loss of exact punctuation fidelity inside supposedly-protected content.",
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "the foundations remain sound",
+        "ambiguities": [
+          "inconsistent verb tense",
+          "dough should be 'dough' (no contraction)",
+          "even"
+        ],
+        "note": "Corrected spelling and tense, and 'even' to 'even' (conjunction)"
+      },
+      "revised_selection_text": "the foundations remain sound",
+      "assembled_revision": "The site engineer confirmed that the foundations remain sound",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [
+        "Protected quoted passage content changed (missing '\"the foundations remain sound,\"'). Check this change against the original before accepting it."
+      ],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [
+        "\"the foundations remain sound,\""
+      ],
+      "forbidden_hits": [],
+      "run": 3,
+      "verdict": "DRIFT"
+    },
+    {
+      "case": "url_and_email",
+      "category": "URL and email address together",
+      "mode": "Correct",
+      "strength": "Standard",
+      "role": "Technical Writer",
+      "tones": [],
+      "known_problem": null,
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "https://www.example.co.uk/reports",
+        "ambiguities": [
+          "Missing article in \"the\" before \"deadline\"."
+        ],
+        "note": "Corrected missing article and corrected spelling of \"the\"."
+      },
+      "revised_selection_text": "https://www.example.co.uk/reports",
+      "assembled_revision": "For further details, visit https://www.example.co.uk/reports",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [
+        "Protected email address content changed (missing 'compliance@example.co.uk'). Check this change against the original before accepting it."
+      ],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [
+        "compliance@example.co.uk"
+      ],
+      "forbidden_hits": [],
+      "run": 1,
+      "verdict": "DRIFT"
+    },
+    {
+      "case": "url_and_email",
+      "category": "URL and email address together",
+      "mode": "Correct",
+      "strength": "Standard",
+      "role": "Technical Writer",
+      "tones": [],
+      "known_problem": null,
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "https://www.example.co.uk/reports or email compliance@example.co.uk before the deadline.",
+        "ambiguities": [
+          "Ambiguity in 'before teh' - should be 'before the'"
+        ],
+        "note": "Corrected comma after 'or' and 'the' in 'before the'"
+      },
+      "revised_selection_text": "https://www.example.co.uk/reports or email compliance@example.co.uk before the deadline.",
+      "assembled_revision": "For further details, visit https://www.example.co.uk/reports or email compliance@example.co.uk before the deadline.",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [],
+      "forbidden_hits": [],
+      "run": 2,
+      "verdict": "PASS"
+    },
+    {
+      "case": "url_and_email",
+      "category": "URL and email address together",
+      "mode": "Correct",
+      "strength": "Standard",
+      "role": "Technical Writer",
+      "tones": [],
+      "known_problem": null,
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "https://www.example.co.uk/reports",
+        "ambiguities": [
+          "Teh in \"before teh deadline\" is ambiguous, as \"teh\" could be a typographical error for \"the\"."
+        ],
+        "note": "Fixed \"teh\" to \"the\"."
+      },
+      "revised_selection_text": "https://www.example.co.uk/reports",
+      "assembled_revision": "For further details, visit https://www.example.co.uk/reports",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [
+        "Protected email address content changed (missing 'compliance@example.co.uk'). Check this change against the original before accepting it."
+      ],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [
+        "compliance@example.co.uk"
+      ],
+      "forbidden_hits": [],
+      "run": 3,
+      "verdict": "DRIFT"
+    },
+    {
+      "case": "windows_path_and_all_placeholder_shapes",
+      "category": "Windows path with all four placeholder shapes",
+      "mode": "Correct",
+      "strength": "Standard",
+      "role": "(none)",
+      "tones": [],
+      "known_problem": null,
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "C:\\Users\\Reports\\Q1.docx and send it to ⟦PHd76102_0⟧ together with the ⟦PHd76102_1⟧ and ⟦PHd76102_2⟧ shown on the ⟦PHd76102_3⟧ cover sheet.",
+        "ambiguities": [],
+        "note": "Corrected double backslash to double backslash and added double quotes around file names"
+      },
+      "revised_selection_text": "C:\\Users\\Reports\\Q1.docx and send it to [Name] together with the {{Date}} and {amount} shown on the <Date> cover sheet.",
+      "assembled_revision": "Please save the completed form as C:\\Users\\Reports\\Q1.docx and send it to [Name] together with the {{Date}} and {amount} shown on the <Date> cover sheet.",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [],
+      "forbidden_hits": [],
+      "run": 1,
+      "verdict": "PASS"
+    },
+    {
+      "case": "windows_path_and_all_placeholder_shapes",
+      "category": "Windows path with all four placeholder shapes",
+      "mode": "Correct",
+      "strength": "Standard",
+      "role": "(none)",
+      "tones": [],
+      "known_problem": null,
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "C:\\Users\\Reports\\Q1.docx and send it to ⟦PHb34d6c_0⟧ together with the ⟦PHb34d6c_1⟧ and ⟦PHb34d6c_2⟧ shown on the ⟦PHb34d6c_3⟧ cover sheet.",
+        "ambiguities": [],
+        "note": "Added double backslashes to escape Windows directory separator"
+      },
+      "revised_selection_text": "C:\\Users\\Reports\\Q1.docx and send it to [Name] together with the {{Date}} and {amount} shown on the <Date> cover sheet.",
+      "assembled_revision": "Please save the completed form as C:\\Users\\Reports\\Q1.docx and send it to [Name] together with the {{Date}} and {amount} shown on the <Date> cover sheet.",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [],
+      "forbidden_hits": [],
+      "run": 2,
+      "verdict": "PASS"
+    },
+    {
+      "case": "windows_path_and_all_placeholder_shapes",
+      "category": "Windows path with all four placeholder shapes",
+      "mode": "Correct",
+      "strength": "Standard",
+      "role": "(none)",
+      "tones": [],
+      "known_problem": null,
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "C:\\Users\\Reports\\Q1.docx and send it to ⟦PH6e0fb9_0⟧ together with the ⟦PH6e0fb9_1⟧ and ⟦PH6e0fb9_2⟧ shown on the ⟦PH6e0fb9_3⟧ cover sheet.",
+        "ambiguities": [],
+        "note": "Corrected file path and added apostrophe to 'to'"
+      },
+      "revised_selection_text": "C:\\Users\\Reports\\Q1.docx and send it to [Name] together with the {{Date}} and {amount} shown on the <Date> cover sheet.",
+      "assembled_revision": "Please save the completed form as C:\\Users\\Reports\\Q1.docx and send it to [Name] together with the {{Date}} and {amount} shown on the <Date> cover sheet.",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [],
+      "forbidden_hits": [],
+      "run": 3,
+      "verdict": "PASS"
+    },
+    {
+      "case": "markdown_list_item_short_imperative_known_hallucination",
+      "category": "Markdown list item, short imperative fragment",
+      "mode": "Correct",
+      "strength": "Standard",
+      "role": "(none)",
+      "tones": [],
+      "known_problem": "2026-09-07 Ollama (llama3.2:3b) run: this exact short, imperative-phrased, already-correct selection returned entirely unrelated hallucinated content about 'licence holders' and 'programme events' rather than a revision of the given text -- the one real, severe failure this calibration gate exists to catch. See ROADMAP.md's v2.31 section and the mark_meaning_preservation_priority memory.",
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "The middle item carefully for errors.",
+        "ambiguities": [
+          "Genuine ambiguity: comma splice without conjunction"
+        ],
+        "note": "Fixed comma splice in middle item"
+      },
+      "revised_selection_text": "The middle item carefully for errors.",
+      "assembled_revision": "## Pre-submission checklist\n- Check the cover page for the correct reference number.\n- The middle item carefully for errors.\n- Confirm the signature block is complete.\n",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [
+        "Review the middle item carefully for errors."
+      ],
+      "forbidden_hits": [],
+      "run": 1,
+      "verdict": "REVIEW"
+    },
+    {
+      "case": "markdown_list_item_short_imperative_known_hallucination",
+      "category": "Markdown list item, short imperative fragment",
+      "mode": "Correct",
+      "strength": "Standard",
+      "role": "(none)",
+      "tones": [],
+      "known_problem": "2026-09-07 Ollama (llama3.2:3b) run: this exact short, imperative-phrased, already-correct selection returned entirely unrelated hallucinated content about 'licence holders' and 'programme events' rather than a revision of the given text -- the one real, severe failure this calibration gate exists to catch. See ROADMAP.md's v2.31 section and the mark_meaning_preservation_priority memory.",
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "There is a genuine ambiguity in the sentence: 'He went to the centre for a practice session'. The intended meaning of 'centre' could be a sports centre, a medical centre, etc. A safe edit could be to rephrase the sentence, but if you want to leave it as is, the ambiguity is present.",
+        "ambiguities": [
+          "Genuine ambiguity in 'centre' - intended meaning unclear."
+        ],
+        "note": "Replaced 'centre' with 'practice' in the middle item to avoid ambiguity"
+      },
+      "revised_selection_text": "There is a genuine ambiguity in the sentence: 'He went to the centre for a practice session'. The intended meaning of 'centre' could be a sports centre, a medical centre, etc. A safe edit could be to rephrase the sentence, but if you want to leave it as is, the ambiguity is present.",
+      "assembled_revision": "## Pre-submission checklist\n- Check the cover page for the correct reference number.\n- There is a genuine ambiguity in the sentence: 'He went to the centre for a practice session'. The intended meaning of 'centre' could be a sports centre, a medical centre, etc. A safe edit could be to rephrase the sentence, but if you want to leave it as is, the ambiguity is present.\n- Confirm the signature block is complete.\n",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [
+        "Protected quoted passage content changed (introduced \"'He went to the centre for a practice session'\", \"'centre'\"). Check this change against the original before accepting it."
+      ],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [
+        "Review the middle item carefully for errors."
+      ],
+      "forbidden_hits": [],
+      "run": 2,
+      "verdict": "REVIEW"
+    },
+    {
+      "case": "markdown_list_item_short_imperative_known_hallucination",
+      "category": "Markdown list item, short imperative fragment",
+      "mode": "Correct",
+      "strength": "Standard",
+      "role": "(none)",
+      "tones": [],
+      "known_problem": "2026-09-07 Ollama (llama3.2:3b) run: this exact short, imperative-phrased, already-correct selection returned entirely unrelated hallucinated content about 'licence holders' and 'programme events' rather than a revision of the given text -- the one real, severe failure this calibration gate exists to catch. See ROADMAP.md's v2.31 section and the mark_meaning_preservation_priority memory.",
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "The middle item carefully for errors.",
+        "ambiguities": [],
+        "note": "Added comma after 'carefully'"
+      },
+      "revised_selection_text": "The middle item carefully for errors.",
+      "assembled_revision": "## Pre-submission checklist\n- Check the cover page for the correct reference number.\n- The middle item carefully for errors.\n- Confirm the signature block is complete.\n",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [
+        "Review the middle item carefully for errors."
+      ],
+      "forbidden_hits": [],
+      "run": 3,
+      "verdict": "REVIEW"
+    },
+    {
+      "case": "markdown_heading_blank_line_boundaries",
+      "category": "Markdown heading with blank-line boundaries",
+      "mode": "Correct",
+      "strength": "Light",
+      "role": "(none)",
+      "tones": [],
+      "known_problem": null,
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "Projct Overview",
+        "ambiguities": [
+          "Missing articles 'the' in 'Projct Overview'",
+          "Missing space before period"
+        ],
+        "note": "Minor correction of grammar and punctuation"
+      },
+      "revised_selection_text": "Projct Overview",
+      "assembled_revision": "Introduction\n\nProjct OverviewThis section summarises the scope and timeline for stakeholders.\n",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [],
+      "forbidden_hits": [],
+      "run": 1,
+      "verdict": "PASS"
+    },
+    {
+      "case": "markdown_heading_blank_line_boundaries",
+      "category": "Markdown heading with blank-line boundaries",
+      "mode": "Correct",
+      "strength": "Light",
+      "role": "(none)",
+      "tones": [],
+      "known_problem": null,
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "Project Overview",
+        "ambiguities": [],
+        "note": "Changed &quot;Projct&quot; to &quot;Project&quot;"
+      },
+      "revised_selection_text": "Project Overview",
+      "assembled_revision": "Introduction\n\nProject OverviewThis section summarises the scope and timeline for stakeholders.\n",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [],
+      "forbidden_hits": [],
+      "run": 2,
+      "verdict": "PASS"
+    },
+    {
+      "case": "markdown_heading_blank_line_boundaries",
+      "category": "Markdown heading with blank-line boundaries",
+      "mode": "Correct",
+      "strength": "Light",
+      "role": "(none)",
+      "tones": [],
+      "known_problem": null,
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "Projct Overview",
+        "ambiguities": [
+          "<space missing after 't' in 'Projct'>"
+        ],
+        "note": "Added space after 't' to correct spelling"
+      },
+      "revised_selection_text": "Projct Overview",
+      "assembled_revision": "Introduction\n\nProjct OverviewThis section summarises the scope and timeline for stakeholders.\n",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [],
+      "forbidden_hits": [],
+      "run": 3,
+      "verdict": "PASS"
+    },
+    {
+      "case": "already_correct_selection",
+      "category": "already-correct selection",
+      "mode": "Correct",
+      "strength": "Standard",
+      "role": "(none)",
+      "tones": [],
+      "known_problem": null,
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "Thursday at 10 a.m. in the main conference room.",
+        "ambiguities": [],
+        "note": "Corrected spelling of “a’m’’ to ‚’m’’"
+      },
+      "revised_selection_text": "Thursday at 10 a.m. in the main conference room.",
+      "assembled_revision": "The meeting has been rescheduled to Thursday at 10 a.m. in the main conference room.",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [],
+      "forbidden_hits": [],
+      "run": 1,
+      "verdict": "REVIEW"
+    },
+    {
+      "case": "already_correct_selection",
+      "category": "already-correct selection",
+      "mode": "Correct",
+      "strength": "Standard",
+      "role": "(none)",
+      "tones": [],
+      "known_problem": null,
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "Thursday at 10 a.m. in the main conference room.",
+        "ambiguities": [],
+        "note": "Corrected comma after 'a.m.'"
+      },
+      "revised_selection_text": "Thursday at 10 a.m. in the main conference room.",
+      "assembled_revision": "The meeting has been rescheduled to Thursday at 10 a.m. in the main conference room.",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [],
+      "forbidden_hits": [],
+      "run": 2,
+      "verdict": "REVIEW"
+    },
+    {
+      "case": "already_correct_selection",
+      "category": "already-correct selection",
+      "mode": "Correct",
+      "strength": "Standard",
+      "role": "(none)",
+      "tones": [],
+      "known_problem": null,
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "Thursday at 10 a.m. in the main conference room.",
+        "ambiguities": [],
+        "note": "Added full stop at the end of the sentence."
+      },
+      "revised_selection_text": "Thursday at 10 a.m. in the main conference room.",
+      "assembled_revision": "The meeting has been rescheduled to Thursday at 10 a.m. in the main conference room.",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [],
+      "forbidden_hits": [],
+      "run": 3,
+      "verdict": "REVIEW"
+    },
+    {
+      "case": "genuinely_ambiguous_fragment",
+      "category": "genuinely ambiguous fragment",
+      "mode": "Clarify",
+      "strength": "Standard",
+      "role": "(none)",
+      "tones": [],
+      "known_problem": null,
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "The manager told the client that her presentation had inspired the new strategy, and she was delighted with the outcome.",
+        "ambiguities": [],
+        "note": "Changed 'result' to 'outcome' for clarity"
+      },
+      "revised_selection_text": "The manager told the client that her presentation had inspired the new strategy, and she was delighted with the outcome.",
+      "assembled_revision": "The quarterly review meeting ran long. The manager told the client that her presentation had inspired the new strategy, and she was delighted with the outcome. Everyone left in good spirits.",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [],
+      "forbidden_hits": [],
+      "run": 1,
+      "verdict": "REVIEW"
+    },
+    {
+      "case": "genuinely_ambiguous_fragment",
+      "category": "genuinely ambiguous fragment",
+      "mode": "Clarify",
+      "strength": "Standard",
+      "role": "(none)",
+      "tones": [],
+      "known_problem": null,
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "The manager told the client that her presentation had inspired the new strategy, and she was delighted with the result.",
+        "ambiguities": [],
+        "note": "Improved sentence structure for clarity"
+      },
+      "revised_selection_text": "The manager told the client that her presentation had inspired the new strategy, and she was delighted with the result.",
+      "assembled_revision": "The quarterly review meeting ran long. The manager told the client that her presentation had inspired the new strategy, and she was delighted with the result. Everyone left in good spirits.",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [],
+      "forbidden_hits": [],
+      "run": 2,
+      "verdict": "REVIEW"
+    },
+    {
+      "case": "genuinely_ambiguous_fragment",
+      "category": "genuinely ambiguous fragment",
+      "mode": "Clarify",
+      "strength": "Standard",
+      "role": "(none)",
+      "tones": [],
+      "known_problem": null,
+      "backend": "ollama",
+      "model": "llama3.2:3b",
+      "raw_model_output": {
+        "revised": "The manager told the client that her presentation had inspired the new strategy, and she was delighted with the result.",
+        "ambiguities": [],
+        "note": "Minor rephrase for clarity"
+      },
+      "revised_selection_text": "The manager told the client that her presentation had inspired the new strategy, and she was delighted with the result.",
+      "assembled_revision": "The quarterly review meeting ran long. The manager told the client that her presentation had inspired the new strategy, and she was delighted with the result. Everyone left in good spirits.",
+      "placeholder_warnings": [],
+      "fidelity_warnings": [],
+      "exterior_prefix_ok": true,
+      "exterior_suffix_ok": true,
+      "missing_protected_tokens": [],
+      "forbidden_hits": [],
+      "run": 3,
+      "verdict": "REVIEW"
+    }
+  ]
+}
