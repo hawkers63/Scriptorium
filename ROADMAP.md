@@ -4,7 +4,7 @@
 When Mark says "lets get started", that is the cue to open these three files
 before doing anything else.
 
-Current shipped version: **2.30** (v2.9 bug-fix pass, v2.10 visual/UX
+Current shipped version: **2.31** (v2.9 bug-fix pass, v2.10 visual/UX
 polish, v2.11 three-tone picker, v2.12 persisted user presets, v2.13 backend
 retry transport, v2.14 hand-testing fixes, v2.15 Explorer drag-and-drop,
 v2.17 readability metrics + shortcuts reference, v2.18 house-style
@@ -18,23 +18,27 @@ type-safety, v2.27 batch output/review parity + modal export + frozen-
 config sync + Word-table refusal, v2.28 change-by-change navigator +
 provenance review-record export, v2.29 preset-pack import/export, v2.30
 low-risk hardening (clipboard-leak/Ollama-detection/HTTP-error-body/
-single-instance-race fixes) plus documentation-drift cleanup — see those
-sections below). All five notes_019 proposals and notes_016's full
-original proposal set shipped by build 2.21, clearing the backlog for the
-first time since notes_001 opened it; v2.22 closed a fresh hand-testing
-defect (notes_020) found immediately after. notes_021's second-generation
-hardening pass is fully shipped except its deliberately-deferred streaming
-half (v2.23–v2.25; see v2.25's own write-up for why streaming stays out of
-scope). notes_022/023/024's follow-on review has now closed all thirteen
-confirmed defects (F1–F13, v2.26–v2.30 above), E2/E3, and notes_022
-proposal B. **v2.31 (E1, selection-scoped processing) is implemented and
-deterministically tested but deliberately not shipped**: a 2026-09-07
-calibration attempt found the configured Claude API key entirely rejected
-(a different failure from the already-known workspace-scoping issue) and
-one real hallucination failure on the Ollama half that did run — see
-v2.31's own section below for the full corpus, results and what's needed
-to finish it. `process_selection()` exists in the source but is not wired
-into the UI.
+single-instance-race fixes) plus documentation-drift cleanup, v2.31
+selection-scoped processing (E1) — see those sections below). All five
+notes_019 proposals and notes_016's full original proposal set shipped by
+build 2.21, clearing the backlog for the first time since notes_001 opened
+it; v2.22 closed a fresh hand-testing defect (notes_020) found immediately
+after. notes_021's second-generation hardening pass is fully shipped
+except its deliberately-deferred streaming half (v2.23–v2.25; see v2.25's
+own write-up for why streaming stays out of scope). notes_022/023/024's
+follow-on review has now closed all thirteen confirmed defects (F1–F13,
+v2.26–v2.30 above), E2/E3, and notes_022 proposal B. **v2.31 (E1,
+selection-scoped processing) is implemented, calibrated and shipped**: an
+initial 2026-09-07 calibration attempt found the configured Claude API key
+entirely rejected (a different failure from the already-known
+workspace-scoping issue) and one real hallucination failure on the Ollama
+half that did run; once the key was fixed, calibration re-ran clean on
+Claude, and notes_026 (Mark's own analysis) drove a prompt-hardening fix
+that resolved the Ollama hallucination too, plus a separately-discovered
+quote-style rule collision. `process_selection()` is now wired into the UI
+(Original pane right-click, Ctrl+Shift+Enter, F1 shortcuts list) — see
+v2.31's own section below for the full corpus, results and the ship
+record.
 
 Scope through v2.3 was drawn from twelve accumulated review notes
 (`notes/01_Active/notes_001.txt` – `notes_012.txt`), written independently by
@@ -2740,7 +2744,7 @@ exists to catch (cf. v2.24's Windows-path-regex incident, same pattern).
 
 ---
 
-## v2.31 — Selection-scoped processing (calibration-gated) — 🚧 implemented; prompt-hardening done and re-calibrated 2026-09-07 (Claude clean 13/13 on the quote fix, 0 DRIFT overall; llama3.2:3b's hallucination fixed too but other fidelity issues remain) — UI wiring pending a ship decision
+## v2.31 — Selection-scoped processing (calibration-gated) ✅ shipped 2026-09-07
 
 **Goal:** notes_023's E1 — explicit selection-scoped processing — the
 highest day-to-day value feature in the review, deliberately shipped last
@@ -2805,17 +2809,25 @@ about.
       repeatable harness (`tests/calibration_e1.py`,
       `tests/calibration_corpus.py`,
       `tests/test_calibration_e1_deterministic.py`) now makes re-running one
-      command. **Not yet shipped**: prompt-hardening + UI wiring remain.
+      command.
 - [x] **Prompt-hardening completed and re-calibrated, 2026-09-07 (evening),
       per notes_026 (Mark's own analysis) — see the calibration subsection
       below.** The instruction-injection hallucination and a separately
       discovered quote-style rule collision are both fixed; Claude is back
-      to a well-confirmed 0 DRIFT. **Still not shipped**: UI wiring remains
-      (step 3/4 of the agreed path below).
-- [x] `ast.parse()` clean; full regression pass (66 tests in
-      `test_calibration_e1_deterministic.py`, the project's committed
-      suite). **Not rebuilt/shipped** — see below for
-      why; `APP_VERSION` stays at `2.30`.
+      to a well-confirmed 0 DRIFT.
+- [x] **UI wiring, version bump and rebuild completed 2026-09-07 (night) —
+      see the "Shipped" subsection below.** All three deliberately-deferred
+      entry points (context-menu item, Ctrl+Shift+Enter, SHORTCUTS row) are
+      wired; `APP_VERSION` and `version_info.txt` both bumped to `2.31`;
+      `ast.parse()` clean; full regression pass (the project's committed
+      66-test suite — see the note below correcting this checklist's
+      earlier "16 test files" language, which was always the prior
+      sessions' scratch-only convention, not a file count that still
+      exists on disk); rebuilt `.exe` confirmed `FileVersion`/
+      `ProductVersion` `2.31.0.0`, smoke-launched cleanly. Mark hand-tested
+      the real `.exe` himself (right-click and Ctrl+Shift+Enter, with and
+      without a selection, exterior text untouched, shortcut listed in the
+      F1 dialog) before authorising ship.
 
 ### Calibration — first attempt, 2026-09-07 (morning): blocked on the API key
 
@@ -3017,12 +3029,55 @@ collision — are fixed and well-verified on Claude specifically (13/13 on
 the quote case, 0 DRIFT on the full corpus). Ollama's remaining weaknesses
 (trailing-comma drop, quote-mark dropping, occasional other fidelity
 DRIFT) are pre-existing, unchanged, and still make `llama3.2:3b`
-unreliable for this feature on its own — the product decision from the
-"Decision" paragraph above is unchanged: ship gated on Claude with
-Ollama flagged as a known per-backend limitation, or wait for the 8B model
-after Mark's RAM upgrade. `process_selection()` remains reverted out of
-the UI; `APP_VERSION` remains `2.30`. Steps (3)/(4) — UI wiring, version
-bump, rebuild — are still Mark's call to make.
+unreliable for this feature on its own — the decision below accepts that
+as a known per-backend limitation rather than blocking on it.
+
+### Shipped, 2026-09-07 (night): UI wiring, version bump, rebuild, Mark's hand-test
+
+**Decision**: ship gated on Claude (the calibrated-clean backend), with
+`llama3.2:3b` documented as a known, fails-safe-but-unreliable per-backend
+limitation to revisit once the 8B model is loadable after Mark's planned
+RAM upgrade — not a blocker for this release.
+
+**Steps (3)/(4) from the "Decision" paragraph above, completed:**
+1. **UI wiring** (`scriptorium.py`) — the three entry points
+   `process_selection()`'s own docstring had flagged as deliberately
+   unwired: a "Process selection" item in the Original pane's right-click
+   menu (`_show_text_context_menu()` gained an `allow_process_selection`
+   parameter, `True` only for the Original pane's menu — confirmed absent
+   from the Revised pane's), enabled only with a non-empty selection;
+   `<Control-Shift-Return>` added to `_bind_shortcuts()`; a
+   `("Ctrl+Shift+Enter", "Process selection")` row added to `SHORTCUTS`
+   (shown in the F1 dialog). `process_selection()`'s own docstring updated
+   to drop the stale "NOT CURRENTLY REACHABLE FROM THE UI" note.
+2. **Version bump, both places**: `scriptorium.py`'s `APP_VERSION` and
+   `version_info.txt`'s `filevers`/`prodvers` tuples and
+   `FileVersion`/`ProductVersion` strings, `2.30` → `2.31`.
+3. **Headless verification**: `ast.parse()` clean on both files; full
+   regression pass (`test_calibration_e1_deterministic.py`, 66 tests —
+   this is the project's *only* currently-existing test file, committed
+   this same day; the "16 test files" language elsewhere in this document
+   describes prior sessions' scratch-only convention, files that were
+   never committed and no longer exist on disk, not a current file count).
+   Source files reconfirmed byte-identical (SHA-256) between what was
+   tested and what PyInstaller actually built from. A scripted hand-test
+   against a real, live `Scriptorium()` instance (genuine
+   `<Control-Shift-Return>` key event through a real `mainloop()`, a real
+   Claude call, a real splice) also passed end-to-end before the rebuild,
+   as an extra check on top of the manual one below.
+4. **Rebuilt**: `dist\Scriptorium.exe` via `scriptorium.spec`, confirmed
+   `FileVersion`/`ProductVersion` = `2.31.0.0` via `Get-Item ...
+   .VersionInfo`, smoke-launched (stayed alive, closed cleanly, the
+   packaged app's own `%LOCALAPPDATA%\Scriptorium\scriptorium_config.json`
+   mtime unchanged throughout).
+5. **Mark hand-tested the real `.exe` himself** — right-click "Process
+   selection" with and without an active selection, Ctrl+Shift+Enter,
+   confirmed the exterior text outside the selection was untouched in the
+   result, and confirmed the shortcut appears in the F1 dialog — then
+   authorised shipping.
+
+`process_selection()` is now reachable from the UI; `APP_VERSION` is
+`2.31`.
 
 ---
 
@@ -3149,7 +3204,7 @@ bump, rebuild — are still Mark's call to make.
 | notes_020 | 2 Sep | Mark | v2.22 (hand-test diagnosis) | Closed by v2.22 |
 | notes_021 | 2 Sep | Codex | v2.21+ (hardening) | Confirmed all five originally-requested areas already shipped by build 2.21; §2.1/2.2/2.4 closed by v2.23; §2.3 closed by v2.23 (conflict feedback) + v2.24 (fidelity audit); §2.5's cancellable retry transport closed by v2.25; §2.5's streaming half explicitly deferred pending two open product decisions (see v2.25) |
 | notes_022 | 3 Sep | Lynne | v2.26+ (forward proposals) | Stale-brief audit confirms v2.11–v2.25 already cover the five original architecture themes (not re-proposed); forward proposals A–E triaged by notes_023/024 — B (preset packs) closed by v2.29 with both flagged bugs fixed (version check, casefolded replace); A/C/D deferred pending F5/live evidence/UI redesign respectively; E (streaming design) folds into notes_021's existing deferred streaming item |
-| notes_023 | 7 Sep | Codex | v2.26+ (state-integrity & feature review) | Thirteen confirmed defects (F1–F13) and three new features (E1–E3), fully read-only and cross-checked; F1/F2/F3/F4 closed by v2.26; F5/F6/F7/F8 closed by v2.27; E2/E3 closed by v2.28; F9–F13 closed by v2.30; E1 implemented as v2.31 but not shipped — calibration blocked (Claude key invalid; one Ollama hallucination failure), see v2.31's own section |
+| notes_023 | 7 Sep | Codex | v2.26+ (state-integrity & feature review) | Thirteen confirmed defects (F1–F13) and three new features (E1–E3), fully read-only and cross-checked; F1/F2/F3/F4 closed by v2.26; F5/F6/F7/F8 closed by v2.27; E2/E3 closed by v2.28; F9–F13 closed by v2.30; E1 closed by v2.31 (calibration cleared on Claude, prompt-hardening fixed the Ollama hallucination), see v2.31's own section |
 | notes_024 | 7 Sep | Mark | v2.26+ (validation) | Independent in-progress diagnosis reaching the same F1/F2/F3/F5 findings as notes_023 before it was read, and separately catching the same notes_022 B/A flaws Codex flagged; its stated implementation order (privacy boundary, history provenance, configuration crash) is exactly what v2.26 closed |
 
 `scriptorium_notes_001.txt`, a near-duplicate of notes_014 written under

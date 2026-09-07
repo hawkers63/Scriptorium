@@ -88,7 +88,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.30"
+APP_VERSION = "2.31"
 
 # A small shared palette (notes_017, v2.10) so the two text panes, the diff
 # tags and the notice banner read as one surface instead of drifting
@@ -2772,6 +2772,7 @@ class TonePickerDialog(ctk.CTkToplevel):
 
 SHORTCUTS = [
     ("Ctrl+Enter", "Process"),
+    ("Ctrl+Shift+Enter", "Process selection"),
     ("Ctrl+I", "Import…"),
     ("Ctrl+S", "Export…"),
     ("Ctrl+Shift+A", "Accept"),
@@ -3589,6 +3590,7 @@ class Scriptorium(ctk.CTk):
         """
         bindings = {
             "<Control-Return>": self.process,
+            "<Control-Shift-Return>": self.process_selection,
             "<Control-i>": self.import_file,
             "<Control-s>": self.export_file,
             "<Control-Shift-A>": self.accept,
@@ -3847,8 +3849,9 @@ class Scriptorium(ctk.CTk):
         self.original_box.edit_modified(False)
         self.original_box.bind(
             "<Button-3>",
-            lambda event: self._show_text_context_menu(event, self.original_box,
-                                                        allow_paste=True))
+            lambda event: self._show_text_context_menu(
+                event, self.original_box, allow_paste=True,
+                allow_process_selection=True))
 
         # Revised: a themed tk.Text so we can apply diff tags reliably.
         revised_frame = ctk.CTkFrame(panes)
@@ -4343,22 +4346,12 @@ class Scriptorium(ctk.CTk):
         called from _on_success()), so the unchanged exterior is guaranteed
         rather than merely requested from the model, on either backend.
 
-        NOT CURRENTLY REACHABLE FROM THE UI. Deliberately -- the note's own
-        gate requires a real live-model calibration pass before this is
-        wired into a context-menu entry or shortcut, and the first attempt
-        (2026-09-07) did not clear that gate: the configured Claude key
-        rejected every call outright (a distinct failure from the already-
-        known workspace-scoping issue), so half the required cross-backend
-        comparison never ran at all, and the Ollama half that did run
-        surfaced one real failure -- a short, imperative-sounding selection
-        ("Review the middle item carefully for errors") produced entirely
-        unrelated hallucinated content rather than a revision of the given
-        text, even though the splice mechanism itself was correct in all
-        twelve cases tested. See ROADMAP.md's v2.31 section for the full
-        corpus, results and next steps. This method, make_processing_scope()
-        and assemble_scoped_revision() are complete and fully tested; only
-        the UI entry points (context-menu item, Ctrl+Shift+Enter) remain
-        deliberately unwired pending a resolved API key and a clean rerun.
+        Reachable via the Original pane's right-click "Process selection"
+        entry and Ctrl+Shift+Enter (v2.31). Wiring was gated on a live-model
+        calibration pass per the note's own discipline -- see ROADMAP.md's
+        v2.31 section for the full corpus, results, the instruction-
+        injection prompt-hardening fix and the quote-style rule collision
+        fix that got Claude to a clean, well-confirmed 0 DRIFT.
         """
         if self.busy:
             return
@@ -4770,13 +4763,17 @@ class Scriptorium(ctk.CTk):
             return
         self._refresh_status(f"exported {os.path.basename(path)}")
 
-    def _show_text_context_menu(self, event, widget, allow_paste):
+    def _show_text_context_menu(self, event, widget, allow_paste,
+                                allow_process_selection=False):
         """Right-click Copy/Paste for the Original and Suggested revision
         panes -- both already support Ctrl+C/Ctrl+V, this just adds the
         menu affordance. Copy is enabled only with an active selection;
         Paste (Original only) is enabled only when the clipboard holds
         text, and lands at the click point rather than the old caret when
-        there is no selection to replace.
+        there is no selection to replace. "Process selection" (Original
+        only, v2.31) mirrors Ctrl+Shift+Enter and is enabled on the same
+        terms process_selection() itself checks -- a non-empty selection
+        and no request already in flight.
         """
         has_selection = bool(widget.tag_ranges("sel"))
         try:
@@ -4792,6 +4789,13 @@ class Scriptorium(ctk.CTk):
             menu.add_command(
                 label="Paste", state="normal" if clip_has_text else "disabled",
                 command=lambda: self._paste_at_click(widget, event))
+        if allow_process_selection:
+            menu.add_separator()
+            menu.add_command(
+                label="Process selection",
+                state=("normal" if has_selection and not self.busy
+                      else "disabled"),
+                command=self.process_selection)
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:

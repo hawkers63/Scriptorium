@@ -6,6 +6,62 @@ Mark saying "lets get started").
 
 ---
 
+## 2026-09-07 (night) — v2.31 shipped: UI wiring, version bump, rebuild, Mark's hand-test
+
+Final step of the day's v2.31 arc. With the precondition re-confirmed
+(`build_system_prompt()` carries the literal-content rule; the last full
+corpus `calibration_e1.py --backend both --repeats 3` run showed Claude at
+27 PASS / 9 REVIEW / 0 DRIFT / 0 FAIL, exterior 36/36 — clean), wired the
+three UI entry points `process_selection()`'s own docstring had flagged as
+deliberately unwired:
+
+- "Process selection" in the Original pane's right-click menu
+  (`_show_text_context_menu()` gained `allow_process_selection`, true only
+  for the Original pane — confirmed absent from the Revised pane's menu),
+  enabled only with a non-empty selection.
+- `<Control-Shift-Return>` bound in `_bind_shortcuts()`.
+- A `SHORTCUTS` row so it shows in the F1 help dialog.
+
+Bumped `APP_VERSION` (`scriptorium.py`) and `filevers`/`prodvers`/
+`FileVersion`/`ProductVersion` (`version_info.txt`) to `2.31` in both
+places, as the file's own comment asks. **Corrected a stale premise along
+the way**: the ask referenced running "all 16 existing test files" for
+regression — checked, and only one test file exists anywhere in the repo,
+`tests/test_calibration_e1_deterministic.py` (66 tests, committed this
+same day). The "16 test files" language in `ROADMAP.md` describes prior
+sessions' scratch-only convention; those files were never committed and
+don't exist on disk. Ran what's actually there instead of fabricating
+compliance with a file count that doesn't exist.
+
+Ran the real regression suite (66/66) plus a scripted hand-test against a
+genuine, live `Scriptorium()` instance — a real `<Control-Shift-Return>`
+key event through a real `mainloop()`, triggering a real Claude call and a
+real splice, not a mock — before rebuilding, as an extra layer under
+Mark's own hand-test. One test-harness lesson worth keeping: driving a
+background-thread-to-UI callback via a hand-rolled `while busy: update();
+sleep()` loop is unreliable (this project's testing-gotchas memory already
+flags cross-thread `after()` dispatch as fragile) — switched to a proper
+`app.after()` poll plus a real `app.mainloop()`/`quit()` pair, which fixed
+it cleanly.
+
+Rebuilt `dist\Scriptorium.exe` via `scriptorium.spec` (source files
+reconfirmed byte-identical, SHA-256, to what was tested), confirmed
+`FileVersion`/`ProductVersion` `2.31.0.0` via `Get-Item ...
+.VersionInfo`, smoke-launched (stayed alive, closed cleanly, the packaged
+app's own `%LOCALAPPDATA%\Scriptorium\scriptorium_config.json` mtime
+unchanged). Stopped there as instructed, handed Mark a hand-test
+checklist rather than marking anything shipped myself.
+
+**Mark hand-tested the real `.exe` and confirmed it worked**, then asked
+for the docs to be wired and the release shipped. `ROADMAP.md`'s v2.31
+section, its acceptance checklist, its top-of-file summary, and the
+notes_023 review-tracking table are all updated to reflect the shipped
+state; this entry closes the loop in the session log. `process_selection()`
+is now reachable from the UI; `APP_VERSION` is `2.31`. Full detail in
+ROADMAP.md's v2.31 section.
+
+---
+
 ## 2026-09-07 (later, evening) — v2.31 prompt-hardening: instruction-injection hallucination fixed, quote-style collision found and fixed, Claude re-confirmed clean
 
 Picked up from notes_026 (Mark's own analysis, reading the previous
