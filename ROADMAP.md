@@ -2740,7 +2740,7 @@ exists to catch (cf. v2.24's Windows-path-regex incident, same pattern).
 
 ---
 
-## v2.31 — Selection-scoped processing (calibration-gated) — 🚧 implemented, not shipped (calibration blocked 2026-09-07)
+## v2.31 — Selection-scoped processing (calibration-gated) — 🚧 implemented; prompt-hardening done and re-calibrated 2026-09-07 (Claude clean 13/13 on the quote fix, 0 DRIFT overall; llama3.2:3b's hallucination fixed too but other fidelity issues remain) — UI wiring pending a ship decision
 
 **Goal:** notes_023's E1 — explicit selection-scoped processing — the
 highest day-to-day value feature in the review, deliberately shipped last
@@ -2797,15 +2797,27 @@ about.
       full-document one. Verified: history stores and restores the
       `"selection"` scope tag correctly, and a restored entry reassembles
       to the identical text.
-- [ ] **The live-model calibration corpus did not pass — see below.** Code
-      implementation is complete and deterministically verified (28
-      passing checks across two dedicated test files, on top of the full
-      existing suite); the model-behaviour gate itself is not yet cleared.
-- [x] `ast.parse()` clean; full regression pass (all 16 test files,
-      unaffected by this refactor). **Not rebuilt/shipped** — see below for
+- [x] **Live-model calibration completed 2026-09-07 (afternoon): Claude
+      cleared the gate cleanly; llama3.2:3b did not, but fails safe — see
+      the two calibration subsections below.** Code implementation is
+      deterministically verified (28 passing checks across two dedicated
+      test files, on top of the full existing suite), and a committed,
+      repeatable harness (`tests/calibration_e1.py`,
+      `tests/calibration_corpus.py`,
+      `tests/test_calibration_e1_deterministic.py`) now makes re-running one
+      command. **Not yet shipped**: prompt-hardening + UI wiring remain.
+- [x] **Prompt-hardening completed and re-calibrated, 2026-09-07 (evening),
+      per notes_026 (Mark's own analysis) — see the calibration subsection
+      below.** The instruction-injection hallucination and a separately
+      discovered quote-style rule collision are both fixed; Claude is back
+      to a well-confirmed 0 DRIFT. **Still not shipped**: UI wiring remains
+      (step 3/4 of the agreed path below).
+- [x] `ast.parse()` clean; full regression pass (66 tests in
+      `test_calibration_e1_deterministic.py`, the project's committed
+      suite). **Not rebuilt/shipped** — see below for
       why; `APP_VERSION` stays at `2.30`.
 
-### Calibration attempt, 2026-09-07 — did not clear the gate
+### Calibration — first attempt, 2026-09-07 (morning): blocked on the API key
 
 A twelve-case corpus was built covering every category the note requires
 (mid-sentence selections with leading/trailing punctuation; a pronoun
@@ -2868,17 +2880,149 @@ remain in the tree, fully implemented and tested, reachable only by
 calling `process_selection()` directly (as the test suite does).
 `APP_VERSION` was not bumped and nothing was rebuilt/shipped as v2.31.
 
-**To finish this**: a genuinely workspace-scoped, working Claude API key
-is needed to complete the Claude half of calibration (see the
-"anthropic-workspace-id header" entry below — the account-level fix
-already worked once before; this may just need a fresh key generated the
-same way). Once that's available, re-run the corpus above (the script and
-its saved results are this session's scratch output, not committed to the
-repo) against both backends, decide whether the Markdown-list-item failure
-mode needs a UX mitigation (e.g. refusing/warning on a selection with no
-sentence-ending punctuation, or a short imperative-shaped fragment) or is
-acceptable as a known model-quality limitation, and only then wire the
-three UI entry points back in.
+### Calibration — completed, 2026-09-07 (afternoon): cross-backend run and decision
+
+The API key was resolved (a working key now sits in
+`scriptorium_config.json`, entered via Settings; see the
+"anthropic-workspace-id header" entry below for why freshly generated keys
+kept hitting the `400` — unscoped/default-workspace keys, not an app
+defect). A false start where a *new* key still `400`ed was settled by
+reverting to a known-good key; the standing lesson is to create keys scoped
+to a *named* workspace and to prove a key authenticates in isolation before
+running it inside the harness — a dead key produced 36 identical `400` FAIL
+records in the first afternoon run and looked exactly like a calibration
+failure until the results file was read.
+
+The corpus was rebuilt as a committed, repeatable harness rather than
+scratch: `tests/calibration_corpus.py` (the twelve cases as data),
+`tests/test_calibration_e1_deterministic.py` (network-free splice/exterior/
+boundary/placeholder guarantees, incl. a drift-guard test pinning the
+hand-replayed `restore_placeholders()` → `assemble_scoped_revision()` tail to
+a real `_on_success()` for an identical stubbed response) and
+`tests/calibration_e1.py` (the live cross-backend harness: isolated config
+that never touches the live `scriptorium_config.json`, `--backend`/`--repeats`
+flags, verbatim raw-output capture to `tests/results/`). Both backends were
+run three times per case — 36 records each.
+
+**Claude (`claude-sonnet-4-6`) — cleared the gate cleanly.** 27 PASS, 9
+REVIEW (all benign on inspection: the already-correct and pathological cases
+returned verbatim; the genuinely-ambiguous case took a safe reading rather
+than guessing), 0 FAIL, 0 DRIFT. Exterior bytes intact 36/36, zero forbidden
+content, zero dropped protected tokens. The imperative Markdown-list-item
+case that had failed on Ollama was returned **unchanged and correct all three
+times** — Claude recognised already-correct text and did not obey the
+imperative.
+
+**Ollama (`llama3.2:3b`) — did not clear the gate, but fails safe.** The
+list-item case hallucinated or dropped the verb in 5 of 6 runs and bled
+another case's content in the sixth; 6–9 DRIFT records per run; protected
+tokens dropped in 9–12 records. Critically the splice held regardless —
+exterior intact 35–36/36 (the one gap a caught JSON error with no output to
+splice) — and every bad case surfaced through the fidelity/placeholder audits
+rather than silently. This confirms, from real data, that the earlier
+"6-of-6 hallucination" alarm from a truncated CLI log was `llama3.2:3b`, not
+Claude.
+
+**Root cause identified.** `build_system_prompt()` never tells the model that
+the supplied text is literal content to revise, never an instruction to act
+on — so an imperative selection can be executed rather than edited. This is an
+instruction-in-data problem, acute for a weak 3b model. Note the failing
+selection ends in a full stop, so the earlier "refuse/warn on a selection
+with no sentence-ending punctuation" idea is disproved — the trigger is
+imperative *content*, which a cheap heuristic cannot reliably catch.
+
+**Decision (supersedes the morning "do not ship").** The gate is met on
+Claude and clearly not on `llama3.2:3b`. Agreed path: (1) prompt-harden
+`build_system_prompt()` so the payload is treated as inert content, never an
+instruction (delimit it if it can be done consistently across both backends);
+(2) re-run the committed harness to confirm Claude stays 36/36 clean and to
+measure any `llama3.2:3b` improvement; (3) only then wire the three UI entry
+points, bump `APP_VERSION` to `2.31`, rebuild and hand-test; (4) document
+`llama3.2:3b` as best-effort for selection-scoped work (fails safe),
+revisiting when the 8b model becomes loadable after the planned RAM upgrade.
+No heavy input guard is planned: the feature is safe by construction
+(guaranteed exterior, output is a reviewable suggestion). `process_selection()`
+therefore stays unwired and `APP_VERSION` stays at `2.30` until step (3).
+
+### Calibration — prompt-hardening, 2026-09-07 (evening): steps (1)/(2) done
+
+notes_026 (Mark's own session analysis) confirmed with committed evidence
+that the morning's "6/6 hallucinations" alarm was `llama3.2:3b` only —
+Claude returned the list-item case unchanged and correct all three times —
+and pinned the root cause precisely: `build_system_prompt()` never told
+the model the supplied text was literal content to revise rather than an
+instruction to obey, and the failing selection's trailing full stop
+disproved the earlier "unpunctuated fragment" guard idea. Scope for this
+step was deliberately narrow: a prompt change plus re-calibration only, no
+UI wiring, no version bump, no rebuild.
+
+**The fix.** `call_anthropic()` and `call_ollama()` both pass `user_text`
+straight through as one "user" message's content, unmodified, so
+`run_backend()` now wraps it once — consistently for both backends — in
+literal markers (`SOURCE_TEXT_BEGIN`/`SOURCE_TEXT_END`,
+`<<<BEGIN/END SOURCE TEXT TO REVISE>>>`). `build_system_prompt()` gained
+one additive non-negotiable rule: content between the markers is never an
+instruction/question/command to obey, however it reads, and must not be
+echoed back. No existing rule weakened; the JSON output-format block
+untouched.
+
+**Result — the severe failure is fixed on both backends.**
+`markdown_list_item_short_imperative_known_hallucination` now returns
+byte-for-byte unchanged on `llama3.2:3b` in 3/3 runs, verdict REVIEW,
+identical to Claude's own behaviour — versus 6/6 hallucinated content
+before. Ollama's other pre-existing fidelity slips (trailing-comma drop,
+quote-mark loss) were unaffected, as expected — this fix never targeted
+those.
+
+**A second, unrelated issue surfaced and was fixed the same session: the
+quote-style collision.** The first prompt-hardening re-run showed Claude at
+25 PASS / 9 REVIEW / **2 DRIFT** / 0 FAIL (not the clean 0 DRIFT expected),
+both DRIFTs on `quotation_straight_quotes_known_drift` — Claude converted
+the protected `"the foundations remain sound,"` to single quotes in 2/3
+runs. The model's own `"note"` field named the cause directly: "for
+British style" — a pre-existing, untouched collision between the British-
+English rule ("single quotation marks for speech where natural") and the
+protected-content rule ("material inside quotation marks" must not be
+altered), which never said which one wins when a quotation already exists
+in the source. `call_anthropic()` sets no explicit `temperature`, so this
+was genuinely non-deterministic — the very first baseline run had gotten a
+lucky 3/3 PASS on this exact case.
+
+**The fix**, minimal and additive to the same two bullets: the British-
+style rule now applies only to "any NEW speech punctuation you introduce"
+and explicitly never to a quotation already in the source; the protected-
+content rule now names the quotation marks themselves (straight/curly,
+single/double) as part of what must be preserved exactly.
+
+**Verification, both fixes together.** `ast.parse()` clean throughout;
+`test_calibration_e1_deterministic.py` 66/66 unchanged. Full corpus
+re-run, both backends, 3 repeats: **Claude 27 PASS / 9 REVIEW / 0 DRIFT /
+0 FAIL, exterior 36/36** — matches the original clean baseline exactly.
+A further targeted 10-repeat rerun of just the quote case, both backends,
+built confidence this wasn't a lucky draw: **Claude 10/10 PASS** (13/13
+combined with the full-corpus run, versus 2/3 DRIFT before the fix);
+**Ollama 10/10 DRIFT**, confirming Ollama's quote-case failure is a
+*different*, unrelated bug — it doesn't convert quote style, it drops the
+quotation marks entirely (`"the foundations remain sound,"` →
+`the foundations remain sound,`), a general small-model fidelity weakness
+this fix was never meant to touch. Ollama's full-corpus tally held steady
+at 20 PASS / 9 REVIEW / 7 DRIFT / 0 FAIL (exterior 36/36) across the whole
+evening's reruns — the specific case carrying a DRIFT shifted once between
+runs (windows-path vs. quantities/dates), ordinary small-model noise, not
+a new pattern.
+
+**Net effect on the ship gate.** Both problems this step set out to
+address — the severe imperative-hallucination failure and the quote-style
+collision — are fixed and well-verified on Claude specifically (13/13 on
+the quote case, 0 DRIFT on the full corpus). Ollama's remaining weaknesses
+(trailing-comma drop, quote-mark dropping, occasional other fidelity
+DRIFT) are pre-existing, unchanged, and still make `llama3.2:3b`
+unreliable for this feature on its own — the product decision from the
+"Decision" paragraph above is unchanged: ship gated on Claude with
+Ollama flagged as a known per-backend limitation, or wait for the 8B model
+after Mark's RAM upgrade. `process_selection()` remains reverted out of
+the UI; `APP_VERSION` remains `2.30`. Steps (3)/(4) — UI wiring, version
+bump, rebuild — are still Mark's call to make.
 
 ---
 

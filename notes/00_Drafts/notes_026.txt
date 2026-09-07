@@ -1,0 +1,19 @@
+**Date: 7 September 2026**  
+**Session Analysis of Results**  
+**Author: Mark**
+
+Two distinct executions of the Claude model were conducted, which are significant in understanding the discrepancies observed. The first execution, which took place at 13:35:10, resulted in a failure across all 36 records due to a 400 error code. This failure was traced back to the new key's inability to authenticate, thereby preventing any interaction with the model. Thus, the recorded failures can be attributed to authentication issues rather than any inherent fault within the model itself. In contrast, the subsequent execution of Claude at 13:53:28, after reverting to the operational key, produced accurate results:
+
+- **Claude (claude-sonnet-4-6)**: 27 records passed, 9 required review, with no failures and no drift detected. The external byte count remained intact at 36/36, with no instances of forbidden content and no protected tokens omitted. I undertook a comprehensive review of each of the 9 records flagged for further examination; all were deemed benign. These records included those that were "already correct" and pathological cases returned verbatim, while the ambiguous case was interpreted sensibly and safely, rather than through erratic guessing. The review flag serves to indicate cases that require additional scrutiny rather than signalling a fault.
+
+Moreover, concerning the item that raised concerns — specifically the instruction to "review the middle item carefully for errors" — Claude returned it unchanged and correct on all three occasions. It accurately recognised the already correct text and did not execute the imperative. Consequently, the claim of "6 out of 6 hallucinations" cannot be attributed to Claude.
+
+This misleading assertion was linked to Ollama, specifically the llama3.2:3b model (as opposed to the 8b model configured in Settings — the 3b model is the only one currently loadable until my 8GB RAM upgrade). In this scenario, the 3b model hallucinated or omitted the verb in 5 out of 6 runs; in the sixth instance, it introduced text from another case, necessitating a fidelity audit. On average, the 3b model recorded between 6 to 9 drift records per execution and omitted protected tokens in 9 to 12 records, rendering it unreliable for this feature.
+
+Nevertheless, it is important to note that even when the 3b model hallucinated internal content, the external outputs remained intact — achieving 35 out of 36 correct outputs, with the sole exception being a captured JSON error that resulted in no output for splicing. The splice mechanism operates independently of the backend and executed its task effectively. The erroneous output from Ollama was presented as a clearly incorrect, reviewable suggestion, while the remainder of the document remained unaffected, instigating audits for the most problematic cases. The model fails audibly and safely, never silently.
+
+Additionally, I would like to rectify a previous statement: my suggestion concerning the "short fragment with no terminal punctuation" guard was incorrect — the failing selection did indeed contain a full stop. The trigger pertains to imperative content rather than missing punctuation, which cannot be reliably detected through a simple heuristic.
+
+**Recommendations for UI Integration**
+
+The threshold is met on Claude, but not on llama3.2:3b. Therefore, the pertinent question arises as to whether a weak, soon-to-be-upgraded local backend should impede a feature that functions correctly on my primary backend and is inherently safe. My conclusion is negative — proceed with the integration, implementing an initial code change alongside comprehensive documentation.

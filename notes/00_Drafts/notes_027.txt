@@ -1,0 +1,764 @@
+Date: 7 September 2026
+Review: UI/UX and visual design audit for Scriptorium 2.30
+Author: Codex
+Scope: Read-only review of C:\Scriptorium\scriptorium.py, with proposal snippets only.
+
+1. UI/UX Audit & Visual Hierarchy Breakdown
+
+Overall state
+
+Scriptorium already has a sound Windows 11 dark-mode foundation: CustomTkinter dark mode, the blue default accent, a dual-pane centre, modal settings, a compact tone picker, a two-row action area, and a status bar. The most important recent repairs are visible in the current code: Original and Revised now share the same dark surface constants, the Revised pane uses tk.Text specifically for reliable diff tags, the notice banner is a real frame with a Dismiss button, Settings has a scrollable body and a fixed bottom button row, and the Processing state includes both disabled controls and an indeterminate progress bar.
+
+The remaining visual issue is not that the interface lacks features. It is that the hierarchy is still quite flat: toolbar controls, review actions, secondary file operations, status text, and review notices all compete at similar visual weight. At 1180x760 this is serviceable; at the 920px minimum it risks looking compressed and slightly ad hoc, especially because row packing uses fixed-width buttons and side packing rather than responsive grid allocation.
+
+Dual-pane layout and typography
+
+Current implementation:
+- `PANE_BG = "#1e1e1e"`, `PANE_FG = "#e6e6e6"`, `PANE_FONT = ("Segoe UI", 13)`.
+- `self.original_box` is a `ctk.CTkTextbox` with matching foreground/background/font.
+- `self.revised_box` is a `tk.Text` with `padx=12`, `pady=12`, `spacing1=4`, `spacing3=6`.
+- `self.original_box` does not currently receive explicit inner padding or paragraph spacing in the same way as `self.revised_box`.
+
+Assessment:
+The panes are visually closer than earlier versions, but not yet fully matched. Tk text widgets and CTk textboxes render internal padding and line metrics differently unless explicitly harmonised. Revised currently has clear 12px internal padding and paragraph spacing, while Original relies on CTk defaults. That can produce a subtle but noticeable mismatch: the left text may begin at a slightly different x/y offset than the right text, and paragraph rhythm can differ between editing and review.
+
+Recommendation:
+Use named pane metrics and configure both panes around the same cadence:
+- Outer pane frame padding: 12px left/right, 10px top.
+- Inter-pane gutter: 12px total, 6px each side.
+- Header row bottom gap: 6px.
+- Text inset: 14px horizontal, 12px vertical.
+- Font: Segoe UI 13 for text at 100%, with a future option to let CTk scaling handle DPI instead of viewport-based font changes.
+- Paragraph rhythm: 4px before and 7px after paragraphs for both text widgets where supported.
+
+Visual diff highlighting and contrast
+
+Current implementation:
+- `DIFF_INS_FG = "#5ee0c8"` gives approximately 10.3:1 contrast against `#1e1e1e`.
+- `DIFF_DEL_FG = "#ffa0a8"` gives approximately 8.61:1 contrast against `#1e1e1e`.
+- Insert and delete tags use both foreground and background fill, which is the correct direction for scanning long prose.
+
+Assessment:
+The current colours exceed WCAG AA for normal text. The issue is less strict contrast and more semantic separation. The insert colour is cool/green and attractive, but quite saturated. The delete colour is readable, but overstrike plus a filled red background can become noisy in dense replacements. In Inline view, replacements show deleted source immediately followed by inserted wording, so the system needs enough contrast to distinguish state while preserving a calm reading experience.
+
+Recommendation:
+Keep word-level diff as the default because it is aligned with prose review. Character-level diffs should be reserved for an optional micro-diff mode later, since they often overemphasise punctuation and morphology in natural language. Improve the current palette by using slightly softer foregrounds with darker, lower-chroma fills:
+- Insert foreground: `#7ee0c3` against `#1d1e1e`, approximately 10.61:1.
+- Insert background: `#12342d`.
+- Delete foreground: `#ffb3ba` against `#1d1e1e`, approximately 9.87:1.
+- Delete background: `#3a1d24`.
+- Active change outline: `#d6e4ff`, using underline plus a subtle background lift rather than underline only.
+
+Clean view:
+Clean view should remain visually quiet. It should show the final text with inserted/replaced revised wording marked as "changed", but pure deletions have no visible span. This is conceptually correct, but the change navigator may land on a zero-width range for pure deletions. The status bar should explicitly say "deletion only at cursor" or the navigator label should show "deleted text hidden in Clean view" when the active range is zero-width.
+
+Inline view:
+Inline view is best for review and audit. Deleted text should remain red with overstrike, but a small x-offset or spacing rule is not available in tk.Text. The most practical improvement is to render replacements as:
+deleted text tagged `deleted`, then inserted text tagged `changed`, with no extra punctuation inserted by the renderer. Preserve this behaviour, but make the active replacement easier to find by adding a second tag such as `active_change` with a background/underline combination.
+
+Toolbar and action bar harmony
+
+Current implementation:
+- `_build_toolbar()` uses one grid row with Mode, Strength, Role, Tone and Preset.
+- Settings has already been moved out of the toolbar into row 2 of the bottom action area.
+- `_build_actionbar()` uses two packed rows. Row 1 contains Process, Softer, Stronger, Accept, Reject, Copy revision, Copy summary, Undo, Clear, Import, Export. Row 2 contains Paste, Copy, History, Copy rich diff, Export diff, Settings.
+
+Assessment:
+The current split solves the most urgent overlap, but the two rows still mix workflow hierarchy. The first row has the right priority in spirit: generate/review actions first, file operations right. The second row works as utility space. At the 920px minimum, however, fixed widths and side packing can still become brittle if font scaling, translated text, or Windows DPI changes expand widget requests. The row also uses text-only controls where icon+text or short labels would improve scanning.
+
+Recommendation:
+Keep two rows, but make them grid-based with explicit groups:
+- Row 1 left group: Process, Softer, Stronger.
+- Row 1 centre group: Accept, Reject.
+- Row 1 right group: Clear, Import, Export.
+- Row 2 left group: Paste, Copy original, History.
+- Row 2 centre group: Copy revision, Copy summary, Copy rich diff, Export diff.
+- Row 2 right group: Settings.
+
+At 920px width, hide no controls; instead shorten labels:
+- `Copy original` can display as `Copy`.
+- `Copy revision` can display as `Copy revision`.
+- `Copy summary` can display as `Summary`.
+- `Copy rich diff` can display as `Rich diff`.
+- `Export diff...` can display as `Export diff...`.
+
+Recommended button widths:
+- Primary: Process 112px, Accept 104px.
+- Nudge controls: 82px each.
+- Destructive/reject neutral: 86px.
+- Clipboard/file utilities: 88-118px depending label.
+- Settings: 104px.
+- Horizontal gap inside groups: 6px.
+- Horizontal gap between groups: 14px.
+- Action bar row vertical gap: 6px.
+
+Interactive states and micro-feedback
+
+Current implementation:
+- `_set_busy()` disables Process, Accept, Softer and Stronger.
+- It packs a 4px indeterminate progress bar and pulses the Process button between `BUSY_BLUE` and `BUSY_BLUE_DARK` every 400ms.
+
+Assessment:
+This is a good base. The motion is meaningful because it shows the app is alive during a backend request. The main risk is that the busy state has only one animated element and the status label may remain text-heavy. Users benefit from a short phase label: preparing request, waiting for backend, retrying, rendering revision.
+
+Recommendation:
+Add a compact busy/status strip style:
+- Progress height: 4px, unchanged.
+- Progress colour: CTk default blue or `#2f81c7`.
+- Status text while busy: begin with `Working...` followed by a concise phase.
+- Pulse interval: 500-650ms instead of 400ms for a calmer Windows 11 feel.
+- Disable only controls that can corrupt request state. Continue allowing Copy Original and History if safe; keep Process/Accept/Nudge disabled.
+
+Ambiguity and notice banner
+
+Current implementation:
+- Notice banner uses `AMBER_BG = "#43361f"`, `AMBER_FG = "#f5d589"`, `AMBER_RULE = "#c9a227"`.
+- It appears above the status bar, with title `Review notices (not silently changed)`, bullet lines, and a `Dismiss` button.
+
+Assessment:
+This is directionally strong. The content is honest and safety-minded. The current amber background has enough contrast, but the banner can still read as a dense warning block. The Dismiss affordance is text-only and the title/body are combined into one label, so hierarchy is limited.
+
+Recommendation:
+Split title and body into two labels and right-align a compact close button. Use a darker background with a brighter rule:
+- Notice background: `#27200f`.
+- Notice border/rule: `#d6a529`.
+- Notice title: `#ffe3a3`.
+- Notice body: `#f4d06f`.
+- Dismiss button: width 32, text `X`, `fg_color="#3a3324"`, `hover_color="#4a402c"`.
+- Corner radius: 6px.
+- Padding: outer x 12, y 6; body x 12, y 8.
+
+Dialog UX polish
+
+SettingsDialog:
+Current Settings ergonomics are fairly good: modal grab, Escape binding, centred over parent after idle, resizable vertically, scrollable content, fixed Save/Cancel row. Remaining polish opportunities are mostly focus and form alignment:
+- Set initial focus to the backend segmented control if no backend is selected; otherwise to the first enabled field.
+- Bind Return in the API key/model entries to Save where appropriate.
+- Make the body content width responsive within the dialog rather than relying on fixed 480px entry widths.
+- Align checkbox text with multi-line wrapping to avoid long labels clipping at 150-200% DPI.
+- Consider `self.wait_visibility()` before `grab_set()` to reduce rare focus edge cases on Windows.
+
+TonePickerDialog:
+The tone picker is compact and understandable. It already gives non-blocking feedback for selection limits and conflicts. Improvements:
+- Make it vertically resizable with a minimum of 420x420; keep current 420x540 default.
+- Put Apply/Cancel in a fixed bottom row, outside the scrollable tone list.
+- Set focus to the first selected tone or Apply button after construction.
+- Add Return binding to Apply and Escape to Cancel/destroy.
+- Use a title label, supporting line, scroll list, status, and fixed action row with consistent 16-18px margins.
+
+2. Proposed Visual Improvements
+
+Shared visual constants
+
+Add these constants near the existing palette block below `APP_VERSION = "2.30"`:
+
+```
+SURFACE_0 = "#18191a"
+SURFACE_1 = "#1d1e1e"
+SURFACE_2 = "#242628"
+SURFACE_3 = "#2d3033"
+TEXT_PRIMARY = "#eceff3"
+TEXT_SECONDARY = "#aeb6c2"
+TEXT_MUTED = "#7f8792"
+ACCENT_BLUE = "#1f6aa5"
+ACCENT_BLUE_HOVER = "#2f81c7"
+SUCCESS_FG = "#7ee0c3"
+SUCCESS_BG = "#12342d"
+DANGER_FG = "#ffb3ba"
+DANGER_BG = "#3a1d24"
+NOTICE_BG = "#27200f"
+NOTICE_RULE = "#d6a529"
+NOTICE_TITLE = "#ffe3a3"
+NOTICE_BODY = "#f4d06f"
+PANE_INSET_X = 14
+PANE_INSET_Y = 12
+PANE_SPACING_BEFORE = 4
+PANE_SPACING_AFTER = 7
+```
+
+Then either map the existing constants onto these names for a low-risk migration:
+
+```
+PANE_BG = SURFACE_1
+PANE_FG = TEXT_PRIMARY
+DIFF_INS_FG = SUCCESS_FG
+DIFF_INS_BG = SUCCESS_BG
+DIFF_DEL_FG = DANGER_FG
+DIFF_DEL_BG = DANGER_BG
+AMBER_BG = NOTICE_BG
+AMBER_FG = NOTICE_BODY
+AMBER_RULE = NOTICE_RULE
+BUSY_BLUE = ACCENT_BLUE
+BUSY_BLUE_DARK = "#15517d"
+```
+
+or keep the current public constants and adjust their values only. The second path is the smallest implementation change.
+
+Pane rhythm
+
+Use these settings in `_build_panes()`:
+- `panes.pack(fill="both", expand=True, padx=12, pady=(10, 0))`, unchanged.
+- Header labels: `font=ctk.CTkFont(size=12, weight="bold")`, `text_color=TEXT_SECONDARY`.
+- Original textbox: `border_width=1`, `border_color=SURFACE_3`, `corner_radius=6`.
+- Revised frame: `fg_color=SURFACE_1`, `border_width=1`, `border_color=SURFACE_3`, `corner_radius=6`.
+- Revised tk.Text: `padx=PANE_INSET_X`, `pady=PANE_INSET_Y`, `spacing1=PANE_SPACING_BEFORE`, `spacing3=PANE_SPACING_AFTER`.
+
+Because `CTkTextbox` wraps a Tk text widget internally, apply matching spacing after construction if the private child is available. This should be guarded because CustomTkinter internals can change.
+
+Action bar
+
+Use a subtle band to separate action controls from the writing surface:
+- `_bottom_frame`: `fg_color=SURFACE_0`.
+- Row frames: `fg_color="transparent"`.
+- Top padding: 8px, bottom padding: 8px.
+- Status label: `text_color=TEXT_SECONDARY`, font 11 or 12.
+
+Button groups should use transparent CTkFrame containers. This makes the grouping visible through spacing rather than extra boxes, keeping the interface quiet.
+
+Status and progress
+
+Use a single-line status with lower contrast and avoid overloading it while busy. Suggested message order:
+- Normal: `Claude - claude-sonnet-4-6 | text is sent to Anthropic | 430 words, 2,710 characters | Standard - ~3 min read`.
+- Busy: `Working... waiting for Claude | 430 words, 2,710 characters`.
+- Done: append the short result note at the end for one refresh cycle.
+
+The existing British English terms are mostly correct. Preserve `summarise`, `minimised`, `colour`, `behaviour`, and avoid introducing US forms such as `color`, `organize`, `summarize`, or `dialog`.
+
+Dialogs
+
+SettingsDialog dimensions:
+- Default: 560x660.
+- Minimum: 500x460.
+- Vertical resizing: enabled.
+- Horizontal resizing: optional; if disabled, widen to 560 to give checkbox copy enough room at high DPI.
+- Body margin: 18px.
+- Field width: fill x rather than fixed 480px where practical.
+
+TonePickerDialog dimensions:
+- Default: 440x560.
+- Minimum: 400x420.
+- Vertical resizing: enabled.
+- Bottom button row fixed outside tone scroll area.
+
+3. CustomTkinter Code Snippets
+
+Snippet A: safer palette constants
+
+Insert below the existing `APP_VERSION = "2.30"` line, replacing the current palette constants or mapping existing names to these values.
+
+```
+# Shared Windows 11 dark palette for panes, review states and modal notices.
+SURFACE_0 = "#18191a"
+SURFACE_1 = "#1d1e1e"
+SURFACE_2 = "#242628"
+SURFACE_3 = "#2d3033"
+TEXT_PRIMARY = "#eceff3"
+TEXT_SECONDARY = "#aeb6c2"
+TEXT_MUTED = "#7f8792"
+
+ACCENT_BLUE = "#1f6aa5"
+ACCENT_BLUE_HOVER = "#2f81c7"
+
+PANE_BG = SURFACE_1
+PANE_FG = TEXT_PRIMARY
+PANE_FONT = ("Segoe UI", 13)
+PANE_INSET_X = 14
+PANE_INSET_Y = 12
+PANE_SPACING_BEFORE = 4
+PANE_SPACING_AFTER = 7
+
+DIFF_INS_FG = "#7ee0c3"
+DIFF_INS_BG = "#12342d"
+DIFF_DEL_FG = "#ffb3ba"
+DIFF_DEL_BG = "#3a1d24"
+DIFF_ACTIVE_BG = "#26384a"
+DIFF_ACTIVE_FG = "#d6e4ff"
+
+AMBER_BG = "#27200f"
+AMBER_FG = "#f4d06f"
+AMBER_TITLE = "#ffe3a3"
+AMBER_RULE = "#d6a529"
+
+BUSY_BLUE = ACCENT_BLUE
+BUSY_BLUE_DARK = "#15517d"
+```
+
+Snippet B: harmonise CTkTextbox internal text metrics
+
+Insert this helper near `bind_dialog_chrome()` and `position_over_parent()`:
+
+```
+def configure_ctk_textbox_text_metrics(textbox):
+    """Best-effort alignment of CTkTextbox internals with the tk.Text review pane."""
+    try:
+        inner = textbox._textbox
+    except AttributeError:
+        return
+    inner.configure(
+        padx=PANE_INSET_X,
+        pady=PANE_INSET_Y,
+        spacing1=PANE_SPACING_BEFORE,
+        spacing3=PANE_SPACING_AFTER,
+        insertbackground=PANE_FG,
+    )
+```
+
+Then call it immediately after `self.original_box.grid(...)` in `Scriptorium._build_panes()`:
+
+```
+configure_ctk_textbox_text_metrics(self.original_box)
+```
+
+Snippet C: revised pane frame and tag polish
+
+Replace the current Revised frame and `tk.Text` construction block inside `Scriptorium._build_panes()` with this shape:
+
+```
+revised_frame = ctk.CTkFrame(
+    panes,
+    fg_color=PANE_BG,
+    border_width=1,
+    border_color=SURFACE_3,
+    corner_radius=6,
+)
+revised_frame.grid(row=1, column=1, sticky="nsew", padx=(6, 0), pady=4)
+revised_frame.grid_rowconfigure(0, weight=1)
+revised_frame.grid_columnconfigure(0, weight=1)
+
+self.revised_box = tk.Text(
+    revised_frame,
+    wrap="word",
+    bd=0,
+    padx=PANE_INSET_X,
+    pady=PANE_INSET_Y,
+    font=PANE_FONT,
+    background=PANE_BG,
+    foreground=PANE_FG,
+    insertbackground=PANE_FG,
+    relief="flat",
+    state="disabled",
+    highlightthickness=0,
+    spacing1=PANE_SPACING_BEFORE,
+    spacing3=PANE_SPACING_AFTER,
+)
+self.revised_box.grid(row=0, column=0, sticky="nsew", padx=(1, 0), pady=1)
+```
+
+Update the diff tag configuration in the same method:
+
+```
+self.revised_box.tag_config(
+    "changed",
+    foreground=DIFF_INS_FG,
+    background=DIFF_INS_BG,
+)
+self.revised_box.tag_config(
+    "deleted",
+    foreground=DIFF_DEL_FG,
+    background=DIFF_DEL_BG,
+    overstrike=1,
+)
+self.revised_box.tag_config(
+    "active_change",
+    foreground=DIFF_ACTIVE_FG,
+    background=DIFF_ACTIVE_BG,
+    underline=True,
+)
+```
+
+Snippet D: split notice banner title/body and compact dismissal
+
+Replace the current notice banner construction at the end of `Scriptorium._build_panes()`:
+
+```
+self.notice_frame = ctk.CTkFrame(
+    self._bottom_frame,
+    fg_color=AMBER_BG,
+    corner_radius=6,
+)
+rule = ctk.CTkFrame(
+    self.notice_frame,
+    width=4,
+    fg_color=AMBER_RULE,
+    corner_radius=0,
+)
+rule.pack(side="left", fill="y")
+
+notice_text = ctk.CTkFrame(self.notice_frame, fg_color="transparent")
+notice_text.pack(side="left", fill="x", expand=True, padx=10, pady=8)
+
+self.notice_title_label = ctk.CTkLabel(
+    notice_text,
+    text="",
+    justify="left",
+    anchor="w",
+    text_color=AMBER_TITLE,
+    font=ctk.CTkFont(size=12, weight="bold"),
+)
+self.notice_title_label.pack(fill="x", anchor="w")
+
+self.notice_label = ctk.CTkLabel(
+    notice_text,
+    text="",
+    justify="left",
+    anchor="w",
+    text_color=AMBER_FG,
+    font=ctk.CTkFont(size=12),
+    wraplength=900,
+)
+self.notice_label.pack(fill="x", anchor="w", pady=(2, 0))
+
+ctk.CTkButton(
+    self.notice_frame,
+    text="X",
+    width=32,
+    fg_color="#3a3324",
+    hover_color="#4a402c",
+    command=self.notice_frame.pack_forget,
+).pack(side="right", padx=(0, 8), pady=8)
+```
+
+Then update `_show_ambiguities()`:
+
+```
+def _show_ambiguities(self, items):
+    """Show model ambiguities and deterministic review notices, or hide them."""
+    if items:
+        self.notice_title_label.configure(
+            text="Review notices - not silently changed")
+        self.notice_label.configure(text="\n".join(f"* {a}" for a in items))
+        if not self.notice_frame.winfo_ismapped():
+            self.notice_frame.pack(fill="x", padx=12, pady=(0, 4),
+                                   before=self.status)
+    else:
+        self.notice_frame.pack_forget()
+```
+
+Note: use `*` rather than the bullet character if strict ASCII is preferred in source comments and strings. If the project accepts the existing bullet character, retain it for visual polish.
+
+Snippet E: grid-based action rows with stable groups
+
+This is a larger but still local replacement for the interior of `_build_actionbar()`. It keeps the same commands and widget references that later methods depend on (`self.process_btn`, `self.softer_btn`, `self.stronger_btn`, `self.accept_btn`, `self.progress`).
+
+```
+def _pack_button_group(self, row, column, sticky="w"):
+    group = ctk.CTkFrame(row, fg_color="transparent")
+    group.grid(row=0, column=column, sticky=sticky, padx=0)
+    return group
+```
+
+Insert the helper inside class `Scriptorium`, near `_build_actionbar()`.
+
+Inside `_build_actionbar()`, after creating `self._bottom_frame`, replace the two packed button rows with:
+
+```
+bar = ctk.CTkFrame(self._bottom_frame, fg_color="transparent")
+bar.pack(fill="x", padx=12, pady=(8, 4))
+bar.grid_columnconfigure(1, weight=1)
+
+left = self._pack_button_group(bar, 0, "w")
+centre = self._pack_button_group(bar, 1, "w")
+right = self._pack_button_group(bar, 2, "e")
+
+self.process_btn = ctk.CTkButton(left, text="Process", width=112,
+                                 command=self.process)
+self.process_btn.pack(side="left")
+self.softer_btn = ctk.CTkButton(
+    left, text="- Softer", width=82, fg_color="gray30",
+    command=lambda: self._nudge_strength(-1))
+self.softer_btn.pack(side="left", padx=(8, 4))
+self.stronger_btn = ctk.CTkButton(
+    left, text="+ Stronger", width=92, fg_color="gray30",
+    command=lambda: self._nudge_strength(1))
+self.stronger_btn.pack(side="left", padx=4)
+
+self.accept_btn = ctk.CTkButton(
+    centre, text="Accept", width=104, fg_color="#2f7d4f",
+    hover_color="#276a43", command=self.accept)
+self.accept_btn.pack(side="left", padx=(14, 4))
+ctk.CTkButton(centre, text="Reject", width=86, fg_color="gray30",
+              command=self.reject).pack(side="left", padx=4)
+
+ctk.CTkButton(right, text="Export...", width=90, fg_color="gray30",
+              command=self.export_file).pack(side="right")
+ctk.CTkButton(right, text="Import...", width=90, fg_color="gray30",
+              command=self.import_file).pack(side="right", padx=4)
+ctk.CTkButton(right, text="Clear", width=80, fg_color="gray30",
+              command=self.clear_all).pack(side="right", padx=4)
+
+bar2 = ctk.CTkFrame(self._bottom_frame, fg_color="transparent")
+bar2.pack(fill="x", padx=12, pady=(0, 8))
+bar2.grid_columnconfigure(1, weight=1)
+
+left2 = self._pack_button_group(bar2, 0, "w")
+centre2 = self._pack_button_group(bar2, 1, "w")
+right2 = self._pack_button_group(bar2, 2, "e")
+
+ctk.CTkButton(left2, text="Paste", width=80, fg_color="gray30",
+              command=self.paste_original).pack(side="left")
+ctk.CTkButton(left2, text="Copy", width=80, fg_color="gray30",
+              command=self.copy_original).pack(side="left", padx=4)
+ctk.CTkButton(left2, text="History", width=84, fg_color="gray30",
+              command=self._open_history).pack(side="left", padx=4)
+
+ctk.CTkButton(centre2, text="Copy revision", width=116, fg_color="gray30",
+              command=self.copy_revision).pack(side="left", padx=(14, 4))
+ctk.CTkButton(centre2, text="Summary", width=90, fg_color="gray30",
+              command=self.copy_change_summary).pack(side="left", padx=4)
+ctk.CTkButton(centre2, text="Rich diff", width=92, fg_color="gray30",
+              command=self.copy_rich_diff).pack(side="left", padx=4)
+ctk.CTkButton(centre2, text="Export diff...", width=108, fg_color="gray30",
+              command=self.export_diff_file).pack(side="left", padx=4)
+
+ctk.CTkButton(right2, text="Settings", width=104, fg_color="gray30",
+              command=self.open_settings).pack(side="right")
+```
+
+The ellipsis in the source can remain the existing single ellipsis character if the project wants typographic polish, but `...` is safer for ASCII-only consistency.
+
+Snippet F: calmer busy pulse
+
+Update `_set_busy()` and `_pulse_process()`:
+
+```
+def _set_busy(self, flag):
+    """Disable request-changing controls while a backend call is running."""
+    self.busy = flag
+    self.process_btn.configure(
+        text="Working..." if flag else "Process",
+        state="disabled" if flag else "normal")
+    self.accept_btn.configure(state="disabled" if flag else "normal")
+    self.softer_btn.configure(state="disabled" if flag else "normal")
+    self.stronger_btn.configure(state="disabled" if flag else "normal")
+
+    if flag:
+        self.progress.pack(fill="x", padx=12, pady=(0, 4),
+                           before=self.status)
+        self.progress.start()
+        self._pulse_job = self.after(600, self._pulse_process)
+    else:
+        if self._pulse_job is not None:
+            self.after_cancel(self._pulse_job)
+            self._pulse_job = None
+        self.process_btn.configure(fg_color=["#3a7ebf", BUSY_BLUE])
+        self.progress.stop()
+        self.progress.pack_forget()
+
+def _pulse_process(self):
+    """Alternate the Process button blue so a long call still feels alive."""
+    if not self.busy or not self.winfo_exists():
+        return
+    current = self.process_btn.cget("fg_color")
+    dark = current[1] if isinstance(current, (list, tuple)) else current
+    next_colour = BUSY_BLUE_DARK if dark != BUSY_BLUE_DARK else BUSY_BLUE
+    self.process_btn.configure(fg_color=next_colour)
+    self._pulse_job = self.after(600, self._pulse_process)
+```
+
+Snippet G: SettingsDialog focus and safer modal grab
+
+In `SettingsDialog.__init__()`, after widget construction and after `self._refresh_state()`, add:
+
+```
+self.after_idle(self._focus_initial_control)
+```
+
+Then add this method to `SettingsDialog`:
+
+```
+def _focus_initial_control(self):
+    """Place keyboard focus on the first useful Settings control."""
+    if not self.winfo_exists():
+        return
+    backend = BACKEND_IDS.get(self.backend_var.get())
+    try:
+        if backend == "anthropic":
+            self.key_entry.focus_set()
+        elif backend == "ollama":
+            self.ollama_combo.focus_set()
+        else:
+            self.save_btn.focus_set()
+    except tk.TclError:
+        pass
+```
+
+For a more robust modal sequence on Windows, the constructor can also be changed from immediate `grab_set()` to:
+
+```
+self.transient(master)
+self.after_idle(self.grab_set)
+```
+
+This avoids grabbing before the top-level is visible, while keeping the same modal behaviour.
+
+Snippet H: TonePickerDialog resizable polish
+
+In `TonePickerDialog.__init__()`, change:
+
+```
+self.geometry("420x540")
+self.resizable(False, False)
+```
+
+to:
+
+```
+self.geometry("440x560")
+self.minsize(400, 420)
+self.resizable(False, True)
+```
+
+After the Apply button is created, add:
+
+```
+self.bind("<Return>", lambda _event: self._apply())
+self.after_idle(self._focus_initial_control)
+```
+
+Then add:
+
+```
+def _focus_initial_control(self):
+    """Focus the selected tone list first, falling back to Apply."""
+    if not self.winfo_exists():
+        return
+    try:
+        for tone in self.selected_order:
+            variable = self.variables.get(tone)
+            if variable is not None:
+                self.focus_set()
+                return
+        self.focus_set()
+    except tk.TclError:
+        pass
+```
+
+This is intentionally conservative. A richer version would retain references to each checkbox and focus the first selected checkbox directly, but that requires a slightly wider refactor of the checkbox creation loop.
+
+4. Insertion Matrix
+
+Shared constants
+
+Target:
+- File: `C:\Scriptorium\scriptorium.py`
+- Location: configuration palette block below `APP_VERSION = "2.30"`
+- Current references: `PANE_BG`, `PANE_FG`, `PANE_FONT`, `DIFF_INS_FG`, `DIFF_INS_BG`, `DIFF_DEL_FG`, `DIFF_DEL_BG`, `AMBER_BG`, `AMBER_FG`, `AMBER_RULE`, `BUSY_BLUE`, `BUSY_BLUE_DARK`
+- Change type: low-risk value replacement or alias expansion
+- User-facing result: calmer surfaces, clearer diff contrast, more legible notice banner
+
+Pane typography helper
+
+Target:
+- Class/function area: shared modal/dialog helpers
+- Insert below: `def position_over_parent(...)` or just above the Tone picker dialog section
+- New function: `configure_ctk_textbox_text_metrics(textbox)`
+- Call site: `Scriptorium._build_panes()`, immediately after `self.original_box.grid(...)`
+- Widget reference: `self.original_box`
+- Change type: guarded visual alignment
+- Risk: depends on CustomTkinter private `_textbox`; guard prevents failure if the internal name changes
+
+Original pane styling
+
+Target:
+- Class: `Scriptorium`
+- Method: `_build_panes`
+- Widget reference: `self.original_box`
+- Existing line area: Original textbox construction after `ctk.CTkLabel(panes, text="Original", ...)`
+- Suggested attributes: `border_width=1`, `border_color=SURFACE_3`, `corner_radius=6`
+- Change type: visual polish
+- Risk: CTkTextbox border support depends on installed CustomTkinter version; test in packaged app
+
+Revised pane styling
+
+Target:
+- Class: `Scriptorium`
+- Method: `_build_panes`
+- Widget references: `revised_frame`, `self.revised_box`, `scroll`
+- Existing line area: Revised pane construction and tag configuration
+- Change type: visual polish with no data-model effect
+- Risk: tk.Text inside a rounded CTkFrame can show square inner edges unless `padx=(1, 0), pady=1` is used
+
+Diff active range styling
+
+Target:
+- Function: `render_diff(text_widget, original, revised, inline=False)`
+- Method using ranges: `Scriptorium._highlight_change`
+- Widget reference: `self.revised_box`
+- Existing tag: `active_change`
+- Change type: visual state enhancement
+- Risk: active background may slightly obscure insert/delete fill. Test nested tag priority with `tag_raise("active_change")`
+
+Notice banner
+
+Target:
+- Class: `Scriptorium`
+- Method: `_build_panes`
+- Widget references: `self.notice_frame`, `self.notice_label`
+- New widget reference: `self.notice_title_label`
+- Update method: `_show_ambiguities`
+- Existing title: `Review notices (not silently changed)`
+- Suggested title: `Review notices - not silently changed`
+- Change type: visual hierarchy and dismissal affordance
+- Risk: body `wraplength=900` should be recalculated on resize in a later pass if the banner is too wide at 920px
+
+Action bar grouping
+
+Target:
+- Class: `Scriptorium`
+- Method: `_build_actionbar`
+- Optional helper: `_pack_button_group`
+- Required preserved references: `self.process_btn`, `self.softer_btn`, `self.stronger_btn`, `self.accept_btn`, `self.progress`, `self._pulse_job`
+- Existing commands to preserve: `process`, `_nudge_strength`, `accept`, `reject`, `copy_revision`, `copy_change_summary`, `undo`, `clear_all`, `import_file`, `export_file`, `paste_original`, `copy_original`, `_open_history`, `copy_rich_diff`, `export_diff_file`, `open_settings`
+- Change type: medium-risk layout refactor
+- Risk: test at 920x600, 1180x760, and 150-200% DPI. Ensure right group remains visible and centre group does not overlap left group.
+
+Busy feedback
+
+Target:
+- Class: `Scriptorium`
+- Methods: `_set_busy`, `_pulse_process`, `_on_retry_progress`
+- Widget references: `self.progress`, `self.process_btn`, `self.status`
+- Change type: low-risk micro-interaction polish
+- Risk: `after_cancel` must continue to clear `_pulse_job` on every completion/error path
+
+SettingsDialog modal polish
+
+Target:
+- Class: `SettingsDialog`
+- Methods: `__init__`, `_refresh_state`, new `_focus_initial_control`
+- Widget references: `self.backend_var`, `self.key_entry`, `self.ollama_combo`, `self.detect_btn`, `self.save_btn`
+- Change type: low-risk keyboard ergonomics
+- Risk: `CTkComboBox.focus_set()` behaviour should be checked manually on Windows
+
+TonePickerDialog modal polish
+
+Target:
+- Class: `TonePickerDialog`
+- Methods: `__init__`, new `_focus_initial_control`
+- Widget references: `self.variables`, `self.status_label`, Apply/Cancel/Clear buttons
+- Change type: low-risk dialog ergonomics
+- Risk: direct checkbox focus requires storing checkbox widgets; the conservative snippet avoids that refactor
+
+Recommended implementation order
+
+1. Palette constant update and pane metric helper.
+2. Revised pane border/tag polish.
+3. Notice banner split title/body and compact dismissal.
+4. Busy pulse interval/status wording.
+5. Dialog focus and sizing polish.
+6. Action bar grouping last, because it has the largest layout blast radius.
+
+Recommended verification checklist
+
+1. Launch with `python scriptorium.py` at 1180x760 and confirm no controls overlap.
+2. Resize to 920x600 and confirm both action rows, status, notice banner, and pane headers remain visible.
+3. Process sample prose and compare Clean vs Inline diff readability.
+4. Confirm Accept, Reject, Copy revision, Copy summary, Copy rich diff, Export diff, Import, Export, Paste, Copy, History and Settings commands still fire.
+5. Trigger ambiguity/review notices and verify banner title, body wrapping, and Dismiss.
+6. Open Settings at normal and reduced app heights; verify Save/Cancel remain reachable and Escape closes.
+7. Open Tone picker; verify selection limit feedback, conflict feedback, Apply, Clear, Cancel, Return and Escape.
+8. Run any existing smoke or regression checks before committing.
+
+Final judgement
+
+The interface is already functionally mature. The next visual lift should avoid a redesign and instead tighten the system: one named palette, equal pane typography, grouped controls, calmer motion, and modals that feel deliberately placed and keyboard-friendly. These changes are small enough to implement incrementally while making the app feel more cohesive, especially at the 920px minimum width and on high-DPI Windows laptops.

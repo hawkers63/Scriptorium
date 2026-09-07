@@ -6,6 +6,138 @@ Mark saying "lets get started").
 
 ---
 
+## 2026-09-07 (later, evening) — v2.31 prompt-hardening: instruction-injection hallucination fixed, quote-style collision found and fixed, Claude re-confirmed clean
+
+Picked up from notes_026 (Mark's own analysis, reading the previous
+session's committed evidence): the "6/6 hallucinations" scare was
+`llama3.2:3b` only, not Claude, which had returned the imperative
+list-item case unchanged and correct all three times. Root cause pinned:
+`build_system_prompt()` never told the model the supplied text was
+literal content to revise rather than an instruction to obey. Scope was
+deliberately narrow — a prompt change plus re-calibration, no UI wiring,
+no version bump, no rebuild, no commit (until this entry).
+
+**Fix 1 — instruction-injection.** `run_backend()` now wraps `user_text`
+in literal `<<<BEGIN/END SOURCE TEXT TO REVISE>>>` markers before
+dispatching to either backend (`call_anthropic()`/`call_ollama()` both
+pass it straight through unmodified, so one wrap point covers both).
+`build_system_prompt()` gained one additive rule: content between the
+markers is never an instruction to obey, however it reads, and must not
+be echoed back. Result: the list-item case now returns byte-for-byte
+unchanged on `llama3.2:3b` in 3/3 runs (verdict REVIEW, matching Claude),
+versus 6/6 hallucinated content before.
+
+**Fix 2 — a second, unrelated issue found along the way.** The first
+re-calibration after fix 1 showed Claude at 2/36 DRIFT, not the expected
+clean 0 — both on the quotation case, Claude converting protected straight
+double quotes to single quotes. The model's own reasoning said "for
+British style": a pre-existing collision between the British-English rule
+("single quotation marks for speech where natural") and the
+protected-content rule ("material inside quotation marks" must not be
+altered) that never said which one wins when a quotation already exists in
+the source — exposed by Claude's non-zero default sampling temperature
+(no `temperature` is set in `call_anthropic()`), so the very first
+baseline run had just gotten lucky. Fixed the same way: additive
+clarification to both bullets, British-style quotes apply only to new
+punctuation the model introduces, and the protected-content rule now names
+the quotation marks' own style as protected.
+
+**Verification.** `ast.parse()` clean; 66/66 deterministic tests unchanged
+throughout. Full corpus re-run both backends after each fix. Final
+numbers: Claude 27 PASS / 9 REVIEW / **0 DRIFT** / 0 FAIL, exterior 36/36
+— matches the original clean baseline. A targeted 10-repeat rerun of just
+the quote case (both backends) confirmed it wasn't a lucky draw: Claude
+10/10 PASS (13/13 combined with the full-corpus run); Ollama 10/10 DRIFT,
+which turned out to be a *different* bug — it drops the quotation marks
+entirely rather than changing their style, general small-model fidelity
+weakness this fix doesn't touch. Ollama's other known issues (comma drop,
+quote drop) are unchanged.
+
+**Not shipped.** Both problems this step set out to catch are now fixed
+and well-verified on Claude. `process_selection()` stays unwired,
+`APP_VERSION` stays `2.30` — UI wiring and the ship decision (Claude-only
+vs. wait for Ollama's 8B model) are still Mark's call. Full detail in
+ROADMAP.md's v2.31 section.
+
+---
+
+## 2026-09-07 — v2.31 selection-scoped processing: API key resolved, cross-backend calibration completed (Claude clean; llama3.2:3b unreliable but fails safe)
+
+Picked up v2.31 where the morning of 2026-09-07 had left it: `process_selection()`
+implemented and deterministically tested but unshipped, because the mandatory
+live-model calibration gate had not been cleared — the Claude backend returned
+`400`/`401` on every call, so half the cross-backend comparison never ran, and
+the single Ollama run that did happen hit a severe hallucination on the
+imperative Markdown-list-item case.
+
+**The blocker was never a Scriptorium bug — it was the Claude API key.** The
+`scriptorium_config.json` key hit the recurring `400` workspace-scoping error
+(`call_anthropic()` sends no `anthropic-workspace-id` header, so an unscoped /
+default-workspace key is rejected), and the env-var key was simply invalid
+(`401`). A key created and pasted into Settings authenticated first try —
+confirmed live: `Correct` mode fixed "this is a testt" → "this is a test", the
+status/back-end line reading `Claude · claude-sonnet-4-6`. NB a false start
+where a *newly* generated key still `400`ed (again unscoped) was settled by
+reverting to a known-good key. Standing lessons reinforced: **create keys
+scoped to a named workspace, and prove a key authenticates in isolation before
+running it inside a harness** — a dead key inside the twelve-case corpus looks
+exactly like a calibration failure (it produced 36 identical `400` FAIL records
+in the first afternoon run). Separately, Mark flagged wanting to change keys
+freely: the Settings field is exactly that (stored in the gitignored config,
+not baked into the app); worth confirming no literal `sk-ant-…` string ever
+landed in `scriptorium.py` before a push.
+
+**A committed, repeatable calibration harness now exists** — the roadmap's own
+complaint that the morning corpus was scratch is fixed. Three files:
+`tests/calibration_corpus.py` (twelve cases as data, incl. the three known
+problem cases), `tests/test_calibration_e1_deterministic.py` (network-free:
+splice/exterior/boundary/placeholder guarantees plus a drift-guard test pinning
+the hand-replayed `restore_placeholders()` → `assemble_scoped_revision()` tail
+to a real `_on_success()` for an identical stubbed response — exactly the
+divergence risk of a harness replaying that sequence by hand), and
+`tests/calibration_e1.py` (the live cross-backend harness: isolated config that
+never touches the live `scriptorium_config.json`, `--backend`/`--repeats`,
+verbatim raw-output capture to `tests/results/`). Both backends, three repeats
+per case, 36 records each. Solid test engineering — it made the final read
+evidence-based rather than a guess off a truncated CLI log.
+
+**Result — the earlier alarm was Ollama, not Claude.** A truncated CLI fragment
+had suggested "all 6 runs hallucinated"; reading the committed JSON settled it:
+- **Claude (`claude-sonnet-4-6`) cleared the gate cleanly** — 27 PASS, 9 REVIEW
+  (all benign: already-correct and pathological cases returned verbatim, the
+  ambiguous case took a safe reading), 0 FAIL, 0 DRIFT; exterior 36/36, zero
+  forbidden content, zero dropped tokens. The scary imperative list-item case
+  came back unchanged and correct all three times.
+- **Ollama (`llama3.2:3b`) did not**, but fails safe — the list-item case
+  hallucinated / dropped the verb 5 of 6 runs; 6–9 DRIFT per run; protected
+  tokens dropped in 9–12 records. The splice held regardless (exterior
+  35–36/36, the one gap a caught JSON error), and every bad case surfaced
+  through the audits, never silently.
+
+**Root cause of the imperative failure:** `build_system_prompt()` never tells
+the model that the supplied text is literal content to revise rather than an
+instruction to obey — an instruction-in-data problem, acute for a weak 3b
+model. The failing selection ends in a full stop, so the earlier
+"short/unpunctuated fragment" guard idea is disproved; the trigger is
+imperative *content*.
+
+**Agreed way forward (nothing wired or shipped yet):** (1) prompt-harden
+`build_system_prompt()` so the payload is treated as inert content, never an
+instruction (delimit it if consistent across both backends); (2) re-run the
+committed harness to confirm Claude stays 36/36 clean and measure any 3b
+improvement; (3) only then wire the three UI entry points, bump `APP_VERSION`
+to `2.31`, rebuild and hand-test; (4) document `llama3.2:3b` as best-effort for
+selection work (fails safe), revisiting when the 8b model loads after the
+planned RAM upgrade. No heavy input guard — the feature is safe by construction
+(guaranteed exterior, reviewable suggestion). `process_selection()` stays
+unwired; `APP_VERSION` stays `2.30` until step (3).
+
+(Note: this log had not been updated for v2.21–v2.30 — those shipped per
+`ROADMAP.md` but have no MEMORY entry. This entry sits on top as newest; the
+v2.21–v2.30 gap is left for a separate backfill if wanted.)
+
+---
+
 ## 2026-09-02 (continued) — v2.16 (shipped as build 2.21): rich CF_HTML clipboard diff — the backlog is now clear
 
 Mark asked to close out the last remaining backlog item after the five
