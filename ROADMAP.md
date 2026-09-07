@@ -4,7 +4,7 @@
 When Mark says "lets get started", that is the cue to open these three files
 before doing anything else.
 
-Current shipped version: **2.25** (v2.9 bug-fix pass, v2.10 visual/UX
+Current shipped version: **2.26** (v2.9 bug-fix pass, v2.10 visual/UX
 polish, v2.11 three-tone picker, v2.12 persisted user presets, v2.13 backend
 retry transport, v2.14 hand-testing fixes, v2.15 Explorer drag-and-drop,
 v2.17 readability metrics + shortcuts reference, v2.18 house-style
@@ -12,13 +12,17 @@ avoid-list, v2.19 headless batch/CLI mode, v2.20 in-session revision
 history, v2.16 rich `CF_HTML` clipboard diff (shipped as build `2.21`),
 v2.22 tray/start-up lifecycle gating, v2.23 drop-safety/preset-repair/
 export/reading-time/clipboard polish, v2.24 protected-content fidelity
-audit, v2.25 cancellable retry transport — see those sections below). All
-five notes_019 proposals and notes_016's full original proposal set shipped
-by build 2.21, clearing the backlog for the first time since notes_001
-opened it; v2.22 closed a fresh hand-testing defect (notes_020) found
-immediately after. notes_021's second-generation hardening pass is now
-fully shipped except its deliberately-deferred streaming half (v2.23–v2.25
-above; see v2.25's own write-up for why streaming stays out of scope).
+audit, v2.25 cancellable retry transport, v2.26 Settings fail-closed
+backend/immutable request provenance/durable history evidence/tone
+type-safety — see those sections below). All five notes_019 proposals and
+notes_016's full original proposal set shipped by build 2.21, clearing the
+backlog for the first time since notes_001 opened it; v2.22 closed a fresh
+hand-testing defect (notes_020) found immediately after. notes_021's
+second-generation hardening pass is fully shipped except its
+deliberately-deferred streaming half (v2.23–v2.25; see v2.25's own
+write-up for why streaming stays out of scope). notes_022/023/024's
+follow-on review is now underway: v2.26 above closes its four P0 findings
+(F1–F4); v2.27–v2.31 are scoped below and not yet implemented.
 
 Scope through v2.3 was drawn from twelve accumulated review notes
 (`notes/01_Active/notes_001.txt` – `notes_012.txt`), written independently by
@@ -2253,7 +2257,7 @@ engineering follow-up.
 
 ---
 
-## v2.26 — Privacy boundary, request provenance & tone type-safety
+## v2.26 — Privacy boundary, request provenance & tone type-safety ✅ shipped 2026-09-07
 
 **Goal:** close notes_023 (Codex)'s four release-blocking findings — a
 Settings path that silently converts an unrecognised backend into Claude, a
@@ -2303,26 +2307,69 @@ paragraph, which names this exact order. Touches Settings, `process()`/
    restore mutates state.
 
 ### Acceptance checklist
-- [ ] A hand-edited `default_tone: []` and a preset with `tones: [{}]` both
+- [x] A hand-edited `default_tone: []` and a preset with `tones: [{}]` both
       load without raising; the app starts with those tones dropped rather
-      than crashing.
-- [ ] Settings opens against a config with backend `"Ollma"`, `None`, `[]`
+      than crashing. Verified directly against the real `TypeError` Codex
+      reproduced: `normalise_tone_config({"default_tone": []})` now returns
+      `default_tones: []` instead of raising; `normalise_preset(...{"tones":
+      [{}]})` now returns `tones: []` instead of raising.
+- [x] Settings opens against a config with backend `"Ollma"`, `None`, `[]`
       and `{}` in turn: neither segment shows selected, both model groups
       and Save are disabled, no network call is made; explicitly picking
-      Claude or Ollama enables Save and persists only that choice.
-- [ ] Start a request, change Mode/Role/a tone or apply a preset before it
+      Claude or Ollama enables Save and persists only that choice. Verified
+      against a real `SettingsDialog`, all four invalid values plus a valid
+      one, including calling `_save()` directly (bypassing the disabled
+      button) to confirm the explicit guard also refuses and shows an error
+      without touching `on_save`.
+- [x] Start a request, change Mode/Role/a tone or apply a preset before it
       completes: the resulting history entry and the letter-convention
       audit reflect the settings captured at request start, not the
-      changed live controls.
-- [ ] Process a source that trips a model ambiguity, a fidelity warning and
+      changed live controls. Verified against a real `Scriptorium()`:
+      captured Mode=Paraphrase/Role=(none)/Tones=[Concise], then changed
+      the live toolbar to Mode=Formalise/Role=Engineer/Tones=[Direct] and
+      flipped `check_letter_conventions` to `False` in the live config
+      before calling `_on_success()` — the stored history entry and the
+      letter-convention advisory that actually fired both reflect the
+      captured values, not the changed ones.
+- [x] Process a source that trips a model ambiguity, a fidelity warning and
       a letter-convention advisory; restore that entry from History later
       in the session: all three notices reappear in the banner, and the
-      transient stale-source message does not.
-- [ ] Start a slow/retrying request, immediately restore an older history
+      transient stale-source message does not. Verified against a real
+      `Scriptorium()` with a genuine impersonal-salutation mismatch; the
+      ambiguity list and the durable notice both reappeared on restore, and
+      the banner heading is now "Review notices" rather than "Ambiguities
+      flagged" now that it regularly carries deterministic audits too.
+- [x] Start a slow/retrying request, immediately restore an older history
       entry: the in-flight request is invalidated and cannot overwrite the
-      just-restored revision when it eventually completes.
-- [ ] `ast.parse()` clean; full regression pass; rebuilt `.exe` launches and
-      stays responsive; real `scriptorium_config.json` untouched throughout.
+      just-restored revision when it eventually completes. Verified against
+      a real `Scriptorium()`: bumped `_request_id` and set `busy = True` to
+      simulate an in-flight request, called `_restore_from_history()`,
+      confirmed `_request_id` changed and `busy` cleared, then delivered a
+      late `_on_success()` call carrying the now-stale `request_id` —
+      `_claim_request()` correctly refused it and the restored revision was
+      left untouched.
+- [x] `ast.parse()` clean; full regression pass (`DEFAULT_CONFIG` round
+      trip, `ROLES`/`TONES` membership, four-tone-over-limit rejection, a
+      pre-v2.26-shaped history entry lacking `request_context`/`notices`
+      restoring without crashing); rebuilt `.exe` (`FileVersion`/
+      `ProductVersion` `2.26.0.0`) launched for real, alive and
+      `Responding: True` after a soak, closed cleanly. Real
+      `scriptorium_config.json` confirmed untouched (unchanged
+      `LastWriteTime`) throughout.
+
+**Adapted from the note during implementation, all within F1/F2/F3/F4's own
+stated intent**: Codex's snippets were written against slightly different
+line numbers/structure than the actual current source (expected — the note
+itself said to re-read before implementing). Concretely: `SettingsDialog`
+didn't yet have a named `save_btn` or a status label, so both were added;
+`_refresh_state()`'s Ollama-side enable logic was inverted from
+`"disabled" if cloud else "normal"` to `"normal" if local else "disabled"`,
+since the old form would have left the Ollama combo/Detect button enabled
+for an invalid backend (neither cloud nor local) — the opposite of
+fail-closed. `_show_ambiguities()`'s banner heading was renamed from
+"Ambiguities flagged" to "Review notices" per F3's own suggestion, since it
+now regularly carries fidelity/letter-convention notices alongside model
+ambiguities. No prompt or content-generation surface was touched.
 
 ---
 
@@ -2704,8 +2751,8 @@ about.
 | notes_020 | 2 Sep | Mark | v2.22 (hand-test diagnosis) | Closed by v2.22 |
 | notes_021 | 2 Sep | Codex | v2.21+ (hardening) | Confirmed all five originally-requested areas already shipped by build 2.21; §2.1/2.2/2.4 closed by v2.23; §2.3 closed by v2.23 (conflict feedback) + v2.24 (fidelity audit); §2.5's cancellable retry transport closed by v2.25; §2.5's streaming half explicitly deferred pending two open product decisions (see v2.25) |
 | notes_022 | 3 Sep | Lynne | v2.26+ (forward proposals) | Stale-brief audit confirms v2.11–v2.25 already cover the five original architecture themes (not re-proposed); forward proposals A–E triaged by notes_023/024 — B (preset packs) scoped as v2.29 with two bugs fixed first; A/C/D deferred pending F5/live evidence/UI redesign respectively; E (streaming design) folds into notes_021's existing deferred streaming item |
-| notes_023 | 7 Sep | Codex | v2.26+ (state-integrity & feature review) | Thirteen confirmed defects (F1–F13) and three new features (E1–E3), fully read-only and cross-checked; F1/F4/F2/F3 scoped as v2.26, F5–F8 as v2.27, E2/E3 as v2.28, F9–F13 as v2.30, E1 as v2.31 (calibration-gated) |
-| notes_024 | 7 Sep | Mark | v2.26+ (validation) | Independent in-progress diagnosis reaching the same F1/F2/F3/F5 findings as notes_023 before it was read, and separately catching the same notes_022 B/A flaws Codex flagged; confirms the v2.26 implementation order |
+| notes_023 | 7 Sep | Codex | v2.26+ (state-integrity & feature review) | Thirteen confirmed defects (F1–F13) and three new features (E1–E3), fully read-only and cross-checked; F1/F2/F3/F4 closed by v2.26; F5–F8 scoped as v2.27, E2/E3 as v2.28, F9–F13 as v2.30, E1 as v2.31 (calibration-gated) |
+| notes_024 | 7 Sep | Mark | v2.26+ (validation) | Independent in-progress diagnosis reaching the same F1/F2/F3/F5 findings as notes_023 before it was read, and separately catching the same notes_022 B/A flaws Codex flagged; its stated implementation order (privacy boundary, history provenance, configuration crash) is exactly what v2.26 closed |
 
 `scriptorium_notes_001.txt`, a near-duplicate of notes_014 written under
 `AGENTS.md`'s (now-abandoned) `scriptorium_notes_[N].txt` draft-path

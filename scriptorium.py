@@ -85,7 +85,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.25"
+APP_VERSION = "2.26"
 
 # A small shared palette (notes_017, v2.10) so the two text panes, the diff
 # tags and the notice banner read as one surface instead of drifting
@@ -508,16 +508,31 @@ def tone_conflict_message(tones):
 def validate_tones(tones):
     """Return a normalised, ordered, conflict-free tone list.
 
-    Order is preserved because the first entry is treated as dominant.
-    Duplicate, blank and "(keep original)" entries are dropped silently; an
+    Strings are accepted as a one-tone convenience because legacy config
+    used that shape. Lists and tuples are the canonical multi-tone inputs.
+    Other containers, and non-string members inside a valid container, are
+    treated as malformed configuration and dropped safely (notes_023 F4 —
+    a list-shaped legacy default_tone or a dict inside a preset's tones
+    previously raised TypeError: unhashable type at start-up). Order is
+    preserved because the first entry is treated as dominant. Duplicate,
+    blank and "(keep original)" entries are dropped silently; an
     unrecognised name is also dropped rather than raising, so a config from
     an older or newer version of this file degrades gracefully instead of
     crashing. This is the sole validation boundary for config loading,
     preset application, the tone-picker dialogue and prompt construction —
     no other method keeps its own copy of these rules.
     """
+    if isinstance(tones, str):
+        candidates = (tones,)
+    elif isinstance(tones, (list, tuple)):
+        candidates = tones
+    else:
+        return []
+
     normalised = []
-    for tone in tones:
+    for tone in candidates:
+        if not isinstance(tone, str):
+            continue
         if tone in ("", "(keep original)") or tone in normalised:
             continue
         if tone not in TONE_INSTRUCTIONS:
@@ -2212,6 +2227,64 @@ def audit_letter_conventions(text):
 
 
 # --------------------------------------------------------------------------- #
+#  Immutable per-request provenance and shared review notices (notes_023
+#  F2/F3) -- Mode/Strength/Role/Tones stay live-editable while a request is
+#  in flight, but a history entry and the completion-time letter-convention
+#  audit must describe what was actually sent, not whatever the toolbar
+#  shows once the request finishes. Capture build_request_context() once,
+#  before build_system_prompt(), and thread it through the worker callback.
+# --------------------------------------------------------------------------- #
+
+def build_request_context(mode, strength, role, tones, cfg, scope="full"):
+    """Return non-secret settings that truthfully describe one request.
+
+    Safe for in-session history and a future review-record export.
+    Deliberately excludes API credentials, the system prompt and document
+    text.
+    """
+    backend = cfg.get("backend")
+    if backend == "anthropic":
+        model = cfg.get("anthropic_model", DEFAULT_ANTHROPIC_MODEL)
+    elif backend == "ollama":
+        model = cfg.get("ollama_model", DEFAULT_OLLAMA_MODEL)
+    else:
+        model = ""
+    return {
+        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "mode": mode,
+        "strength": strength,
+        "role": role,
+        "tones": tuple(tones),
+        "backend": backend,
+        "model": model,
+        "scope": scope,
+        "check_letter_conventions": bool(
+            cfg.get("check_letter_conventions", True)),
+    }
+
+
+def collect_revision_notices(original, revised, placeholder_warnings=(),
+                              check_letter_conventions=True):
+    """Return durable deterministic notices for a completed revision.
+
+    Model ambiguities are kept separate because they come from the backend
+    response, not this function. The transient "Original changed while
+    processing" message is also excluded: it describes one live-screen
+    moment and is no longer true once a matching history snapshot is
+    restored.
+    """
+    notices = [
+        str(item).strip() for item in placeholder_warnings if str(item).strip()
+    ]
+    notices.extend(audit_revision_fidelity(original, revised))
+    if check_letter_conventions:
+        advisory = audit_letter_conventions(revised)
+        if advisory:
+            notices.append(advisory)
+    return notices
+
+
+# --------------------------------------------------------------------------- #
 #  Shared modal-dialog chrome (notes_017 §1.7/2.8/3.6)
 # --------------------------------------------------------------------------- #
 # Neither dialog previously bound Escape or WM_DELETE_WINDOW (only the
@@ -2503,8 +2576,9 @@ class SettingsDialog(ctk.CTkToplevel):
         btn_row.pack(fill="x", padx=16, pady=18, side="bottom")
         ctk.CTkButton(btn_row, text="Cancel", width=100, fg_color="gray30",
                       command=self.destroy).pack(side="right", padx=(8, 0))
-        ctk.CTkButton(btn_row, text="Save", width=100,
-                      command=self._save).pack(side="right")
+        self.save_btn = ctk.CTkButton(btn_row, text="Save", width=100,
+                                       command=self._save)
+        self.save_btn.pack(side="right")
 
         body = ctk.CTkScrollableFrame(self, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=0, pady=0)
@@ -2513,13 +2587,20 @@ class SettingsDialog(ctk.CTkToplevel):
 
         ctk.CTkLabel(body, text="Backend", font=ctk.CTkFont(weight="bold")
                      ).pack(anchor="w", **pad)
-        current_backend = cfg.get("backend", "anthropic")
-        self.backend_var = ctk.StringVar(
-            value=BACKEND_LABELS.get(current_backend, "Claude"))
+        current_backend = cfg.get("backend")
+        current_label = (
+            BACKEND_LABELS.get(current_backend, "")
+            if isinstance(current_backend, str) else ""
+        )
+        self.backend_var = ctk.StringVar(value=current_label)
         seg = ctk.CTkSegmentedButton(
             body, values=list(BACKEND_LABELS.values()), variable=self.backend_var,
             command=lambda _=None: self._refresh_state())
         seg.pack(fill="x", padx=16, pady=(2, 4))
+        self.backend_status = ctk.CTkLabel(
+            body, text="", text_color="#f0c674",
+            font=ctk.CTkFont(size=11), justify="left", wraplength=460)
+        self.backend_status.pack(anchor="w", padx=16)
 
         ctk.CTkLabel(body, text="Claude API key (pay-as-you-go, from "
                      "console.anthropic.com)").pack(anchor="w", **pad)
@@ -2667,10 +2748,30 @@ class SettingsDialog(ctk.CTkToplevel):
         self.ollama_status.configure(text=f"Found {len(models)} model(s).")
 
     def _refresh_state(self):
-        cloud = BACKEND_IDS.get(self.backend_var.get()) == "anthropic"
+        """Enable only the controls belonging to an explicitly chosen backend.
+
+        An invalid/missing stored backend deliberately selects neither
+        segment (notes_023 F1). This preserves the same fail-closed privacy
+        rule run_backend() already enforces: Settings must never turn
+        damaged configuration into a silent choice of the cloud backend —
+        Save stays disabled until the user picks Claude or Ollama for real.
+        """
+        backend = BACKEND_IDS.get(self.backend_var.get())
+        valid = backend in BACKEND_LABELS
+        cloud = backend == "anthropic"
+        local = backend == "ollama"
+
         self.key_entry.configure(state="normal" if cloud else "disabled")
-        self.ollama_combo.configure(state="disabled" if cloud else "normal")
-        self.detect_btn.configure(state="disabled" if cloud else "normal")
+        self.ollama_combo.configure(state="normal" if local else "disabled")
+        self.detect_btn.configure(state="normal" if local else "disabled")
+        self.save_btn.configure(state="normal" if valid else "disabled")
+
+        if valid:
+            self.backend_status.configure(text="")
+        else:
+            self.backend_status.configure(
+                text="The stored backend is not recognised. Choose Claude "
+                     "or Ollama explicitly before saving.")
 
     def _refresh_tray_dependent_state(self):
         """Start-minimised only makes sense once tray is on and available.
@@ -2743,9 +2844,17 @@ class SettingsDialog(ctk.CTkToplevel):
         instead of the app believing changes are live when nothing was
         actually saved to disk.
         """
+        backend = BACKEND_IDS.get(self.backend_var.get())
+        if backend is None:
+            messagebox.showerror(
+                "Choose a backend",
+                "Select Claude or Ollama before saving Settings.",
+                parent=self)
+            return
+
         candidate = dict(self.cfg)
         candidate.update({
-            "backend": BACKEND_IDS.get(self.backend_var.get(), "anthropic"),
+            "backend": backend,
             "anthropic_api_key": self.key_entry.get().strip(),
             "anthropic_model": self.model_var.get(),
             "ollama_model": (
@@ -2970,6 +3079,8 @@ class Scriptorium(ctk.CTk):
         # stale worker could then observe the cleared state and resume.
         self._request_cancel_event = threading.Event()
         self._result_source = ""      # the text last_result was generated from
+        self._result_context = {}     # build_request_context() for last_result
+        self._review_notices = []     # durable notices for last_result (F3)
         # In-session revision history (v2.20, notes_019 §2.5) -- deliberately
         # in-memory only, never persisted to scriptorium_config.json or any
         # other file. This project has an existing, deliberate principle,
@@ -3604,9 +3715,9 @@ class Scriptorium(ctk.CTk):
             save_config(self.cfg)
 
     def _show_ambiguities(self, items):
-        """Show model ambiguities in a dismissible banner, or hide it."""
+        """Show model ambiguities and deterministic review notices, or hide it."""
         if items:
-            title = "Ambiguities flagged (not silently changed)"
+            title = "Review notices (not silently changed)"
             body = "\n".join(f"• {a}" for a in items)
             self.notice_label.configure(text=f"{title}\n{body}")
             if not self.notice_frame.winfo_ismapped():
@@ -3767,12 +3878,17 @@ class Scriptorium(ctk.CTk):
             busy_note = f"protecting {len(ph_map)} placeholder(s), contacting the model…"
         self._refresh_status(busy_note)
 
+        cfg_snapshot = dict(self.cfg)  # Settings changes mid-request affect the next one only
+        request_context = build_request_context(
+            self.mode_var.get(), self.strength_var.get(), self.role_var.get(),
+            tuple(self.selected_tones), cfg_snapshot)
+
         try:
             system_prompt = build_system_prompt(
-                self.mode_var.get(), self.strength_var.get(),
-                tuple(self.selected_tones), self.role_var.get(),
+                request_context["mode"], request_context["strength"],
+                request_context["tones"], request_context["role"],
                 protect_tokens=bool(ph_map),
-                avoid_words=tuple(self.cfg.get("house_style_avoid", [])))
+                avoid_words=tuple(cfg_snapshot.get("house_style_avoid", [])))
         except ValueError as exc:
             # Defence-in-depth: self.selected_tones is only ever set through
             # _set_selected_tones()/config normalisation, both of which
@@ -3782,7 +3898,6 @@ class Scriptorium(ctk.CTk):
             self._set_busy(False)
             messagebox.showerror("Could not process", str(exc))
             return
-        cfg_snapshot = dict(self.cfg)  # Settings changes mid-request affect the next one only
 
         def worker():
             try:
@@ -3798,70 +3913,88 @@ class Scriptorium(ctk.CTk):
                     self._on_error, request_id, f"Unexpected error: {exc}")
             else:
                 self._post_to_ui(
-                    self._on_success, request_id, original, ph_map, result)
+                    self._on_success, request_id, original, ph_map, result,
+                    request_context)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_success(self, request_id, original, ph_map, result):
+    def _on_success(self, request_id, original, ph_map, result, request_context):
+        """Publish a completed result with immutable provenance and notices.
+
+        request_context is exactly what process() captured before this
+        request's prompt was built (notes_023 F2) — used here, not the
+        toolbar's current live state, for the letter-convention audit and
+        the history label, so a control changed mid-request cannot corrupt
+        this result's own record of what actually generated it.
+        """
         if not self._claim_request(request_id):
             return
 
         # Restore protected placeholders before anything is shown, stored or
         # exported, so the diff and the accepted text carry the real values.
-        warnings = []
+        placeholder_warnings = []
         if ph_map:
-            result["revised"], warnings = restore_placeholders(
+            result["revised"], placeholder_warnings = restore_placeholders(
                 result["revised"], ph_map)
 
-        # Deterministic, advisory-only check for a changed protected-content
-        # inventory (numbers, URLs, emails, paths, quotes) -- audits the
-        # fully restored text the user actually sees, not the masked model
-        # response, so a warning always refers to real placeholder values.
-        warnings.extend(
-            audit_revision_fidelity(original, result["revised"]))
+        # Durable notices (placeholder loss, fidelity, letter-convention) are
+        # kept for history/export; the "changed while processing" message is
+        # deliberately transient -- see collect_revision_notices()'s own
+        # docstring for why it's excluded there.
+        durable_notices = collect_revision_notices(
+            original, result["revised"], placeholder_warnings,
+            request_context["check_letter_conventions"])
+        live_notices = list(durable_notices)
 
         # If the source changed while we were working, this revision is for the
         # OLDER text — say so rather than pretend it matches what is on screen.
         if self.original_box.get("1.0", "end-1c") != original:
-            warnings.append(
+            live_notices.append(
                 "The original text changed while this was processing, so this "
                 "revision reflects the earlier text. Review it carefully before "
                 "accepting.")
 
-        # Advisory-only British letter check (never rewrites the text).
-        if self.cfg.get("check_letter_conventions", True):
-            advisory = audit_letter_conventions(result["revised"])
-            if advisory:
-                warnings.append(advisory)
-
         self.last_result = result
         self._result_source = original
+        self._result_context = dict(request_context)
+        self._review_notices = list(durable_notices)
         render_diff(self.revised_box, original, result["revised"],
                     inline=(self.diff_view_var.get() == "Inline"))
-        self._show_ambiguities(list(result.get("ambiguities", [])) + warnings)
-        self._remember_for_history(original, result)
+        self._show_ambiguities(
+            list(result.get("ambiguities", [])) + live_notices)
+        self._remember_for_history(
+            original, result, request_context, durable_notices)
 
         note = result.get("note", "")
-        if ph_map and not warnings:
+        if ph_map and not placeholder_warnings:
             note = (note + "  " if note else "") + f"{len(ph_map)} placeholder(s) preserved"
         self._refresh_status(note or "done")
 
-    def _remember_for_history(self, original, result, limit=50):
-        """Record one completed revision in the in-session history log.
+    def _remember_for_history(self, original, result, request_context, notices,
+                               limit=50):
+        """Record one completed revision, with its provenance, in memory only.
 
         In-memory only -- see _revision_log's own comment in __init__ for
         why that constraint matters here specifically. Capped the same way
         _remember_for_undo() caps undo_stack, for the same reason: a long
-        session must not grow this without bound.
+        session must not grow this without bound. mode/strength/role/tones
+        stay at top level for HistoryDialog's existing row rendering;
+        request_context carries the complete captured provenance (notes_023
+        F2) and ambiguities/notices carry the original review evidence
+        (notes_023 F3), both restored faithfully by _restore_from_history().
         """
         self._revision_log.append({
             "time": time.strftime("%H:%M:%S"),
-            "mode": self.mode_var.get(),
-            "strength": self.strength_var.get(),
-            "role": self.role_var.get(),
-            "tones": list(self.selected_tones),
+            "mode": request_context["mode"],
+            "strength": request_context["strength"],
+            "role": request_context["role"],
+            "tones": list(request_context["tones"]),
+            "request_context": dict(request_context),
             "original": original,
             "revised": result.get("revised", ""),
+            "ambiguities": list(result.get("ambiguities", [])),
+            "note": result.get("note", ""),
+            "notices": list(notices),
         })
         if len(self._revision_log) > limit:
             del self._revision_log[:-limit]
@@ -3922,6 +4055,8 @@ class Scriptorium(ctk.CTk):
         self.revised_box.configure(state="disabled")
         self.last_result = None
         self._result_source = ""
+        self._result_context = {}
+        self._review_notices = []
         self._show_ambiguities([])
         self._refresh_status("revision cleared")
 
@@ -4494,21 +4629,39 @@ class Scriptorium(ctk.CTk):
         _remember_for_undo() and render_diff() exactly as a fresh Process
         result would, so Accept/Reject/Copy/Undo behave identically
         afterwards; the diff still has to be reviewed like any other.
+
+        Invalidates any in-flight request first (notes_023 F3): without
+        this, a still-running Process call could complete after the
+        restore and silently overwrite the revision the user just chose.
+        Restores the original ambiguities and durable notices too, rather
+        than showing this entry as if it had no review evidence at all —
+        older entries recorded before v2.26 have neither, so they still
+        restore cleanly with an empty banner.
         """
+        self._invalidate_inflight()
         self._remember_for_undo(self.original_box.get("1.0", "end-1c"))
         self.original_box.delete("1.0", "end")
         self.original_box.insert("1.0", entry["original"])
 
-        self.mode_var.set(entry["mode"])
-        self.strength_var.set(entry["strength"])
-        self.role_var.set(entry["role"])
-        self._set_selected_tones(entry["tones"])
+        context = dict(entry.get("request_context", {}))
+        self.mode_var.set(context.get("mode", entry["mode"]))
+        self.strength_var.set(context.get("strength", entry["strength"]))
+        self.role_var.set(context.get("role", entry["role"]))
+        self._set_selected_tones(list(context.get("tones", entry["tones"])))
 
-        self.last_result = {"revised": entry["revised"], "ambiguities": [], "note": ""}
+        ambiguities = list(entry.get("ambiguities", []))
+        notices = list(entry.get("notices", []))
+        self.last_result = {
+            "revised": entry["revised"],
+            "ambiguities": ambiguities,
+            "note": entry.get("note", ""),
+        }
         self._result_source = entry["original"]
+        self._result_context = context
+        self._review_notices = notices
         render_diff(self.revised_box, entry["original"], entry["revised"],
                     inline=(self.diff_view_var.get() == "Inline"))
-        self._show_ambiguities([])
+        self._show_ambiguities(ambiguities + notices)
         self._refresh_status(f"restored from history ({entry['time']})")
 
     def _start_restore_listener(self):
