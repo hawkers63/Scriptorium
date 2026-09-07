@@ -54,8 +54,23 @@ decision**: it argues Copy revision/Copy summary/Undo should stay on row
 1 (preserving what it describes as a deliberate v2.14 workflow decision),
 whereas the action-bar regroup just shipped moved them to row 2. Put to
 Mark directly since he'd just hand-approved the running `.exe`: he chose
-to keep the shipped layout as-is on this specific point. The rest of
-Grok's note is unactioned, not yet decided.
+to keep the shipped layout as-is on this specific point. **Mark's explicit
+follow-up instruction: pause on the rest of Grok's note entirely** --
+none of it should be implemented, since it could disrupt what is already
+working smoothly. Left fully unactioned by design, not an oversight.
+
+**Correction, same session: `notes_029.txt` (DeepSeek's report) was
+untracked from git after this entry was first written.** It had been
+committed alongside the v2.32 ship without Mark's explicit approval to
+add it to git specifically -- he flagged this directly ("committed
+without my approval... remove them"). Removed via `git rm --cached`
+(the file itself stays on disk, unmodified, just no longer tracked) in a
+follow-up commit rather than amending the ship commit, since amending
+wasn't explicitly requested. Mark's own framing: no immediate action
+needed on the file locally, but it may be worth adding to git later "for
+housekeeping" once he's had a chance to look at it properly -- that
+remains an open, unscheduled follow-up, not a standing invitation to
+re-add it without asking again.
 
 **notes_027 item 6 (action-bar regroup) implemented and folded into
 v2.32** rather than a separate v2.33, since both landed before either was
