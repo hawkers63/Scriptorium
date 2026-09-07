@@ -4,7 +4,7 @@
 When Mark says "lets get started", that is the cue to open these three files
 before doing anything else.
 
-Current shipped version: **2.26** (v2.9 bug-fix pass, v2.10 visual/UX
+Current shipped version: **2.27** (v2.9 bug-fix pass, v2.10 visual/UX
 polish, v2.11 three-tone picker, v2.12 persisted user presets, v2.13 backend
 retry transport, v2.14 hand-testing fixes, v2.15 Explorer drag-and-drop,
 v2.17 readability metrics + shortcuts reference, v2.18 house-style
@@ -14,15 +14,16 @@ v2.22 tray/start-up lifecycle gating, v2.23 drop-safety/preset-repair/
 export/reading-time/clipboard polish, v2.24 protected-content fidelity
 audit, v2.25 cancellable retry transport, v2.26 Settings fail-closed
 backend/immutable request provenance/durable history evidence/tone
-type-safety — see those sections below). All five notes_019 proposals and
-notes_016's full original proposal set shipped by build 2.21, clearing the
-backlog for the first time since notes_001 opened it; v2.22 closed a fresh
-hand-testing defect (notes_020) found immediately after. notes_021's
-second-generation hardening pass is fully shipped except its
-deliberately-deferred streaming half (v2.23–v2.25; see v2.25's own
-write-up for why streaming stays out of scope). notes_022/023/024's
-follow-on review is now underway: v2.26 above closes its four P0 findings
-(F1–F4); v2.27–v2.31 are scoped below and not yet implemented.
+type-safety, v2.27 batch output/review parity + modal export + frozen-
+config sync + Word-table refusal — see those sections below). All five
+notes_019 proposals and notes_016's full original proposal set shipped by
+build 2.21, clearing the backlog for the first time since notes_001 opened
+it; v2.22 closed a fresh hand-testing defect (notes_020) found immediately
+after. notes_021's second-generation hardening pass is fully shipped
+except its deliberately-deferred streaming half (v2.23–v2.25; see v2.25's
+own write-up for why streaming stays out of scope). notes_022/023/024's
+follow-on review is now underway: v2.26–v2.27 above close its eight P0/P1
+findings (F1–F8); v2.28–v2.31 are scoped below and not yet implemented.
 
 Scope through v2.3 was drawn from twelve accumulated review notes
 (`notes/01_Active/notes_001.txt` – `notes_012.txt`), written independently by
@@ -2373,7 +2374,7 @@ ambiguities. No prompt or content-generation surface was touched.
 
 ---
 
-## v2.27 — Batch & document integrity
+## v2.27 — Batch & document integrity ✅ shipped 2026-09-07
 
 **Goal:** close notes_023's second-tier findings — batch mode's output/
 review-file guarantees don't match what it promises, the diff-export
@@ -2414,33 +2415,67 @@ state stale, and Word import silently drops table text. Depends on v2.26's
    separately designed and tested.
 
 ### Acceptance checklist
-- [ ] Batch refuses to run when `--out` names the same real directory as
+- [x] Batch refuses to run when `--out` names the same real directory as
       the input folder, with a clear stderr message and no files touched.
-- [ ] Batch on same-stem `.txt`/`.md`/`.docx` inputs, and a pre-existing
+      Verified against the real `_run_batch_mode()`: exit code 1, no
+      `.revised`/`.diff` files written.
+- [x] Batch on same-stem `.txt`/`.md`/`.docx` inputs, and a pre-existing
       `report.txt`/`report.md` pair, all produce distinct, correctly-paired
-      revision/review files with no overwrite.
-- [ ] A batch run against a source with a fidelity/letter-convention issue
+      revision/review files with no overwrite. Verified: `report.txt` and
+      `report.md` in one input folder now produce `report.txt.diff.txt`
+      and `report.md.diff.txt` (previously both collided on the bare-stem
+      `report.diff.txt`), alongside distinct `report.revised.txt`/
+      `report.revised.md`.
+- [x] A batch run against a source with a fidelity/letter-convention issue
       records that warning in the file's own review companion, matching
-      what the GUI would have shown.
-- [ ] An unreadable batch config, a failed output-directory creation, and
+      what the GUI would have shown. Verified with a real impersonal-
+      salutation mismatch: the advisory appears both in `batch_log.txt`
+      (`[WARN]`) and as a `review notice:` line in that file's own
+      `.diff.txt` — previously batch mode never ran this audit at all.
+- [x] An unreadable batch config, a failed output-directory creation, and
       an unopenable log file each abort with a clear message and non-zero
       exit rather than silently proceeding with defaults; a mid-batch
       per-file failure (bad XML, missing python-docx) still lets the rest
-      of the batch complete.
-- [ ] Leaving the diff-export format chooser open blocks interaction with
+      of the batch complete. Verified all four: a genuinely corrupt (not
+      merely missing) config file refuses to run; a real
+      `[WinError 183]`-style output-directory collision (a file sitting
+      where the directory should be) is caught and reported; a per-file
+      read failure (an invalid `.docx`) and a `write_docx()` raising
+      `ValueError` on write both leave exit code 1 but let a second,
+      unrelated file in the same batch still succeed.
+- [x] Leaving the diff-export format chooser open blocks interaction with
       the main window; a Reject or History-restore attempted behind it has
       no effect until it closes, and the export always reflects the
-      revision that was current when Export was clicked.
-- [ ] A first frozen-`.exe` launch after using the source version,
+      revision that was current when Export was clicked. Verified against
+      a real `DiffExportFormatDialog` (`wm_transient()`/`grab_status()`
+      both confirm modality) and a real `export_diff_file()` call: a fake
+      format-chooser that mutates `self.last_result`/`self._result_source`
+      mid-call (simulating what a click behind the dialogue would do) has
+      no effect — the exported document reflects the snapshot taken before
+      either nested dialogue opened, not the mutated state.
+- [x] A first frozen-`.exe` launch after using the source version,
       accepting the import prompt: preset menu, Always-on-top and the
       toolbar all reflect the imported values immediately; a requested
       "start with Windows" either creates the registry entry or shows an
-      explicit warning that it could not.
-- [ ] Importing a `.docx` with no tables still works exactly as before; one
+      explicit warning that it could not. Verified against a real
+      `Scriptorium()` with `sys.frozen` simulated and a real BOM-prefixed
+      source config: Mode/Role/Tones, the preset menu, Always-on-top and
+      the reconciled autostart call all landed correctly in one case; a
+      separately forced `set_autostart()` failure produced exactly the
+      expected warning dialogue in another.
+- [x] Importing a `.docx` with no tables still works exactly as before; one
       containing a table is refused with the explicit message rather than
-      silently losing its table text.
-- [ ] `ast.parse()` clean; full regression pass; rebuilt `.exe` verified;
-      real config untouched.
+      silently losing its table text. Verified with real `python-docx`
+      documents: a plain two-paragraph file reads unchanged; a file with
+      an actual table raises the precise `ValueError`, propagated
+      unchanged through `read_document_path()` and shown as-is (not
+      wrapped in the generic "could not read" framing) by
+      `_load_file_path()`.
+- [x] `ast.parse()` clean; full regression pass (F1–F4 from v2.26 re-run
+      unaffected); rebuilt `.exe` (`FileVersion`/`ProductVersion`
+      `2.27.0.0`) launched for real, alive and `Responding: True` after an
+      8-second soak, closed cleanly. Real `scriptorium_config.json`
+      confirmed untouched (unchanged `LastWriteTime`) throughout.
 
 ---
 
@@ -2751,7 +2786,7 @@ about.
 | notes_020 | 2 Sep | Mark | v2.22 (hand-test diagnosis) | Closed by v2.22 |
 | notes_021 | 2 Sep | Codex | v2.21+ (hardening) | Confirmed all five originally-requested areas already shipped by build 2.21; §2.1/2.2/2.4 closed by v2.23; §2.3 closed by v2.23 (conflict feedback) + v2.24 (fidelity audit); §2.5's cancellable retry transport closed by v2.25; §2.5's streaming half explicitly deferred pending two open product decisions (see v2.25) |
 | notes_022 | 3 Sep | Lynne | v2.26+ (forward proposals) | Stale-brief audit confirms v2.11–v2.25 already cover the five original architecture themes (not re-proposed); forward proposals A–E triaged by notes_023/024 — B (preset packs) scoped as v2.29 with two bugs fixed first; A/C/D deferred pending F5/live evidence/UI redesign respectively; E (streaming design) folds into notes_021's existing deferred streaming item |
-| notes_023 | 7 Sep | Codex | v2.26+ (state-integrity & feature review) | Thirteen confirmed defects (F1–F13) and three new features (E1–E3), fully read-only and cross-checked; F1/F2/F3/F4 closed by v2.26; F5–F8 scoped as v2.27, E2/E3 as v2.28, F9–F13 as v2.30, E1 as v2.31 (calibration-gated) |
+| notes_023 | 7 Sep | Codex | v2.26+ (state-integrity & feature review) | Thirteen confirmed defects (F1–F13) and three new features (E1–E3), fully read-only and cross-checked; F1/F2/F3/F4 closed by v2.26; F5/F6/F7/F8 closed by v2.27; E2/E3 scoped as v2.28, F9–F13 as v2.30, E1 as v2.31 (calibration-gated) |
 | notes_024 | 7 Sep | Mark | v2.26+ (validation) | Independent in-progress diagnosis reaching the same F1/F2/F3/F5 findings as notes_023 before it was read, and separately catching the same notes_022 B/A flaws Codex flagged; its stated implementation order (privacy boundary, history provenance, configuration crash) is exactly what v2.26 closed |
 
 `scriptorium_notes_001.txt`, a near-duplicate of notes_014 written under

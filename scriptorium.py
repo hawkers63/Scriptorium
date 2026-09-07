@@ -85,7 +85,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.26"
+APP_VERSION = "2.27"
 
 # A small shared palette (notes_017, v2.10) so the two text panes, the diff
 # tags and the notice banner read as one surface instead of drifting
@@ -1576,13 +1576,25 @@ def list_ollama_models(timeout=3):
 # works in plain text — so a document round-trips as its paragraph text.
 
 def read_docx(path):
-    """Return the paragraph text of a .docx file joined by newlines.
+    """Return the paragraph text of a table-free .docx file.
 
     Raises ImportError if python-docx is not installed (the caller turns that
-    into a friendly 'pip install python-docx' message).
+    into a friendly 'pip install python-docx' message). Raises ValueError if
+    the document contains a table (notes_023 F8): python-docx's
+    document.paragraphs excludes table-cell text entirely, so a table-bearing
+    document would otherwise silently lose content with no warning. Refusing
+    it is safer than sending an incomplete document to a model; a reading-
+    order-preserving table importer remains a separate, deliberately
+    out-of-scope piece of work.
     """
     from docx import Document  # optional dependency, imported on demand
     document = Document(path)
+    if document.tables:
+        raise ValueError(
+            "This Word document contains one or more tables. Scriptorium "
+            "cannot yet import their text without risking a changed reading "
+            "order, so nothing was loaded. Copy the required text into "
+            "Original or save a table-free copy and try again.")
     return "\n".join(p.text for p in document.paragraphs)
 
 
@@ -2504,6 +2516,10 @@ class DiffExportFormatDialog(ctk.CTkToplevel):
         self.title("Export diff")
         self.geometry("430x210")
         self.resizable(False, False)
+        self.transient(master)
+        self.grab_set()  # modal (notes_023 F6) -- Reject/History behind this
+                         # dialogue must not be able to change state export
+                         # is about to read
         bind_dialog_chrome(self, on_close=self.destroy)
         position_over_parent(self, master, 430, 210)
 
@@ -3668,7 +3684,7 @@ class Scriptorium(ctk.CTk):
                 parent=self):
             return
         try:
-            with open(candidate, "r", encoding="utf-8") as fh:
+            with open(candidate, "r", encoding="utf-8-sig") as fh:
                 imported = json.load(fh)
         except (OSError, json.JSONDecodeError) as exc:
             messagebox.showerror(
@@ -3694,12 +3710,29 @@ class Scriptorium(ctk.CTk):
         self.cfg.update(merged)
         # The toolbar's Mode/Strength/Role/Tone/diff-view controls were
         # already built from the pre-import config; apply the imported
-        # values to them now rather than waiting for a restart.
+        # values to them now rather than waiting for a restart. Extended
+        # (notes_023 F7) to also refresh the preset menu, apply Always-on-
+        # top and reconcile the autostart registry entry -- previously only
+        # these five toolbar values were synchronised, leaving imported
+        # presets invisible in the menu, an imported "always on top" not
+        # actually applied, and an imported "start with Windows" written to
+        # JSON with no matching registry entry ever created.
         self.mode_var.set(merged.get("default_mode", self.mode_var.get()))
         self.strength_var.set(merged.get("default_strength", self.strength_var.get()))
         self.role_var.set(merged.get("default_role", self.role_var.get()))
         self._set_selected_tones(merged.get("default_tones", self.selected_tones))
         self.diff_view_var.set(merged.get("default_diff_view", self.diff_view_var.get()))
+        self.preset_menu.configure(values=preset_menu_names(self.cfg))
+        self.preset_var.set("(none)")
+        self.attributes("-topmost", bool(self.cfg.get("always_on_top")))
+        if not set_autostart(bool(merged.get("start_with_windows")),
+                              bool(merged.get("start_minimised"))):
+            messagebox.showwarning(
+                "Startup entry not updated",
+                "Settings were imported, but Scriptorium could not reconcile "
+                "the Windows startup entry. Review Startup & window "
+                "behaviour in Settings.",
+                parent=self)
         self._refresh_status("settings imported")
 
     def _maybe_show_privacy_notice(self):
@@ -4132,6 +4165,16 @@ class Scriptorium(ctk.CTk):
                 "Export the diff anyway?", parent=self):
             return
 
+        # Snapshot everything this export needs before either nested dialogue
+        # opens (notes_023 F6) -- DiffExportFormatDialog is now modal, but
+        # this guarantees a consistent export regardless, and is what
+        # v2.28's review-record export format will build on.
+        source = self._result_source
+        result = dict(self.last_result)
+        revised = result["revised"]
+        request_context = dict(self._result_context)
+        notices = list(self._review_notices)
+
         export_format = choose_diff_export_format(self)
         if export_format is None:
             return
@@ -4142,11 +4185,9 @@ class Scriptorium(ctk.CTk):
         if not path:
             return
         if export_format == "annotated":
-            document = build_annotated_markdown_diff(
-                self._result_source, self.last_result["revised"])
+            document = build_annotated_markdown_diff(source, revised)
         else:
-            document = build_markdown_diff(
-                self._result_source, self.last_result["revised"])
+            document = build_markdown_diff(source, revised)
         try:
             with open(path, "w", encoding="utf-8", newline="\n") as fh:
                 fh.write(document)
@@ -4304,6 +4345,12 @@ class Scriptorium(ctk.CTk):
                 f"UTF-8 and try again.\n\n({exc})")
             return
         except OSError as exc:
+            messagebox.showerror("Import failed", str(exc))
+            return
+        except ValueError as exc:
+            # read_docx()'s own table refusal (notes_023 F8) already carries
+            # a complete, precise explanation — show it as-is rather than
+            # wrapping it in the generic "could not read" framing below.
             messagebox.showerror("Import failed", str(exc))
             return
         except Exception as exc:  # noqa: BLE001 — bad/locked/corrupt .docx
@@ -4877,6 +4924,35 @@ class Scriptorium(ctk.CTk):
 BATCH_SUFFIXES = (".txt", ".md", ".docx")
 
 
+def paths_refer_to_same_directory(first, second):
+    """Return True when two paths identify the same directory (notes_023 F5).
+
+    samefile() handles aliases/junctions when both paths exist. The
+    normalised real-path fallback also works before the output directory
+    has been created yet, which is exactly when this check needs to run.
+    """
+    try:
+        return os.path.samefile(first, second)
+    except (FileNotFoundError, OSError):
+        left = os.path.normcase(os.path.realpath(os.path.abspath(first)))
+        right = os.path.normcase(os.path.realpath(os.path.abspath(second)))
+        return left == right
+
+
+def batch_output_paths(output_dir, input_name):
+    """Return collision-free revision and review paths for one input name.
+
+    The review file is named from the *complete* input filename, extension
+    included (notes_023 F5) -- naming it from the bare stem alone meant
+    report.txt and report.md both produced report.diff.txt, so one review
+    silently overwrote the other.
+    """
+    stem, suffix = os.path.splitext(input_name)
+    revised = os.path.join(output_dir, f"{stem}.revised{suffix}")
+    review = os.path.join(output_dir, f"{input_name}.diff.txt")
+    return revised, review
+
+
 def _run_batch_mode(argv):
     """Process every supported document in a folder, headlessly, no GUI.
 
@@ -4912,6 +4988,12 @@ def _run_batch_mode(argv):
     args = parser.parse_args(argv)
 
     cfg = load_config()
+    if getattr(load_config, "unreadable", False):
+        print(
+            "error: configuration could not be read; refusing to run a "
+            "batch with silent default settings.",
+            file=sys.stderr)
+        return 1
     if args.mode:
         cfg["default_mode"] = args.mode
     if args.strength:
@@ -4935,7 +5017,18 @@ def _run_batch_mode(argv):
     if not os.path.isdir(input_dir):
         print(f"error: not a directory: {input_dir}", file=sys.stderr)
         return 1
-    os.makedirs(args.out, exist_ok=True)
+    if paths_refer_to_same_directory(input_dir, args.out):
+        print(
+            "error: INPUT_DIR and OUTPUT_DIR must be different; this "
+            "prevents a later run from processing its own revision files.",
+            file=sys.stderr)
+        return 1
+    try:
+        os.makedirs(args.out, exist_ok=True)
+    except OSError as exc:
+        print(f"error: could not create output directory: {exc}",
+              file=sys.stderr)
+        return 1
     log_path = os.path.join(args.out, "batch_log.txt")
 
     inputs = sorted(
@@ -4947,7 +5040,12 @@ def _run_batch_mode(argv):
         return 0
 
     had_failure = False
-    with open(log_path, "w", encoding="utf-8") as log:
+    try:
+        log = open(log_path, "w", encoding="utf-8")
+    except OSError as exc:
+        print(f"error: could not open log file: {exc}", file=sys.stderr)
+        return 1
+    with log:
         def emit(line):
             print(line)
             log.write(line + "\n")
@@ -4961,7 +5059,7 @@ def _run_batch_mode(argv):
 
         for name in inputs:
             src_path = os.path.join(input_dir, name)
-            stem, suffix = os.path.splitext(name)
+            suffix = os.path.splitext(name)[1]
             try:
                 original = read_document_path(src_path)
             except Exception as exc:  # noqa: BLE001 -- report and continue
@@ -4995,13 +5093,23 @@ def _run_batch_mode(argv):
                 continue
 
             revised = result.get("revised", "")
+            placeholder_warnings = []
             if ph_map:
-                revised, warnings = restore_placeholders(revised, ph_map)
-                for warning in warnings:
-                    emit(f"[WARN] {name}: {warning}")
+                revised, placeholder_warnings = restore_placeholders(
+                    revised, ph_map)
 
-            revised_path = os.path.join(args.out, f"{stem}.revised{suffix}")
-            diff_path = os.path.join(args.out, f"{stem}.diff.txt")
+            # Same durable-notice collection the GUI runs in _on_success()
+            # (v2.26) -- previously batch mode never ran the fidelity/
+            # letter-convention audits at all, so a revision that dropped a
+            # figure or mismatched a letter convention shipped with no
+            # warning whatsoever (notes_023 F5).
+            notices = collect_revision_notices(
+                original, revised, placeholder_warnings,
+                bool(cfg.get("check_letter_conventions", True)))
+            for notice in notices:
+                emit(f"[WARN] {name}: {notice}")
+
+            revised_path, diff_path = batch_output_paths(args.out, name)
             try:
                 if suffix.lower() == ".docx":
                     write_docx(revised_path, revised)
@@ -5012,11 +5120,17 @@ def _run_batch_mode(argv):
                     fh.write(summarise_diff(original, revised) + "\n")
                     for ambiguity in result.get("ambiguities", []):
                         fh.write(f"ambiguity: {ambiguity}\n")
+                    for notice in notices:
+                        fh.write(f"review notice: {notice}\n")
                     note = result.get("note", "")
                     if note:
                         fh.write(f"note: {note}\n")
-            except OSError as exc:
+            except (OSError, ImportError, ValueError) as exc:
                 emit(f"[FAIL] {name}: could not write output ({exc})")
+                had_failure = True
+                continue
+            except Exception as exc:  # noqa: BLE001 -- preserve per-file isolation
+                emit(f"[FAIL] {name}: unexpected output error ({exc})")
                 had_failure = True
                 continue
 
