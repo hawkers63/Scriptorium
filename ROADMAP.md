@@ -4,7 +4,7 @@
 When Mark says "lets get started", that is the cue to open these three files
 before doing anything else.
 
-Current shipped version: **2.29** (v2.9 bug-fix pass, v2.10 visual/UX
+Current shipped version: **2.30** (v2.9 bug-fix pass, v2.10 visual/UX
 polish, v2.11 three-tone picker, v2.12 persisted user presets, v2.13 backend
 retry transport, v2.14 hand-testing fixes, v2.15 Explorer drag-and-drop,
 v2.17 readability metrics + shortcuts reference, v2.18 house-style
@@ -16,16 +16,19 @@ audit, v2.25 cancellable retry transport, v2.26 Settings fail-closed
 backend/immutable request provenance/durable history evidence/tone
 type-safety, v2.27 batch output/review parity + modal export + frozen-
 config sync + Word-table refusal, v2.28 change-by-change navigator +
-provenance review-record export, v2.29 preset-pack import/export — see
-those sections below). All five notes_019 proposals and notes_016's full
+provenance review-record export, v2.29 preset-pack import/export, v2.30
+low-risk hardening (clipboard-leak/Ollama-detection/HTTP-error-body/
+single-instance-race fixes) plus documentation-drift cleanup — see those
+sections below). All five notes_019 proposals and notes_016's full
 original proposal set shipped by build 2.21, clearing the backlog for the
 first time since notes_001 opened it; v2.22 closed a fresh hand-testing
 defect (notes_020) found immediately after. notes_021's second-generation
 hardening pass is fully shipped except its deliberately-deferred streaming
 half (v2.23–v2.25; see v2.25's own write-up for why streaming stays out of
-scope). notes_022/023/024's follow-on review is now underway: v2.26–v2.29
-above close its eight P0/P1 findings (F1–F8), E2/E3, and notes_022 proposal
-B; v2.30–v2.31 are scoped below and not yet implemented.
+scope). notes_022/023/024's follow-on review is now underway: v2.26–v2.30
+above close all thirteen confirmed defects (F1–F13), E2/E3, and notes_022
+proposal B; only v2.31 (E1, calibration-gated) remains, scoped below and
+not yet implemented.
 
 Scope through v2.3 was drawn from twelve accumulated review notes
 (`notes/01_Active/notes_001.txt` – `notes_012.txt`), written independently by
@@ -2633,7 +2636,7 @@ rather than guessing.
 
 ---
 
-## v2.30 — Low-risk hardening bundle & documentation drift
+## v2.30 — Low-risk hardening bundle & documentation drift ✅ shipped 2026-09-07
 
 **Goal:** notes_023's remaining low-risk items (P3), bundled together in
 the v2.23 style since each is small and independent, plus the
@@ -2672,21 +2675,62 @@ correctness work.
    explicitly not permission for a module split or streaming.
 
 ### Acceptance checklist
-- [ ] A simulated second-allocation clipboard failure leaves no leaked
+- [x] A simulated second-allocation clipboard failure leaves no leaked
       handle (verified via call-count/free-count on a stub, since a
-      genuine `GlobalAlloc` failure isn't practically triggerable).
-- [ ] Malformed `/api/tags` payloads (mixed types, a bare dict, a string)
+      genuine `GlobalAlloc` failure isn't practically triggerable). Verified
+      against the real `set_html_clipboard()` with a fake `_global_clipboard_memory()`
+      that succeeds once then raises: exactly one `GlobalFree` call, for
+      the first (leaked-in-the-old-code) handle.
+- [x] Malformed `/api/tags` payloads (mixed types, a bare dict, a string)
       all leave Detect re-enabled with a clear message rather than stuck
-      on "Detecting…".
-- [ ] A simulated error-body read failure during a backend error still
+      on "Detecting…". Verified against the real `list_ollama_models()`
+      with seven payload shapes (non-string name fields, a plain-string
+      list, `None` fields, a non-list `models`, a missing `models` key, a
+      non-dict root) — none raised, and a case-insensitive duplicate
+      ("Dup"/"dup") correctly collapsed to one entry, catching a real bug
+      in this session's own first attempt at the fix: `sorted(set(names),
+      key=str.casefold)` sorts case-insensitively but does not actually
+      deduplicate that way, since a plain `set()` keeps differently-cased
+      strings as distinct elements. Replaced with an explicit
+      first-seen-wins casefolded-key check.
+- [x] A simulated error-body read failure during a backend error still
       shows the existing friendly `BackendError` dialogue, not a raw
-      traceback.
-- [ ] A stubbed restore-event race (event created just after the first
+      traceback. Verified against the real `_request_with_retries()` with
+      a fake `HTTPError` whose body's `read()` raises `TimeoutError`: the
+      call still raises `BackendError` with the bounded-read fallback text,
+      not the raw `TimeoutError` escaping.
+- [x] A stubbed restore-event race (event created just after the first
       `OpenEventW` attempt) is caught by the retry and still restores the
-      running instance.
-- [ ] Docstrings and MEMORY read consistently with the actual v2.29 state;
-      `ast.parse()` clean; full regression pass; rebuilt `.exe` verified;
-      real config untouched.
+      running instance. Verified against the real `_signal_existing_instance()`:
+      succeeds on the third attempt when a fake `OpenEventW` fails twice
+      then succeeds, and gives up cleanly (no exception) after exactly the
+      configured attempt count when it never succeeds.
+- [x] Docstrings and MEMORY read consistently with the actual v2.30 state;
+      `ast.parse()` clean; full regression pass (13 test files spanning
+      F1–F8/E2/E3/notes_022-B from v2.26–v2.29, all still green); rebuilt
+      `.exe` (`FileVersion`/`ProductVersion` `2.30.0.0`) launched for real,
+      alive and `Responding: True` after an 8-second soak, closed cleanly.
+      Real `scriptorium_config.json` confirmed untouched (unchanged
+      `LastWriteTime`) throughout.
+
+**F13 documentation fixes made**: the module docstring no longer hardcodes
+a version number that duplicates (and can drift from) `APP_VERSION` — it
+now points at that constant instead; `load_config()`'s docstring no longer
+claims `backend` is normalised to a supported value, since v2.9's
+fail-closed design deliberately leaves an invalid one exactly as stored;
+`_on_retry_progress()`'s docstring no longer says a superseded request's
+worker "keeps sleeping", which stopped being true once v2.25's cancellable
+retry transport shipped; ROADMAP's own deferred-module-split entry no
+longer claims the file is "~1,300 lines" (it is 5,574 as of this release)
+— corrected for accuracy only, not as licence to actually split it.
+
+**One real bug caught during this release's own testing, not shipped as
+first attempted**: see the F10 acceptance item above — the initial
+`sorted(set(names), key=str.casefold)` fix looked correct but didn't
+actually deduplicate case-insensitively; caught by a test case with two
+differently-cased duplicates, exactly the kind of "looks right against
+plausible cases but fails a real one" finding this project's methodology
+exists to catch (cf. v2.24's Windows-path-regex incident, same pattern).
 
 ---
 
@@ -2788,7 +2832,11 @@ about.
   actually exploited or Mark asks for it directly.
 - Splitting `scriptorium.py` into multiple modules — every note that raised
   it (notes_006 §4) explicitly deferred it as "not yet, avoid two things
-  moving at once". The file is ~1,300 lines and still proportionate.
+  moving at once". The file was ~1,300 lines when that reasoning was first
+  written; it is 5,574 lines as of v2.30 (notes_023 §1.1 flagged this count
+  as stale documentation drift, not a recommendation to split — the
+  single-file mandate itself is unchanged and this line is corrected for
+  accuracy only). Revisit only if Mark asks for it directly.
 - "Suggest 3 alternatives" per request (notes_001) — changes the response
   schema, UI state and token cost; correctly ordered last by every review
   that mentions it, and not picked up in this roadmap either.
@@ -2853,7 +2901,7 @@ about.
 | notes_020 | 2 Sep | Mark | v2.22 (hand-test diagnosis) | Closed by v2.22 |
 | notes_021 | 2 Sep | Codex | v2.21+ (hardening) | Confirmed all five originally-requested areas already shipped by build 2.21; §2.1/2.2/2.4 closed by v2.23; §2.3 closed by v2.23 (conflict feedback) + v2.24 (fidelity audit); §2.5's cancellable retry transport closed by v2.25; §2.5's streaming half explicitly deferred pending two open product decisions (see v2.25) |
 | notes_022 | 3 Sep | Lynne | v2.26+ (forward proposals) | Stale-brief audit confirms v2.11–v2.25 already cover the five original architecture themes (not re-proposed); forward proposals A–E triaged by notes_023/024 — B (preset packs) closed by v2.29 with both flagged bugs fixed (version check, casefolded replace); A/C/D deferred pending F5/live evidence/UI redesign respectively; E (streaming design) folds into notes_021's existing deferred streaming item |
-| notes_023 | 7 Sep | Codex | v2.26+ (state-integrity & feature review) | Thirteen confirmed defects (F1–F13) and three new features (E1–E3), fully read-only and cross-checked; F1/F2/F3/F4 closed by v2.26; F5/F6/F7/F8 closed by v2.27; E2/E3 closed by v2.28; F9–F13 scoped as v2.30, E1 as v2.31 (calibration-gated) |
+| notes_023 | 7 Sep | Codex | v2.26+ (state-integrity & feature review) | Thirteen confirmed defects (F1–F13) and three new features (E1–E3), fully read-only and cross-checked; F1/F2/F3/F4 closed by v2.26; F5/F6/F7/F8 closed by v2.27; E2/E3 closed by v2.28; F9–F13 closed by v2.30; E1 scoped as v2.31 (calibration-gated), the only item from this note not yet implemented |
 | notes_024 | 7 Sep | Mark | v2.26+ (validation) | Independent in-progress diagnosis reaching the same F1/F2/F3/F5 findings as notes_023 before it was read, and separately catching the same notes_022 B/A flaws Codex flagged; its stated implementation order (privacy boundary, history provenance, configuration crash) is exactly what v2.26 closed |
 
 `scriptorium_notes_001.txt`, a near-duplicate of notes_014 written under

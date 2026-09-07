@@ -36,7 +36,10 @@ Dependencies
     Optional: install python-docx to import from and export to Word (.docx)
     files (`pip install python-docx`). Plain text and Markdown work without it.
 
-Author: built with Mark, August 2026. Version 2.21.
+Author: built with Mark, August 2026. See APP_VERSION below for the
+current version -- this docstring doesn't repeat it, so the two can't
+drift apart (notes_023 F13: this line previously said "Version 2.21" long
+after APP_VERSION had moved on).
 """
 
 import os
@@ -85,7 +88,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.29"
+APP_VERSION = "2.30"
 
 # A small shared palette (notes_017, v2.10) so the two text panes, the diff
 # tags and the notice banner read as one surface instead of drifting
@@ -230,13 +233,27 @@ def _claim_single_instance():
     return ctypes.get_last_error() != _ERROR_ALREADY_EXISTS
 
 
-def _signal_existing_instance():
-    """Ask the already-running instance to show itself."""
+def _signal_existing_instance(attempts=10, delay=0.05):
+    """Ask the already-running instance to show itself.
+
+    A short bounded retry (notes_023 F12) tolerates the narrow window
+    between the first instance claiming the single-instance mutex and its
+    own restore event actually being created in __init__ -- a second
+    launch landing in that gap previously failed OpenEventW once and gave
+    up silently, never signalling the running instance at all. Worst-case
+    total wait is under 0.5s, small enough that a genuinely dead/hung
+    first instance still just fails quietly afterwards as before.
+    """
     kernel32 = _kernel32()
-    handle = kernel32.OpenEventW(_EVENT_MODIFY_STATE, False, _RESTORE_EVENT_NAME)
-    if handle:
-        kernel32.SetEvent(handle)
-        kernel32.CloseHandle(handle)
+    for attempt in range(attempts):
+        handle = kernel32.OpenEventW(
+            _EVENT_MODIFY_STATE, False, _RESTORE_EVENT_NAME)
+        if handle:
+            kernel32.SetEvent(handle)
+            kernel32.CloseHandle(handle)
+            return
+        if attempt < attempts - 1:
+            time.sleep(delay)
 
 
 def _autostart_command(start_minimised=False):
@@ -1019,7 +1036,12 @@ def load_config():
     True so callers can refuse to overwrite it — that is how a hand-edited API
     key in a malformed file would otherwise be silently lost. Whatever is
     returned has already been through normalise_config(), so every caller can
-    trust default_mode/backend/etc. are one of the supported values.
+    trust default_mode/default_strength/etc. are one of the supported
+    values -- with one deliberate exception (notes_023 F13): a present but
+    unrecognised "backend" is left exactly as stored, not clamped to a
+    guess, so run_backend() and Settings (v2.26) can both fail closed
+    instead of silently treating damaged config as a choice to use the
+    cloud backend.
     """
     load_config.unreadable = False
     load_config.repair_warnings = {"messages": [], "omitted": 0}
@@ -1414,6 +1436,21 @@ def _wait_for_retry(delay, cancel_event):
         raise RequestCancelled("The request was cancelled.")
 
 
+def _read_http_error_detail(exc, limit=400):
+    """Return a best-effort, size-bounded body from an HTTPError.
+
+    Reading a final HTTP error body can itself fail -- a stalled
+    connection, an incomplete chunked response -- and letting that escape
+    here would skip the friendly BackendError message entirely, surfacing
+    a raw TimeoutError/IncompleteRead instead (notes_023 F11). Falls back
+    to a stable placeholder rather than raising.
+    """
+    try:
+        return exc.read().decode("utf-8", "replace")[:limit]
+    except Exception:  # noqa: BLE001 -- must never escape the caller's error path
+        return "(could not read the response body)"
+
+
 def _request_with_retries(request_factory, *, timeout, label,
                           transient_statuses, response_reader,
                           unavailable_hint="", on_retry=None,
@@ -1458,9 +1495,10 @@ def _request_with_retries(request_factory, *, timeout, label,
             can_retry = (exc.code in transient_statuses
                         and attempt < MAX_REQUEST_ATTEMPTS - 1)
             if not can_retry:
-                detail = exc.read().decode("utf-8", "replace")[:400]
+                detail = _read_http_error_detail(exc)
                 request_id = exc.headers.get("request-id", "") if exc.headers else ""
                 trace = f"\nRequest ID: {request_id}" if request_id else ""
+                exc.close()
                 raise BackendError(
                     f"{label} returned an error ({exc.code}).\n\n{detail}{trace}"
                 ) from exc
@@ -1634,14 +1672,22 @@ def list_ollama_models(timeout=3):
         req = urllib.request.Request(OLLAMA_TAGS_URL, method="GET")
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, json.JSONDecodeError, OSError, ValueError):
+    except (urllib.error.URLError, json.JSONDecodeError, OSError, ValueError,
+            http.client.HTTPException):
         return []
     if not isinstance(payload, dict):
         return []
     raw = payload.get("models") or []
     if not isinstance(raw, list):
         return []
+    # Accept only non-empty strings (notes_023 F10) -- item.get("name") or
+    # item.get("model") can be a non-string truthy value (a number, a
+    # nested object) in malformed /api/tags metadata, which previously
+    # slipped past the old bare "if name:" check and made sorted(names)
+    # raise TypeError on the mixed-type list. De-duplicated case-
+    # insensitively since Ollama tags are compared that way in practice.
     names = []
+    seen = set()
     for item in raw:
         if isinstance(item, dict):
             name = item.get("name") or item.get("model") or ""
@@ -1649,9 +1695,18 @@ def list_ollama_models(timeout=3):
             name = item
         else:
             name = ""
-        if name:
-            names.append(name)
-    return sorted(names)
+        if isinstance(name, str):
+            name = name.strip()
+            if name:
+                folded = name.casefold()
+                # set(names) would sort case-insensitively but keep "Dup"
+                # and "dup" as two distinct entries -- an explicit
+                # first-seen-wins folded-key check is what actually
+                # de-duplicates rather than merely re-ordering.
+                if folded not in seen:
+                    seen.add(folded)
+                    names.append(name)
+    return sorted(names, key=str.casefold)
 
 
 # --------------------------------------------------------------------------- #
@@ -2095,12 +2150,21 @@ def set_html_clipboard(owner_hwnd, plain_text, html_fragment):
     if not html_format:
         raise ctypes.WinError()
 
-    html_handle = _global_clipboard_memory(_build_cf_html(html_fragment))
-    text_handle = _global_clipboard_memory(
-        (plain_text + "\x00").encode("utf-16-le"))
+    # Both handles are allocated inside this try/finally (notes_023 F9):
+    # previously html_handle's own allocation happened before the block
+    # started, so a failure allocating text_handle right after it left
+    # html_handle permanently leaked -- nothing downstream would ever see
+    # or free it. Initialising both to None first means the finally clause
+    # below can tell "never allocated" apart from "allocated but not yet
+    # transferred" and only ever frees the latter.
+    html_handle = None
+    text_handle = None
     html_transferred = False
     text_transferred = False
     try:
+        html_handle = _global_clipboard_memory(_build_cf_html(html_fragment))
+        text_handle = _global_clipboard_memory(
+            (plain_text + "\x00").encode("utf-16-le"))
         _open_clipboard_with_retries(user32, owner_hwnd)
         try:
             if not user32.EmptyClipboard():
@@ -2115,9 +2179,9 @@ def set_html_clipboard(owner_hwnd, plain_text, html_fragment):
             user32.CloseClipboard()
     finally:
         # A successful SetClipboardData transfers ownership to Windows.
-        if not html_transferred:
+        if html_handle is not None and not html_transferred:
             kernel32.GlobalFree(html_handle)
-        if not text_transferred:
+        if text_handle is not None and not text_transferred:
             kernel32.GlobalFree(text_handle)
 
 
@@ -2910,19 +2974,36 @@ class SettingsDialog(ctk.CTkToplevel):
         self.ollama_status.configure(text="Detecting…")
 
         def worker():
-            models = list_ollama_models()
+            """Finish detection even if malformed local metadata raises.
+
+            list_ollama_models() already guards its own known failure modes
+            (notes_023 F10), but this is the terminal callback for the
+            whole daemon thread -- an uncaught exception here would
+            silently kill the thread before self.after() ever runs,
+            leaving Detect permanently disabled on "Detecting…" with no
+            way to recover short of closing Settings.
+            """
             try:
-                self.after(0, self._finish_model_detection, models)
+                models = list_ollama_models()
+                error = ""
+            except Exception as exc:  # noqa: BLE001 -- terminal UI recovery
+                models = []
+                error = str(exc)
+            try:
+                self.after(0, self._finish_model_detection, models, error)
             except (tk.TclError, RuntimeError):
                 pass  # the Settings dialog closed before detection finished
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _finish_model_detection(self, models):
+    def _finish_model_detection(self, models, error=""):
         """Apply a completed Ollama model list on Tk's event thread."""
         if not self.winfo_exists():
             return
         self._refresh_state()
+        if error:
+            self.ollama_status.configure(text=f"Detection failed: {error}")
+            return
         if not models:
             self.ollama_status.configure(
                 text="No response from Ollama at localhost:11434 — is "
@@ -4326,10 +4407,12 @@ class Scriptorium(ctk.CTk):
 
     def _on_retry_progress(self, request_id, message):
         """Show a retry-in-progress status, but only for the request that's
-        still current -- a superseded or cancelled request's worker thread
-        keeps sleeping harmlessly (see _request_json_with_retries()), but
-        its progress updates must not overwrite the UI for whatever the
-        user has moved on to. Deliberately does NOT go through
+        still current. A superseded or cancelled request's worker thread
+        no longer keeps sleeping (notes_023 F13: this used to be true
+        before v2.25's cancellable retry transport) -- its cancel_event
+        wakes it immediately instead -- but a progress update already
+        queued before that happened must still not overwrite the UI for
+        whatever the user has moved on to. Deliberately does NOT go through
         _claim_request(): this is a progress update mid-request, not its
         completion, so busy must stay True and the request must stay owned.
         """
