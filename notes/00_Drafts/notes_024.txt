@@ -1,0 +1,11 @@
+**Author:** Mark  
+**Date:** 7th September 2026  
+**Reference:** notes_023.txt  
+
+Two significant consistency risks have been identified within the live version 2.25 codebase. Firstly, the revision history may document the controls selected at the conclusion of a request, rather than those utilised at the outset. Secondly, the restored history intentionally omits the original ambiguity and fidelity warnings. I am currently validating these discrepancies against the batch path and recent notes, adhering to the principle that “review evidence must follow the revision” in both cases.
+
+The recent code assessment has confirmed the primary clusters of risk: malformed configurations may still result in normalisation crashes; settings could silently convert an unknown backend into Claude [Confirmed by Mark]; restored history poses a risk of losing review evidence or may be overwritten by an in-flight request; and batch mode exhibits several vulnerabilities concerning output integrity. I am in the process of validating the specific insertion points and evaluating proposed features against both the shipped and deferred history prior to drafting the sole authorised report file.
+
+I intend to consider the existing draft note as evidence rather than as an implementation guide. The preset-pack concept continues to demonstrate potential; however, its case-insensitive overwrite logic presents flaws. Additionally, its batch-drop snippet inadvertently exposes its staging directory and incorrectly constructs the frozen executable command, while its proposed local calibration model contradicts the machine capacity results outlined in MEMORY.md. These issues will be highlighted to prevent outdated snippets from being erroneously presented as “ready.”
+
+The independent cross-check is consistent with the findings related to privacy and history, identifying two notable edge cases: malformed Ollama /api/tags metadata can cause the Detect function to become unresponsive, remaining stuck on “Detecting…”, and reading an HTTP error body may inadvertently bypass the user-friendly backend error path. I will categorise these as lower-priority hardening items, while the implementation order for the report will commence with the privacy boundary, history provenance, configuration crash, and batch review parity.

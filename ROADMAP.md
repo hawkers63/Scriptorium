@@ -2253,6 +2253,384 @@ engineering follow-up.
 
 ---
 
+## v2.26 — Privacy boundary, request provenance & tone type-safety
+
+**Goal:** close notes_023 (Codex)'s four release-blocking findings — a
+Settings path that silently converts an unrecognised backend into Claude, a
+history mechanism that can mislabel or lose review evidence and be
+overwritten by a late in-flight callback, and a config normaliser that
+crashes on valid-JSON-but-malformed tone data. These four are Codex's own
+stated P0, and were independently reached by Mark's own diagnosis pass
+(notes_024) before Codex's report was even read — see notes_024's closing
+paragraph, which names this exact order. Touches Settings, `process()`/
+`_on_success()`/`_remember_for_history()`/`_restore_from_history()`/
+`reject()` and `validate_tones()` only; no schema or prompt change.
+
+1. **Safe `validate_tones()`** (notes_023 §2.2 F4, snippet §3.1). A legacy
+   `default_tone` stored as a list, or a preset's `tones` containing a dict,
+   currently raises `TypeError: unhashable type` at start-up — reproduced
+   directly during the review. Make `validate_tones()` the real type
+   boundary: string/list/tuple accepted, any other container returns an
+   empty selection, non-string members are dropped before membership
+   checks. Do this first — F2/F3 below call through it.
+2. **Fail-closed Settings backend controls** (notes_023 §2.2 F1, snippet
+   §3.2). Today an invalid/missing backend displays as "Claude" in Settings,
+   and saving any unrelated change (e.g. ticking Always on top) silently
+   persists `backend: "anthropic"` — defeating the fail-closed privacy rule
+   `run_backend()` already enforces since v2.1. Show neither segment
+   selected for an invalid/non-string backend, disable both model groups
+   and Save until the user explicitly picks Claude or Ollama, and remove
+   every default-to-anthropic expression from `SettingsDialog`.
+3. **Immutable per-request context** (notes_023 §2.2 F2, snippet §3.3).
+   Mode/Strength/Role/Tones stay live-editable while a request is in
+   flight, but the history entry and the completion-time letter-convention
+   audit both read the *current* toolbar state rather than what was
+   actually sent. Add `build_request_context()`, capture it once before
+   `build_system_prompt()`, thread it through the worker callback, and use
+   it — not the live controls — for the letter-convention check and the
+   history label.
+4. **Durable review evidence in history** (notes_023 §2.2 F3, snippet §3.3
+   continued). `_remember_for_history()` stores none of the model's
+   ambiguities, its note, or the deterministic fidelity/letter-convention
+   notices `_on_success()` already computes; `_restore_from_history()`
+   fabricates an empty ambiguity list and never calls
+   `_invalidate_inflight()`, so a still-running request can silently
+   overwrite a revision the user just explicitly restored. Add
+   `collect_revision_notices()`, split durable notices (kept on restore)
+   from the transient "Original changed while processing" message (not
+   kept), store both ambiguities and durable notices per history entry,
+   restore them faithfully, and invalidate any in-flight request before a
+   restore mutates state.
+
+### Acceptance checklist
+- [ ] A hand-edited `default_tone: []` and a preset with `tones: [{}]` both
+      load without raising; the app starts with those tones dropped rather
+      than crashing.
+- [ ] Settings opens against a config with backend `"Ollma"`, `None`, `[]`
+      and `{}` in turn: neither segment shows selected, both model groups
+      and Save are disabled, no network call is made; explicitly picking
+      Claude or Ollama enables Save and persists only that choice.
+- [ ] Start a request, change Mode/Role/a tone or apply a preset before it
+      completes: the resulting history entry and the letter-convention
+      audit reflect the settings captured at request start, not the
+      changed live controls.
+- [ ] Process a source that trips a model ambiguity, a fidelity warning and
+      a letter-convention advisory; restore that entry from History later
+      in the session: all three notices reappear in the banner, and the
+      transient stale-source message does not.
+- [ ] Start a slow/retrying request, immediately restore an older history
+      entry: the in-flight request is invalidated and cannot overwrite the
+      just-restored revision when it eventually completes.
+- [ ] `ast.parse()` clean; full regression pass; rebuilt `.exe` launches and
+      stays responsive; real `scriptorium_config.json` untouched throughout.
+
+---
+
+## v2.27 — Batch & document integrity
+
+**Goal:** close notes_023's second-tier findings — batch mode's output/
+review-file guarantees don't match what it promises, the diff-export
+chooser isn't actually modal, frozen-build config migration leaves live UI
+state stale, and Word import silently drops table text. Depends on v2.26's
+`collect_revision_notices()`/request-context helpers.
+
+1. **Batch output/review parity** (notes_023 §2.2 F5, snippet §3.4).
+   `INPUT_DIR` may equal `OUTPUT_DIR` today (a later run reprocesses its own
+   revisions), `report.txt`/`report.md` collide on the same `.diff.txt`
+   companion, batch never runs the fidelity/letter audits the GUI runs, and
+   several setup/output steps sit outside error handling despite the
+   documented "one bad file never aborts the batch" contract. Reject equal
+   real input/output directories, name review files from the full input
+   filename, share `collect_revision_notices()` between GUI and batch,
+   guard config-unreadable/output-directory/log-open failures, and keep
+   `write_docx`'s `ImportError`/`ValueError` inside the per-file boundary.
+2. **Modal, snapshotted diff export** (notes_023 §2.2 F6, snippet §3.5).
+   `DiffExportFormatDialog` has neither `transient()` nor `grab_set()`, and
+   `export_diff_file()` re-reads mutable `self.last_result` after that
+   nested dialogue closes — a Reject or History click behind the chooser
+   can crash the export or export the wrong revision. Make the chooser
+   modal and snapshot source/revision/request-context/notices before it
+   opens. Required before v2.28's review-record export.
+3. **Frozen-config migration live sync** (notes_023 §2.2 F7). The one-time
+   source→frozen import reads plain `utf-8` (inconsistent with ordinary
+   loading's `utf-8-sig`) and only updates five toolbar values — imported
+   presets never refresh the preset menu, imported Always-on-top never
+   applies, and an imported "start with Windows" is written to JSON without
+   ever touching the registry. Add `_apply_imported_config_to_live_ui()`
+   and explicitly reconcile the autostart entry, reporting rather than
+   hiding a registry-write failure.
+4. **Word-table refusal** (notes_023 §2.2 F8). `read_docx()` joins
+   `document.paragraphs` only; `python-docx` excludes table-cell text from
+   that collection, so a table-bearing `.docx` silently loses content with
+   no warning. Refuse documents containing tables with a precise
+   explanation until a reading-order-preserving table importer is
+   separately designed and tested.
+
+### Acceptance checklist
+- [ ] Batch refuses to run when `--out` names the same real directory as
+      the input folder, with a clear stderr message and no files touched.
+- [ ] Batch on same-stem `.txt`/`.md`/`.docx` inputs, and a pre-existing
+      `report.txt`/`report.md` pair, all produce distinct, correctly-paired
+      revision/review files with no overwrite.
+- [ ] A batch run against a source with a fidelity/letter-convention issue
+      records that warning in the file's own review companion, matching
+      what the GUI would have shown.
+- [ ] An unreadable batch config, a failed output-directory creation, and
+      an unopenable log file each abort with a clear message and non-zero
+      exit rather than silently proceeding with defaults; a mid-batch
+      per-file failure (bad XML, missing python-docx) still lets the rest
+      of the batch complete.
+- [ ] Leaving the diff-export format chooser open blocks interaction with
+      the main window; a Reject or History-restore attempted behind it has
+      no effect until it closes, and the export always reflects the
+      revision that was current when Export was clicked.
+- [ ] A first frozen-`.exe` launch after using the source version,
+      accepting the import prompt: preset menu, Always-on-top and the
+      toolbar all reflect the imported values immediately; a requested
+      "start with Windows" either creates the registry entry or shows an
+      explicit warning that it could not.
+- [ ] Importing a `.docx` with no tables still works exactly as before; one
+      containing a table is refused with the explicit message rather than
+      silently losing its table text.
+- [ ] `ast.parse()` clean; full regression pass; rebuilt `.exe` verified;
+      real config untouched.
+
+---
+
+## v2.28 — Change navigator & provenance review-record export
+
+**Goal:** the two features notes_023 identifies as safe to ship immediately
+after the integrity work, because neither touches model behaviour or the
+prompt: a change-by-change navigator for the Suggested-revision pane, and a
+provenance-aware "review record" export format. Depends on v2.26 (request
+context/durable notices) and v2.27 (F6's modal/snapshotted export).
+
+1. **Change-by-change navigator** (notes_023 §2.4, snippet §3.11).
+   `render_diff()` identifies every changed region but returns no anchors,
+   so there's no way to step through a long revision's changes. Have it
+   return the displayed Tk index ranges for every non-`equal` opcode; add
+   compact Prev / `n / N` / Next controls beside the Clean/Inline toggle;
+   centralise the three render call sites through one
+   `_render_active_revision()` so History/Reject/view-toggle all stay in
+   sync with the navigator.
+2. **Provenance-aware review-record export** (notes_023 §2.5, snippet
+   §3.12). Add "Review record" as a third Export-diff format alongside
+   Unified/Annotated: a self-contained Markdown file starting with an
+   explicit "not accepted automatically" status line, followed by
+   generation time/backend/model/scope/Mode/Strength/Role/Tones, the
+   change summary, every ambiguity and durable notice, and the fenced
+   Original/Suggested-revision/unified-diff text. Reuses v2.26's request
+   context and durable notices and v2.27's export snapshot; must never
+   include the API key or system prompt.
+
+### Acceptance checklist
+- [ ] Prev/Next correctly cycle through every changed region in order,
+      wrapping at both ends; the position label matches; the active change
+      is visibly marked without replacing the existing insert/delete
+      colours; both controls are disabled when there is no revision or no
+      wording change.
+- [ ] Switching Clean/Inline view, rejecting, and restoring a different
+      history entry all correctly reset or repopulate the navigator — no
+      stale ranges pointing at text that's no longer there.
+- [ ] "Review record" produces a Markdown file containing the correct
+      provenance, change summary, every ambiguity/notice, and both texts,
+      with source backticks safely fenced; it never contains the API key.
+- [ ] Exporting a review record for a restored history entry reflects that
+      entry's own original notices, not the currently-live ones.
+- [ ] `ast.parse()` clean; full regression pass; rebuilt `.exe` verified;
+      real config untouched.
+
+---
+
+## v2.29 — Preset-pack import/export
+
+**Goal:** notes_022 (Lynne) proposal B — a shareable preset-pack file so a
+house style travels between machines without hand-editing
+`scriptorium_config.json` — implemented with the two correctness fixes
+notes_023 (Codex) and Mark's own notes_024 both independently flagged
+against the original draft snippet: no schema-version check, and a
+case-sensitive "replace existing" that can leave a differently-cased
+duplicate to win the merge instead of actually being replaced.
+
+1. Add `export_preset_pack()`/`import_preset_pack()` (notes_022 §3 snippet
+   B1, corrected) with the versioned
+   `{"format": "scriptorium.preset_pack", "version": 1, "presets": {...}}`
+   schema. Reject a pack whose `version` isn't the one currently supported,
+   with a clear message, rather than attempting to merge it. Merge/replace
+   by casefolded name so differently-cased duplicates cannot survive a
+   "replace existing" import.
+2. Add "Export pack…"/"Import pack…" buttons to `PresetManagerDialog`
+   (notes_022 insertion map B2). Import reuses `normalise_user_presets()`
+   so reserved names and `MAX_USER_PRESETS` stay enforced; collisions
+   without "replace existing" ticked are skipped with a repair-style
+   message list, matching the existing preset-repair notice style from
+   v2.23.
+
+### Acceptance checklist
+- [ ] Export produces a valid pack file for the current user presets;
+      importing it into a fresh config round-trips every preset exactly.
+- [ ] A pack with a future/unrecognised `version` is refused with a clear
+      message and does not partially merge.
+- [ ] Importing a pack containing a preset name differing only in case from
+      an existing one, with "replace existing" ticked, actually replaces
+      it — no duplicate survives under the other casing.
+- [ ] Importing without "replace existing" against colliding names skips
+      those entries and reports which were skipped, leaving the existing
+      presets untouched.
+- [ ] A pack at exactly `MAX_USER_PRESETS` and one exceeding it are both
+      handled per the existing cap behaviour.
+- [ ] `ast.parse()` clean; full regression pass; rebuilt `.exe` verified;
+      real config untouched.
+
+---
+
+## v2.30 — Low-risk hardening bundle & documentation drift
+
+**Goal:** notes_023's remaining low-risk items (P3), bundled together in
+the v2.23 style since each is small and independent, plus the
+documentation-drift item (F13) Codex deliberately separated from
+correctness work.
+
+1. **Clipboard `HGLOBAL` leak** (notes_023 §2.2 F9, snippet §3.6).
+   `set_html_clipboard()` allocates two global handles before its
+   `try`/`finally`; if the second allocation fails, the first is never
+   freed. Initialise both to `None`, allocate inside the `try`, free only
+   non-null/non-transferred handles in `finally`.
+2. **Robust Ollama model discovery** (notes_023 §2.2 F10, snippet §3.9).
+   Malformed `/api/tags` metadata (mixed types, a dict) can raise
+   `TypeError` and strand Settings' Detect button on "Detecting…" forever,
+   with no `http.client.HTTPException` handling either. Accept only
+   non-empty strings, de-duplicate case-insensitively, catch the same
+   transport-error family as the main backend, and guarantee the worker
+   always posts a terminal callback.
+3. **Bounded HTTP error-body reading** (notes_023 §2.2 F11). Reading a
+   final HTTP error body inside an `except HTTPError` can itself raise
+   `TimeoutError`/`IncompleteRead`, escaping the friendly-error path; the
+   error response is also never explicitly closed. Add a bounded
+   `_read_http_error_detail()` helper with a stable fallback and a
+   `finally` close.
+4. **Bounded single-instance restore retry** (notes_023 §2.2 F12, snippet
+   §3.13). A second launch in the narrow window before the first
+   instance's restore-event is created fails silently. Give
+   `_signal_existing_instance()` a short bounded retry (ten 50ms
+   attempts).
+5. **Documentation drift** (notes_023 §1.1, F13). Module docstring's stale
+   version line, `load_config()`'s "callers may trust backend is
+   supported" claim (deliberately false since v2.9), `_on_retry_progress()`'s
+   stale "keeps sleeping" wording (superseded by v2.25's wake-on-cancel),
+   MEMORY's implementation record, and the deferred-module-split
+   rationale's obsolete line count. Wording-only; no behaviour change and
+   explicitly not permission for a module split or streaming.
+
+### Acceptance checklist
+- [ ] A simulated second-allocation clipboard failure leaves no leaked
+      handle (verified via call-count/free-count on a stub, since a
+      genuine `GlobalAlloc` failure isn't practically triggerable).
+- [ ] Malformed `/api/tags` payloads (mixed types, a bare dict, a string)
+      all leave Detect re-enabled with a clear message rather than stuck
+      on "Detecting…".
+- [ ] A simulated error-body read failure during a backend error still
+      shows the existing friendly `BackendError` dialogue, not a raw
+      traceback.
+- [ ] A stubbed restore-event race (event created just after the first
+      `OpenEventW` attempt) is caught by the retry and still restores the
+      running instance.
+- [ ] Docstrings and MEMORY read consistently with the actual v2.29 state;
+      `ast.parse()` clean; full regression pass; rebuilt `.exe` verified;
+      real config untouched.
+
+---
+
+## v2.31 — Selection-scoped processing (calibration-gated)
+
+**Goal:** notes_023's E1 — explicit selection-scoped processing — the
+highest day-to-day value feature in the review, deliberately shipped last
+and on its own because, per this project's own v2.4/v2.11 history, meaning
+preservation cannot be trusted from plausible prompt design alone:
+narrowing the request text changes what the model can infer, and that must
+be checked against real model output before shipping, not merely reasoned
+about.
+
+1. Add `make_processing_scope()`/`assemble_scoped_revision()` (notes_023
+   §2.3, snippet §3.10) and a `process_selection()` entry point: "Process
+   selection" in the Original context menu plus Ctrl+Shift+Enter, enabled
+   only with a non-empty selection. Refactor `process()`'s body into
+   `_begin_processing(scope)` so full-document and selection requests
+   share one path; prefix/suffix are copied locally and never sent to the
+   model, so the unchanged exterior is guaranteed by Python rather than
+   requested from it. Full fidelity/letter audits still run against the
+   complete assembled document, not just the returned fragment.
+2. **Mandatory live-model calibration before shipment** (notes_023 §2.3's
+   own gate) — run real calls through both the configured Claude backend
+   and whichever Ollama model is actually installed and loadable on this
+   machine (MEMORY records llama3.1:8b failing to load with ~4GiB
+   available; confirm what's actually usable at calibration time rather
+   than assuming). Fixed corpus per the note: mid-sentence selections,
+   pronouns whose antecedent sits outside the selection, negation/
+   modality/hedges/quantities/dates/money/percentages, quotations/URLs/
+   paths/emails/every placeholder shape, Markdown structure, an
+   already-correct selection and a genuinely ambiguous one, across modes/
+   strengths/roles/tones. Ship only if every byte outside the selection is
+   unchanged, protected inventory is preserved, nothing is guessed when
+   context is missing (surfaced as ambiguity instead), and the spliced
+   boundary has no doubled/missing whitespace. If either backend
+   repeatedly guesses missing context, the feature stays disabled rather
+   than shipping with stronger prose alone.
+
+### Acceptance checklist
+- [ ] `make_processing_scope()` rejects a selection that doesn't
+      reconstruct the exact Original text, and rejects a whitespace-only
+      selection.
+- [ ] A full-document request behaves identically to before
+      selection-scoped processing existed.
+- [ ] A selection request's prefix/suffix reappear byte-for-byte in the
+      assembled revision; fidelity/letter audits run against the full
+      assembled text, not just the returned fragment.
+- [ ] History, export, Copy and stale-source checks all work correctly
+      against a selection-scoped result exactly as they do for a
+      full-document one.
+- [ ] The full live-model calibration corpus above passes against both
+      backends per the stated criteria; results (source, response, model
+      tag, verdict) are recorded. Any repeated context-guessing failure
+      keeps the feature disabled rather than shipping.
+- [ ] `ast.parse()` clean; full regression pass; rebuilt `.exe` verified;
+      real config untouched.
+
+---
+
+## Deferred from notes_022/023/024 planning (2026-09-07)
+
+- **notes_022 A — multi-file/folder drop → batch handoff.** Revisit only
+  after v2.27 (F5) ships, and only with two bugs in the original snippet
+  fixed first: the temporary staging directory is never removed (leaked on
+  success, and again on a staging failure), and the frozen-executable
+  launch command prepends both `sys.executable` and `sys.argv[0]`,
+  duplicating the executable path under a frozen PyInstaller build. Not
+  scheduled above.
+- **notes_022 C — soft tone conflicts (advisory, non-blocking).** Not yet
+  justified by any observed failure; the note's own proposed calibration
+  model (llama3.1:8b) is stale for this machine per MEMORY (fails to load
+  with roughly 4GiB available; llama3.2:3b is what's actually used).
+  Revisit only with live evidence gathered against models genuinely
+  installed at test time.
+- **notes_022 D — configurable reading speed + a second readability line
+  for the active revision in the status bar.** The calculation itself is
+  safe, but the status bar is already dense and this project has a
+  documented toolbar/minimum-width crowding history; do not add another
+  always-visible metric without a real 920px/150%-DPI check. A compact
+  on-demand area (e.g. inside v2.28's review record, or a details
+  popover) is a better seam than a permanent second status line —
+  reconsider the UI, not just the arithmetic, before scheduling.
+- **Visible streaming** (notes_022 E design notes; notes_023 §2.5 confirms
+  the seam and keeps it deferred). Still blocked on two product decisions
+  only Mark can make: may the Suggested-revision pane show an unreviewed
+  partial draft while tokens arrive, and does a stream failure after
+  partial delivery discard the partial or keep it clearly labelled. Ask
+  Mark directly if/when he wants to make these calls — not an engineering
+  follow-up to just implement.
+
+---
+
 ## Deferred / explicitly out of scope for v2.1–v2.13
 
 - Migrating the API key to Windows Credential Manager (`keyring`) — real
@@ -2325,6 +2703,9 @@ engineering follow-up.
 | notes_018 | 1 Sep | Zoe | v2.8 (delta) | Closed by v2.9 (Bugs 1–2/S2, 3–7, S1); S3 deliberately not fixed (informational only, see v2.9 write-up) |
 | notes_020 | 2 Sep | Mark | v2.22 (hand-test diagnosis) | Closed by v2.22 |
 | notes_021 | 2 Sep | Codex | v2.21+ (hardening) | Confirmed all five originally-requested areas already shipped by build 2.21; §2.1/2.2/2.4 closed by v2.23; §2.3 closed by v2.23 (conflict feedback) + v2.24 (fidelity audit); §2.5's cancellable retry transport closed by v2.25; §2.5's streaming half explicitly deferred pending two open product decisions (see v2.25) |
+| notes_022 | 3 Sep | Lynne | v2.26+ (forward proposals) | Stale-brief audit confirms v2.11–v2.25 already cover the five original architecture themes (not re-proposed); forward proposals A–E triaged by notes_023/024 — B (preset packs) scoped as v2.29 with two bugs fixed first; A/C/D deferred pending F5/live evidence/UI redesign respectively; E (streaming design) folds into notes_021's existing deferred streaming item |
+| notes_023 | 7 Sep | Codex | v2.26+ (state-integrity & feature review) | Thirteen confirmed defects (F1–F13) and three new features (E1–E3), fully read-only and cross-checked; F1/F4/F2/F3 scoped as v2.26, F5–F8 as v2.27, E2/E3 as v2.28, F9–F13 as v2.30, E1 as v2.31 (calibration-gated) |
+| notes_024 | 7 Sep | Mark | v2.26+ (validation) | Independent in-progress diagnosis reaching the same F1/F2/F3/F5 findings as notes_023 before it was read, and separately catching the same notes_022 B/A flaws Codex flagged; confirms the v2.26 implementation order |
 
 `scriptorium_notes_001.txt`, a near-duplicate of notes_014 written under
 `AGENTS.md`'s (now-abandoned) `scriptorium_notes_[N].txt` draft-path

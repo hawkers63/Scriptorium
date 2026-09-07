@@ -1,0 +1,1754 @@
+Scriptorium v2.25 — Read-only Enhancement, State-Integrity and Feature Review
+=============================================================================
+
+Author: Codex, Lead Enhancement & Feature Architect
+Date: 7 September 2026
+Review boundary: read-only investigation; this report is the sole permitted write
+Target source: C:\Scriptorium\scriptorium.py
+
+Verified baseline
+-----------------
+APP_VERSION:                    2.25 (scriptorium.py line 88)
+Physical source lines:          4,894
+Source size:                    220,125 bytes
+SHA-256:                        6F182298B20419F08BD7199C18A7B1653C2F8E9A07CF8F31B22ABF77DCDCFB23
+Current branch:                 main, one commit ahead of origin/main
+Latest repository commit:       7590569, 7 September 2026, "notes 22"
+Latest source implementation:   09533c0, v2.25 cancellable retry transport
+Primary Python files found:     scriptorium.py only
+Report number check:            highest existing note was 022 across both
+                                notes\00_Drafts and notes\01_Active; therefore
+                                this report is notes_023.txt.
+
+Read in full or inspected afresh for this review:
+
+  * scriptorium.py, including DEFAULT_CONFIG/normalise_config, prompt
+    construction, both backend paths, retry transport, document I/O, diff and
+    clipboard helpers, every dialogue, Scriptorium state transitions, Explorer
+    drop handling, revision history, tray lifecycle and batch mode;
+  * ROADMAP.md, including every shipped entry through v2.25 and the complete
+    Deferred / explicitly out of scope section;
+  * MEMORY.md's newest session history and the older entries relevant to model
+    calibration, native Windows handling, persistence and batch operation;
+  * notes_020.txt, notes_021.txt and the latest draft, notes_022.txt;
+  * AGENTS.md, enhancement_agent.md and the current Git history/status.
+
+Read-only validation performed:
+
+  * AST parsing of the current source succeeded.
+  * Direct, non-writing Python probes reproduced both malformed-tone crashes:
+      default_tone=[]       -> TypeError: unhashable type: 'list'
+      preset tones=[{}]     -> TypeError: unhashable type: 'dict'
+  * Static request/state tracing was performed from process() through the worker
+    callback, audit banner, history storage/restoration and export paths.
+  * Static file-name tracing was performed for batch inputs with equal stems,
+    repeated runs and INPUT_DIR == OUTPUT_DIR.
+  * No backend call, GUI mutation, registry change, project test write or source
+    edit was made. Git was clean apart from the already-existing "ahead 1"
+    branch state immediately before this report was created.
+
+
+1. Executive Summary
+--------------------
+
+Scriptorium v2.25 has a sound lightweight core. In particular, the current
+single-result contract, explicit Accept/Reject boundary, fail-closed backend
+dispatcher, bounded retry transport, atomic configuration writes, feature-gated
+Word/tray support and deterministic fidelity checks are good load-bearing
+decisions. The most valuable next work is not a structural rewrite. It is to
+close a small number of state-boundary gaps where those good decisions are not
+applied consistently at every UI or batch entry point.
+
+Four findings should be treated as release-blocking for the next implementation
+cycle:
+
+  1. Settings can silently translate an invalid backend into Claude when an
+     unrelated setting is saved, crossing the app's deliberate privacy boundary.
+  2. Revision history loses ambiguity/safety evidence, can be mislabelled with
+     controls that did not generate it, and can be overwritten by an in-flight
+     request after the user explicitly restores an older entry.
+  3. Valid but malformed JSON tone values can crash application start-up despite
+     the normaliser's stated graceful-degradation contract.
+  4. Batch mode can reprocess its own products, overwrite review files for
+     equal-stem inputs, omit GUI-equivalent fidelity/letter warnings, and abort
+     outside its promised per-file failure boundary.
+
+The next tier comprises a non-modal export race, incomplete live-state
+synchronisation after frozen-config migration, and silent omission of Word table
+text. The remaining items are bounded hardening: a rare native clipboard handle
+leak, malformed Ollama model metadata, error-response reading, and the narrow
+single-instance start-up race.
+
+Recommended implementation order
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+  P0 — privacy and evidence integrity
+    F1 Settings backend selection; F2 immutable request context/history evidence;
+    F3 history cancellation; F4 tone type safety.
+
+  P1 — batch and document integrity
+    F5 batch output/review parity; F6 modal/snapshotted diff export; F7 config
+    migration synchronisation; F8 Word-table refusal or faithful extraction.
+
+  P2 — lightweight features after P0/P1
+    E1 selection-scoped processing (only after live-model calibration), E2
+    change-by-change navigation, E3 provenance-aware review-record export.
+
+  P3 — low-risk hardening and documentation
+    F9 clipboard allocation, F10 Ollama detection, F11 HTTP error details, F12
+    single-instance signalling, F13 version/documentation drift.
+
+Three genuinely new, lightweight feature opportunities
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+  E1. Process selection
+      An explicit context-menu/keyboard action sends only the selected passage,
+      splices the returned passage back into an otherwise byte-identical full
+      suggested revision, and still requires Accept. This lowers latency/cost for
+      long documents without adding another pane or another result.
+
+      Freshness check: process() currently always reads the whole Original at
+      lines 3742–3752; the Original context menu only offers Copy/Paste at
+      4023–4049; repository-wide searches found no selection-processing path in
+      source, ROADMAP, MEMORY or numbered notes; it is not in the deferred list.
+
+  E2. Change-by-change navigation
+      Compact Previous/Next controls and keyboard shortcuts step through each
+      non-equal diff opcode. This materially improves explicit review of long
+      revisions while adding no model call and no persistence.
+
+      Freshness check: render_diff() identifies changes but returns no anchors at
+      lines 1617–1645, while the Suggested-revision header contains only its title
+      and Clean/Inline toggle at 3251–3259. No "next change", "previous change"
+      or navigator appears anywhere in source, roadmap, memory or notes, and the
+      idea is not deferred.
+
+  E3. Provenance-aware review record
+      Add a third option to the existing Export diff dialogue: a self-contained
+      Markdown record containing the immutable request settings, original,
+      suggested revision, change summary, model ambiguities, deterministic review
+      notices and an explicit "not accepted automatically" statement.
+
+      Freshness check: the chooser currently exposes only unified/annotated
+      formats at 2418–2468, and no review-record builder or provenance export was
+      found in source, roadmap, memory or numbered notes. It extends an existing
+      export seam and is not deferred.
+
+None of these features changes the non-negotiable product contract: there is one
+Original and one Suggested revision, and no result is applied without the user's
+explicit Accept action. E1 is input-scope-adjacent to prompt behaviour and is
+therefore gated on real backend calibration described in section 2.5; paper-only
+reasoning is not sufficient for shipment.
+
+
+1.1 Assessment of the most recent project notes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+notes_020.txt
+  Closed reference. Its tray/start-up diagnosis was implemented in v2.22. The
+  current source has the mapped-window gate, launch-visibility path and tray
+  lifecycle described by ROADMAP. Do not reapply its old code.
+
+notes_021.txt
+  Mostly closed reference. ROADMAP records its drop safety, preset-repair notice,
+  export/metrics/clipboard work as v2.23, fidelity audit as v2.24, and cancellable
+  response-reader retry transport as v2.25. Its visible-streaming half remains
+  explicitly deferred at ROADMAP lines 2243–2252 pending two product decisions:
+  whether unreviewed partial text may appear, and whether a failed partial result
+  is discarded or retained with an unmistakable label. It must not be smuggled
+  into a transport "tidy-up".
+
+notes_022.txt (latest draft)
+  Useful ideation, accurately based on v2.25, but not an implementation-ready
+  patch set. Its five proposals should be triaged as follows:
+
+  A. Multi-file/folder drop to batch
+     Keep as a design candidate only after F5 is fixed. The supplied snippet
+     copies potentially sensitive files into a tempfile.mkdtemp() directory but
+     never removes it; a staging failure also leaks the directory. Its frozen
+     launch command prepends both sys.executable and sys.argv[0], which duplicates
+     the executable under PyInstaller. A future version should add an explicit
+     bounded manifest/list input to batch rather than copy whole documents merely
+     to preserve the current folder-only argv shape, and must define who removes
+     the manifest/staging data.
+
+  B. Preset-pack import/export
+     Conceptually sound and worth retaining, but the import helper does not check
+     its version field. More importantly, "replace existing" is case-sensitive:
+     it pops only exact spellings, then dict.update() can leave two case variants
+     for normalise_user_presets() to resolve in insertion order. The old preset
+     can therefore win when the UI promised replacement. Require a supported
+     schema version and merge by casefolded name before this is handed off.
+
+  C. Soft tone conflicts
+     Not yet justified by observed failures. A confirmation dialogue for a legal
+     combination adds friction to the tone picker and risks implying precision
+     unsupported by calibration. The note's proposed llama3.1:8b run is also stale
+     for this machine: MEMORY records that model failing to load with roughly
+     4 GiB available, with llama3.2:3b used instead. If revisited, enumerate models
+     actually installed/configured at test time and gather live evidence before
+     deciding whether a pair is advisory or hard-blocked.
+
+  D. Configurable reading speed plus revision readability in the status bar
+     The calculation is safe, but the current status line is already dense and
+     the project has a documented minimum-width/toolbar crowding history. Do not
+     append another always-visible metric without a real 920 px/150% DPI visual
+     test. A compact on-demand review/provenance area is a better seam than adding
+     a second readability sentence to every status refresh.
+
+  E. Streaming preparation
+     Correctly marked design-only and blocked. Retain the decision matrix, but do
+     not paste its NotImplementedError stub into production code and do not flip
+     either backend's stream flag until the product decisions above are made.
+
+Documentation freshness note
+  MEMORY's newest recorded implementation is behind the v2.22–v2.25 work now in
+  source/ROADMAP. The module docstring still says "Version 2.21" at line 39,
+  load_config() says callers may trust backend is supported at line 920 although
+  preserving an invalid backend is deliberate, and _on_retry_progress() still
+  says a cancelled worker "keeps sleeping" at 3876–3879 despite v2.25 waking the
+  backoff event. ROADMAP's deferred module-split rationale still calls the file
+  roughly 1,300 lines; it is now 4,894. The single-file mandate still applies, so
+  this is documentation drift, not a recommendation to split the module.
+
+
+2. Detailed Architectural Proposals
+------------------------------------
+
+2.1 Current architecture and safe extension seams
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Configuration seam
+  DEFAULT_CONFIG (799–819), normalise_config (859–909), load_config (912–945)
+  and atomic save_config (948–979) already form a clear boundary. New persistent
+  state should be avoided for all three proposed features; transient request and
+  review metadata belong in the existing in-session state/history only.
+
+Backend seam
+  call_anthropic/call_ollama (1409–1497) share run_backend (1500–1521) and the
+  v2.25 response-reader retry transport (1315–1406). No proposed feature needs a
+  third-party HTTP package or SDK. E1 reuses one ordinary non-streaming call.
+
+Review seam
+  render_diff/summarise_diff and the Markdown/HTML builders (1617–1783) already
+  centralise comparison. E2 should return transient anchors from render_diff;
+  E3 should reuse summarise_diff and the existing safe Markdown-fence helper.
+
+Persistence seam
+  Revision history is deliberately memory-only (2963–2982). Request provenance
+  must stay there; it must never include the API key and must never be silently
+  written to scriptorium_config.json. E3 writes content only after an explicit
+  Export dialogue, which is already the product's persistence boundary.
+
+Feature gates
+  Word I/O and tray support already degrade explicitly when their optional
+  packages are missing. None of E1–E3 needs a new dependency or feature gate.
+
+
+2.2 Confirmed defects and targeted fixes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+F1 — HIGH — Settings violates the fail-closed backend/privacy boundary
+
+Evidence
+  * normalise_config intentionally preserves a present invalid backend at
+    881–890 so run_backend can refuse it at 1512–1521.
+  * _refresh_status reports that invalid state honestly at 3445–3457.
+  * Settings maps any unknown string to visible "Claude" at 2516–2518 and maps
+    any unrecognised selection to "anthropic" at 2748.
+  * A list or dict backend is even less safe for the dialogue: using it as a key
+    in BACKEND_LABELS.get() raises TypeError before Settings opens.
+  * If privacy_ack is already true, the cloud notice at 3594–3604 does not recur.
+
+Failure
+  A config with backend "Ollma" initially refuses to process, as designed. The
+  user opens Settings only to change Always on top and clicks Save; the app then
+  silently persists the Claude backend. That is a behaviour/privacy change not
+  explicitly chosen by the user.
+
+Targeted fix
+  Show no selected segment for an invalid/non-string backend, display a concise
+  repair message, disable both model groups and Save, then enable Save only after
+  the user explicitly chooses Claude or Ollama. Remove every default-to-anthropic
+  expression from Settings. Preserve run_backend's existing fail-closed rule.
+
+State/config/performance
+  No schema change. Only invalid configurations see the repair state. O(1).
+  No prompt change and no model calibration required.
+
+Verification gate
+  Test invalid string, null, list and object backend values. Settings must open,
+  show neither backend selected, make no network call, refuse Save, then persist
+  only the backend explicitly clicked. Repeat with privacy_ack true.
+
+
+F2 — HIGH — Completed revisions do not retain truthful request provenance
+
+Evidence
+  * process() reads live Mode/Strength/tones/Role for the prompt at 3771–3775.
+  * those toolbar controls remain editable while busy.
+  * _remember_for_history reads them again only after completion at 3857–3865.
+  * cfg_snapshot promises mid-request settings affect the next request at 3785,
+    yet _on_success reads live check_letter_conventions at 3832.
+
+Failure
+  Changing a control or applying a preset during a slow request labels the
+  history entry with settings that did not generate it. A mid-request Settings
+  change can also change whether the finished text is letter-audited.
+
+Targeted fix
+  Capture one non-secret request context before prompt construction, use its
+  values to build the prompt, pass it through the worker callback, and use it for
+  completion audits, history labels and E3 export. Store backend/model identifiers
+  but never API credentials. Keeping controls enabled is then harmless and useful:
+  the user can prepare the next request without corrupting this one's provenance.
+
+State/config/performance
+  One small dict for the active result and each of at most 50 in-memory history
+  entries. No config key and no disk persistence. O(1). Prompt wording unchanged.
+
+
+F3 — HIGH — History restoration drops review evidence and can be overwritten
+
+Evidence
+  * _on_success displays model ambiguities plus placeholder, fidelity,
+    stale-source and letter warnings at 3811–3842.
+  * _remember_for_history stores none of ambiguities, note or warnings at
+    3849–3865.
+  * _restore_from_history fabricates empty ambiguities/note and hides the banner
+    at 4507–4511.
+  * History remains enabled while busy; _restore_from_history does not call
+    _invalidate_inflight(), so the still-current worker may overwrite the entry
+    the user just chose.
+
+Failure
+  A revision originally flagged for a lost figure, URL, placeholder, quotation or
+  genuine ambiguity appears warning-free after restoration. Separately, a late
+  callback can replace the restored revision against the user's explicit choice.
+
+Targeted fix
+  Divide notices into durable review notices and the transient "Original changed
+  while processing" message. Store model ambiguities, note, durable notices and
+  request context in the bounded in-memory history entry. Restore them, but do not
+  revive the transient stale-source message when Original has just been restored
+  to the matching snapshot. Call _invalidate_inflight() before any restore edit.
+  Rename the generic banner heading from "Ambiguities flagged" to "Review
+  notices" when it contains deterministic audits as well as ambiguities.
+
+State/config/performance
+  Bounded by the existing 50-entry cap. No disk/config change. O(number of notice
+  strings), normally tiny. No prompt change.
+
+
+F4 — HIGH — Valid JSON with nested non-string tones can crash start-up
+
+Evidence
+  validate_tones says unrecognised data degrades gracefully at 508–517 but hashes
+  each value at line 523. normalise_tone_config and normalise_preset catch only
+  ValueError at 850–853 and 666–669. Direct probes reproduced TypeError for a list
+  legacy tone and a dict inside preset tones.
+
+Targeted fix
+  Make validate_tones the real type boundary: accept the internal string/list/
+  tuple forms, return an empty selection for other containers, and skip every
+  non-string element before membership checks. Keep canonical order, duplicate
+  handling, three-tone limit and hard conflicts unchanged.
+
+State/config/performance
+  No schema or behavioural change for valid configs. O(number of supplied tones),
+  capped in normal use. No prompt calibration: malformed entries never reach the
+  prompt, while valid prompt construction is byte-for-byte unchanged.
+
+
+F5 — HIGH — Batch output and safety evidence are not equivalent to GUI review
+
+Evidence
+  * INPUT_DIR may equal OUTPUT_DIR. Generated *.revised.txt/*.diff.txt match the
+    next scan's allowed suffixes at 4788–4791 and are reprocessed on a later run.
+  * report.txt and report.md both write report.diff.txt at 4851, so one review
+    report overwrites the other.
+  * placeholder restoration warnings go only to batch_log.txt at 4845–4848;
+    protected-content fidelity and letter-convention audits are never run.
+  * os.makedirs and opening batch_log.txt sit outside error handling at
+    4785–4797; load_config.unreadable is ignored; the output block catches only
+    OSError although write_docx can raise ImportError/ValueError.
+  * the stated contract at 4736–4742 says one bad file does not stop the batch and
+    every revision has a review companion. Several paths violate that promise.
+
+Targeted fix
+  Reject equal real input/output directories; name review files from the complete
+  input name (report.txt.diff.txt / report.md.diff.txt); share a pure
+  collect_revision_notices() helper between GUI and batch; put all ambiguity,
+  model note and deterministic warnings in each per-file review; abort rather than
+  silently use defaults when config is unreadable; guard output/log preparation;
+  and keep write_docx's ImportError/ValueError inside the per-file boundary.
+
+State/config/performance
+  No schema change. Each audit is linear in document size, already paid in the GUI
+  and small beside a model call. No prompt change. Existing inputs are untouched.
+
+Verification gate
+  A future implementation session should use disposable fixtures (not the live
+  notes/config): same input/output folder; same stem across .txt/.md/.docx; a
+  pre-existing revised file; missing python-docx; illegal XML character; malformed
+  config; placeholder loss; figure/URL change; letter mismatch; read-only output;
+  and a successful mixed batch. Confirm unique paired outputs and exit code 1 for
+  any failure without aborting later files.
+
+
+F6 — MEDIUM — Diff-format chooser permits a nested-event state race
+
+Evidence
+  DiffExportFormatDialog has neither transient(master) nor grab_set() at
+  2428–2435. wait_window() at 2464–2468 runs a nested event loop but does not make
+  a dialogue modal. export_diff_file validates last_result before that dialogue,
+  then dereferences mutable self.last_result later at 4009–4014.
+
+Failure
+  Reject/History or another state change behind the chooser can produce an
+  AttributeError or export a different revision from the one the user intended.
+
+Targeted fix
+  Make the chooser transient/modal and snapshot source, revision, request context,
+  note and notices before opening it. Use only the snapshots after either nested
+  dialogue. This is also required by E3.
+
+State/config/performance
+  No persistent state, no prompt change and negligible cost.
+
+
+F7 — MEDIUM — Frozen configuration migration leaves live state inconsistent
+
+Evidence
+  Migration reads utf-8 at 3560 although ordinary loading accepts utf-8-sig at
+  926. After replacing self.cfg, it updates only five toolbar values at
+  3582–3592. Imported user presets do not refresh preset_menu, imported
+  always_on_top is not applied, and imported start_with_windows is written to JSON
+  without creating the corresponding Run entry.
+
+Targeted fix
+  Read with utf-8-sig. Add one _apply_imported_config_to_live_ui() helper that
+  updates the five controls, repopulates preset_menu, resets its command value,
+  applies topmost, and explicitly reconciles the requested autostart entry. Do not
+  apply launch-only visibility to the already-open window. If registry update
+  fails, report it and do not claim JSON/Windows state agree.
+
+Related consistency issue
+  Settings itself saves JSON before set_autostart at 2761–2778, then commits the
+  candidate and closes even if registry mutation fails. The warning is honest,
+  so this is below F1, but the next Settings opening still shows requested rather
+  than actual state. A small read-only get_autostart_command() helper should let
+  Settings verify the transition and remain open on failure.
+
+
+F8 — MEDIUM — Word import silently omits all table-cell text
+
+Evidence
+  read_docx joins document.paragraphs only at 1563–1571. python-docx does not
+  include paragraphs inside tables in that collection. README advertises Word
+  import generally and the UI gives no warning.
+
+Targeted first fix
+  Until reading-order-preserving table extraction is implemented and tested across
+  the optional python-docx versions Scriptorium supports, refuse documents that
+  contain tables with a precise explanation. A visible refusal is safer than
+  sending a silently incomplete document to a model. A later enhancement may
+  extract top-level paragraphs and tables in XML order, but should not guess at
+  nested-table/list ordering in this incremental pass.
+
+State/config/performance
+  No schema change. One existing document.tables check. No prompt change.
+
+
+F9 — LOW — Native clipboard allocation can leak one HGLOBAL
+
+Evidence
+  set_html_clipboard allocates html_handle at 1910 and text_handle at 1911 before
+  entering its try/finally. If the second allocation fails, the first is never
+  freed. Normal success and SetClipboardData transfer ownership are otherwise
+  handled correctly.
+
+Targeted fix
+  Initialise both handles to None, allocate them inside the outer try, and free
+  only non-null, non-transferred handles in finally.
+
+
+F10 — LOW — Malformed Ollama model metadata can strand Detect
+
+Evidence
+  list_ollama_models appends any truthy name/model field then calls sorted() at
+  1543–1552. Mixed strings/numbers or a dict can raise TypeError. It also omits
+  http.client.HTTPException from its failure tuple. The Settings worker at
+  2645–2652 has no final exception guard, so the button can remain disabled with
+  "Detecting…" indefinitely.
+
+Targeted fix
+  Accept non-empty strings only, de-duplicate case-insensitively, catch the same
+  transport family as the main backend, and make the worker always post a terminal
+  callback. No config or prompt effect.
+
+
+F11 — LOW — Reading a final HTTP error body can escape friendly error handling
+
+Evidence
+  exc.read() at 1359 occurs inside an except HTTPError handler. If that read raises
+  TimeoutError or http.client.IncompleteRead, later sibling except clauses do not
+  catch it. The final-error branch also does not explicitly close exc, whereas the
+  retry branch closes at 1367.
+
+Targeted fix
+  Add a bounded _read_http_error_detail() helper that catches read/decode failures,
+  returns a stable fallback, and closes the HTTPError in finally. No retry-policy
+  or prompt change.
+
+
+F12 — LOW — A second launch can miss the first instance's restore event
+
+Evidence
+  main claims the mutex before constructing Scriptorium at 4886–4889, while the
+  named restore event is created inside __init__ at 2990/4514. A second process in
+  that narrow interval calls OpenEventW once at 233–239, fails silently and exits.
+
+Targeted fix
+  Give _signal_existing_instance a short bounded retry (for example ten 50 ms
+  attempts). This does not alter the mutex or Tk-thread safety model.
+
+
+F13 — LOW — Documentation and version statements have drifted
+
+Targeted fix
+  In a later authorised documentation pass, update the module version at line 39,
+  the load_config and retry-progress docstrings, MEMORY's v2.22–v2.25 record, the
+  deferred split rationale's obsolete line count, and ROADMAP's notes_022 row.
+  Do not treat that wording repair as permission for a module split or streaming.
+
+
+2.3 Feature E1 — Explicit selection-scoped processing
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+User experience
+  When Original has a selection, its existing right-click menu gains "Process
+  selection" and Ctrl+Shift+Enter invokes the same action. With no selection the
+  command is disabled and the shortcut reports "select a passage first". The
+  status says that only the selected passage is being sent. The full Suggested
+  revision still appears in the existing right pane: prefix and suffix are copied
+  locally and byte-for-byte unchanged around the returned selected passage.
+  Accept remains the only action that changes Original.
+
+Architecture
+  Factor the body of process() into _begin_processing(scope). A scope is a small
+  dict containing full_original, request_text, prefix, suffix and kind. Full mode
+  supplies empty prefix/suffix; selection mode captures the three pieces from the
+  Tk selection before starting the worker. Placeholder masking applies only to
+  request_text. On success, restore those placeholders, assemble the full proposed
+  revision locally, then run fidelity and letter audits against the full Original
+  and full assembled revision. The unchanged exterior is therefore guaranteed by
+  Python rather than requested from the model.
+
+State
+  Add scope to the immutable request context. _result_source remains the complete
+  Original so stale-result checks, diff, copy, export, history and Accept need no
+  semantic fork. No config key, no second result and no persistent selection.
+
+Performance/privacy
+  One ordinary backend call with a smaller body; local concatenation is O(n).
+  Text outside the selection does not leave the machine even on Claude. The UI
+  must say this plainly and also warn that the model cannot use unseen surrounding
+  context.
+
+Mandatory live-model calibration before shipment
+  Although build_system_prompt() need not change, narrowing the user text changes
+  what the model can infer. Run real calls through the configured Claude backend
+  when credentials are available and through the Ollama model actually installed
+  and loadable on this machine (do not assume llama3.1:8b). Use a fixed corpus with
+  at least:
+
+    * mid-sentence selections and leading/trailing punctuation;
+    * pronouns whose antecedent is outside the selection;
+    * negation, modality, hedges, quantities, dates, money and percentages;
+    * quotations, URLs, paths, emails and every placeholder shape;
+    * Markdown list items, headings, blank lines and boundary whitespace;
+    * a selection that is already correct and one genuinely ambiguous fragment;
+    * all modes, three strengths, roles, single tones and representative safe
+      multi-tone combinations in both dominant orders.
+
+  Pass only if every byte outside the selection is unchanged, protected inventory
+  is preserved, no fact/certainty/scope is added, ambiguity is surfaced rather
+  than guessed when context is missing, and the returned fragment splices without
+  doubled/missing boundary whitespace. Record source, response, model tag and
+  verdict. If either backend repeatedly guesses missing context, do not ship the
+  feature merely with stronger prose instructions; keep it disabled until the UX
+  provides an explicit context strategy that is itself calibrated.
+
+
+2.4 Feature E2 — Change-by-change navigator
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+User experience
+  Add compact "Prev", "1 / N" and "Next" controls in the Suggested-revision
+  header, immediately to the left of Clean/Inline. Disable them when there is no
+  active revision or no wording change. Ctrl+Alt+Left/Right (or F6/Shift+F6 after
+  checking existing Windows conventions in a manual pass) cycles and scrolls the
+  active change into view. A subtle underline/current-change tag must supplement,
+  not replace, the existing green/red semantic colours.
+
+Architecture/state
+  Have render_diff return displayed (start, end) Tk index pairs for every non-equal
+  SequenceMatcher opcode. Existing callers may ignore a return value, so this is a
+  backward-compatible seam. Store _change_ranges and _change_cursor transiently.
+  Centralise the three current rendering call sites (_on_success,
+  _on_diff_view_change and _restore_from_history) through
+  _render_active_revision(), and clear navigation in reject(). Clean-view pure
+  deletions have a zero-width anchor; navigation still scrolls to the boundary
+  without pretending adjacent text was deleted.
+
+Config/performance/calibration
+  No config, persistence, dependency, prompt or model calibration. The existing
+  O(n) diff already produces the opcodes; storage is O(k) for k changed regions and
+  each navigation action is O(1).
+
+
+2.5 Feature E3 — Provenance-aware review-record export
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+User experience
+  Add "Review record" beside Unified diff and Annotated prose in the existing
+  Export diff dialogue. The saved Markdown starts with an explicit status:
+  "Suggested revision — not accepted automatically". It then records generation
+  time, backend/model, scope, Mode/Strength/Role/Tones, change summary, model note,
+  all ambiguities and deterministic notices, followed by fenced Original and
+  Suggested revision and the ordinary unified diff.
+
+Architecture/state
+  Reuse the immutable request context and durable notices from F2/F3. Snapshot all
+  inputs before the modal chooser (also closing F6). Add one pure
+  build_review_record() beside the existing Markdown builders. It must never
+  include anthropic_api_key, environment data or any hidden prompt. History stays
+  memory-only; a record is written only through the explicit save dialogue.
+
+Config/performance/calibration
+  No config or dependency. Linear string building, equivalent to the existing diff
+  export. No prompt/model change and no calibration needed. Verify Markdown fences
+  against source text containing backticks and verify that a restored history
+  entry exports the notices originally shown.
+
+
+3. Modular Code Snippets
+------------------------
+
+The snippets below are hand-off material, not edits made by this review. They are
+ordered so the state-integrity primitives land before features that consume them.
+All line numbers refer to the verified v2.25 source described at the top of this
+file and must be re-read immediately before a future implementation.
+
+
+3.1 Replace validate_tones() (F4)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Replace the complete function at scriptorium.py lines 508–534:
+
+    def validate_tones(tones):
+        """Return a normalised, ordered and conflict-free tone list.
+
+        Strings are accepted as a one-tone convenience because legacy config
+        used that shape. Lists and tuples are the canonical multi-tone inputs.
+        Other containers, and non-string members inside a valid container, are
+        treated as malformed configuration and dropped safely. Valid canonical
+        names keep their order because the first tone remains dominant.
+        """
+        if isinstance(tones, str):
+            candidates = (tones,)
+        elif isinstance(tones, (list, tuple)):
+            candidates = tones
+        else:
+            return []
+
+        normalised = []
+        for tone in candidates:
+            if not isinstance(tone, str):
+                continue
+            if tone in ("", "(keep original)") or tone in normalised:
+                continue
+            if tone not in TONE_INSTRUCTIONS:
+                continue
+            normalised.append(tone)
+
+        if len(normalised) > MAX_SELECTED_TONES:
+            raise ValueError(
+                f"Choose no more than {MAX_SELECTED_TONES} tones."
+            )
+
+        conflict = tone_conflict_message(normalised)
+        if conflict:
+            raise ValueError(conflict)
+        return normalised
+
+
+3.2 Fail-closed Settings backend controls (F1)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In SettingsDialog.__init__:
+
+  a. At current lines 2506–2507, retain the Save button so its state can be
+     controlled:
+
+        self.save_btn = ctk.CTkButton(
+            btn_row,
+            text="Save",
+            width=100,
+            command=self._save,
+        )
+        self.save_btn.pack(side="right")
+
+  b. Replace current lines 2516–2522, then put the status label immediately below
+     the segmented button:
+
+        current_backend = cfg.get("backend")
+        if isinstance(current_backend, str):
+            current_label = BACKEND_LABELS.get(current_backend, "")
+        else:
+            current_label = ""
+        self.backend_var = ctk.StringVar(value=current_label)
+        self.backend_selector = ctk.CTkSegmentedButton(
+            body,
+            values=list(BACKEND_LABELS.values()),
+            variable=self.backend_var,
+            command=lambda _=None: self._refresh_state(),
+        )
+        self.backend_selector.pack(fill="x", padx=16, pady=(2, 4))
+        self.backend_status = ctk.CTkLabel(
+            body,
+            text="",
+            text_color="#f0c674",
+            font=ctk.CTkFont(size=11),
+            justify="left",
+        )
+        self.backend_status.pack(anchor="w", padx=16)
+
+  c. Retain the Claude model menu at current lines 2537–2538:
+
+        self.model_menu = ctk.CTkOptionMenu(
+            body,
+            values=ANTHROPIC_MODELS,
+            variable=self.model_var,
+        )
+        self.model_menu.pack(fill="x", padx=16, pady=(2, 0))
+
+Replace SettingsDialog._refresh_state() at current lines 2669–2673:
+
+    def _refresh_state(self):
+        """Enable only controls belonging to an explicitly chosen backend.
+
+        An invalid stored backend deliberately selects neither option. This
+        preserves the same fail-closed privacy rule as run_backend(): Settings
+        must never convert damaged configuration into a cloud choice.
+        """
+        backend = BACKEND_IDS.get(self.backend_var.get())
+        valid = backend in BACKEND_LABELS
+        cloud = backend == "anthropic"
+        local = backend == "ollama"
+
+        self.key_entry.configure(state="normal" if cloud else "disabled")
+        self.model_menu.configure(state="normal" if cloud else "disabled")
+        self.ollama_combo.configure(state="normal" if local else "disabled")
+        self.detect_btn.configure(state="normal" if local else "disabled")
+        self.save_btn.configure(state="normal" if valid else "disabled")
+
+        if valid:
+            self.backend_status.configure(text="")
+        else:
+            self.backend_status.configure(
+                text=(
+                    "The stored backend is not recognised. Choose Claude or "
+                    "Ollama explicitly before saving."
+                )
+            )
+
+Insert this validation at the start of SettingsDialog._save(), immediately after
+its docstring and before candidate = dict(self.cfg) at current line 2746:
+
+        backend = BACKEND_IDS.get(self.backend_var.get())
+        if backend is None:
+            messagebox.showerror(
+                "Choose a backend",
+                "Select Claude or Ollama before saving Settings.",
+                parent=self,
+            )
+            return
+
+Then replace the candidate entry at current line 2748 with:
+
+            "backend": backend,
+
+
+3.3 Immutable request context and shared notices (F2/F3/F5/E3)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Insert these module-level helpers immediately after audit_letter_conventions(),
+currently ending at line 2211:
+
+    def build_request_context(mode, strength, role, tones, cfg, scope="full"):
+        """Return non-secret settings that truthfully describe one request.
+
+        The mapping is safe for in-session history and an explicit review-record
+        export. It intentionally excludes API credentials, the system prompt and
+        document text. Callers must capture it before starting the worker.
+        """
+        backend = cfg.get("backend")
+        if backend == "anthropic":
+            model = cfg.get("anthropic_model", DEFAULT_ANTHROPIC_MODEL)
+        elif backend == "ollama":
+            model = cfg.get("ollama_model", DEFAULT_OLLAMA_MODEL)
+        else:
+            model = ""
+        return {
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "mode": mode,
+            "strength": strength,
+            "role": role,
+            "tones": tuple(tones),
+            "backend": backend,
+            "model": model,
+            "scope": scope,
+            "protect_placeholders": bool(
+                cfg.get("protect_placeholders", True)
+            ),
+            "check_letter_conventions": bool(
+                cfg.get("check_letter_conventions", True)
+            ),
+        }
+
+
+    def collect_revision_notices(
+            original, revised, placeholder_warnings=(),
+            check_letter_conventions=True):
+        """Return durable deterministic notices for a completed revision.
+
+        Model ambiguities are deliberately kept separate because they come from
+        the backend response. The transient warning that Original changed while
+        processing is also excluded: it describes one live-screen moment and is
+        not true after a matching history snapshot is restored.
+        """
+        notices = [
+            str(item).strip()
+            for item in placeholder_warnings
+            if str(item).strip()
+        ]
+        notices.extend(audit_revision_fidelity(original, revised))
+        if check_letter_conventions:
+            advisory = audit_letter_conventions(revised)
+            if advisory:
+                notices.append(advisory)
+        return notices
+
+In Scriptorium.__init__, after self._result_source at current line 2972, add:
+
+        self._result_context = {}
+        self._review_notices = []
+
+In process(), capture cfg and controls before build_system_prompt(). Replace the
+current prompt-construction block at 3770–3785 with:
+
+        cfg_snapshot = dict(self.cfg)
+        request_context = build_request_context(
+            self.mode_var.get(),
+            self.strength_var.get(),
+            self.role_var.get(),
+            tuple(self.selected_tones),
+            cfg_snapshot,
+        )
+        try:
+            system_prompt = build_system_prompt(
+                request_context["mode"],
+                request_context["strength"],
+                request_context["tones"],
+                request_context["role"],
+                protect_tokens=bool(ph_map),
+                avoid_words=tuple(cfg_snapshot.get("house_style_avoid", [])),
+            )
+        except ValueError as exc:
+            self._set_busy(False)
+            messagebox.showerror("Could not process", str(exc))
+            return
+
+Change the worker's successful post at current lines 3800–3801 to pass the
+captured context:
+
+                self._post_to_ui(
+                    self._on_success,
+                    request_id,
+                    original,
+                    ph_map,
+                    result,
+                    request_context,
+                )
+
+Replace _on_success() and _remember_for_history() at current lines 3805–3867:
+
+    def _on_success(
+            self, request_id, original, ph_map, result, request_context):
+        """Publish a current result with immutable provenance and notices."""
+        if not self._claim_request(request_id):
+            return
+
+        placeholder_warnings = []
+        if ph_map:
+            result["revised"], placeholder_warnings = restore_placeholders(
+                result["revised"], ph_map
+            )
+
+        durable_notices = collect_revision_notices(
+            original,
+            result["revised"],
+            placeholder_warnings,
+            request_context["check_letter_conventions"],
+        )
+        live_notices = list(durable_notices)
+        if self.original_box.get("1.0", "end-1c") != original:
+            live_notices.append(
+                "The original text changed while this was processing, so this "
+                "revision reflects the earlier text. Review it carefully before "
+                "accepting."
+            )
+
+        self.last_result = result
+        self._result_source = original
+        self._result_context = dict(request_context)
+        self._review_notices = list(durable_notices)
+        render_diff(
+            self.revised_box,
+            original,
+            result["revised"],
+            inline=(self.diff_view_var.get() == "Inline"),
+        )
+        self._show_ambiguities(
+            list(result.get("ambiguities", [])) + live_notices
+        )
+        self._remember_for_history(
+            original,
+            result,
+            request_context,
+            durable_notices,
+        )
+
+        note = result.get("note", "")
+        if ph_map and not placeholder_warnings:
+            preserved = f"{len(ph_map)} placeholder(s) preserved"
+            note = f"{note}  {preserved}" if note else preserved
+        self._refresh_status(note or "done")
+
+    def _remember_for_history(
+            self, original, result, request_context, notices, limit=50):
+        """Record one complete, truthful revision snapshot in memory only."""
+        self._revision_log.append({
+            "time": time.strftime("%H:%M:%S"),
+            "mode": request_context["mode"],
+            "strength": request_context["strength"],
+            "role": request_context["role"],
+            "tones": list(request_context["tones"]),
+            "request_context": dict(request_context),
+            "original": original,
+            "revised": result.get("revised", ""),
+            "ambiguities": list(result.get("ambiguities", [])),
+            "note": result.get("note", ""),
+            "notices": list(notices),
+        })
+        if len(self._revision_log) > limit:
+            del self._revision_log[:-limit]
+
+In reject(), after clearing _result_source at current line 3924, add:
+
+        self._result_context = {}
+        self._review_notices = []
+
+Replace _restore_from_history() at current lines 4487–4512:
+
+    def _restore_from_history(self, entry):
+        """Restore one historical revision and its original review evidence."""
+        self._invalidate_inflight()
+        current = self.original_box.get("1.0", "end-1c")
+        self._remember_for_undo(current)
+        self.original_box.delete("1.0", "end")
+        self.original_box.insert("1.0", entry["original"])
+
+        context = dict(entry.get("request_context", {}))
+        mode = context.get("mode", entry["mode"])
+        strength = context.get("strength", entry["strength"])
+        role = context.get("role", entry["role"])
+        tones = list(context.get("tones", entry["tones"]))
+        self.mode_var.set(mode)
+        self.strength_var.set(strength)
+        self.role_var.set(role)
+        self._set_selected_tones(tones)
+
+        ambiguities = list(entry.get("ambiguities", []))
+        note = entry.get("note", "")
+        notices = list(entry.get("notices", []))
+        self.last_result = {
+            "revised": entry["revised"],
+            "ambiguities": ambiguities,
+            "note": note,
+        }
+        self._result_source = entry["original"]
+        self._result_context = context
+        self._review_notices = notices
+        render_diff(
+            self.revised_box,
+            entry["original"],
+            entry["revised"],
+            inline=(self.diff_view_var.get() == "Inline"),
+        )
+        self._show_ambiguities(ambiguities + notices)
+        self._refresh_status(f"restored from history ({entry['time']})")
+
+
+3.4 Batch integrity helpers and call-site changes (F5)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Insert these helpers after BATCH_SUFFIXES at current line 4724:
+
+    def paths_refer_to_same_directory(first, second):
+        """Return True when two paths identify the same directory.
+
+        samefile() handles aliases/junctions when both paths exist. The normalised
+        real-path fallback also works before an output directory is created.
+        """
+        try:
+            return os.path.samefile(first, second)
+        except (FileNotFoundError, OSError):
+            left = os.path.normcase(os.path.realpath(os.path.abspath(first)))
+            right = os.path.normcase(os.path.realpath(os.path.abspath(second)))
+            return left == right
+
+
+    def batch_output_paths(output_dir, input_name):
+        """Return collision-free revision and review paths for one input name."""
+        stem, suffix = os.path.splitext(input_name)
+        revised = os.path.join(output_dir, f"{stem}.revised{suffix}")
+        review = os.path.join(output_dir, f"{input_name}.diff.txt")
+        return revised, review
+
+
+    def build_batch_review_text(original, revised, result, notices):
+        """Return the complete human-review companion for one batch revision."""
+        lines = [summarise_diff(original, revised)]
+        lines.extend(
+            f"ambiguity: {item}"
+            for item in result.get("ambiguities", [])
+        )
+        lines.extend(f"review notice: {item}" for item in notices)
+        note = result.get("note", "")
+        if note:
+            lines.append(f"note: {note}")
+        return "\n".join(lines) + "\n"
+
+At current lines 4781–4786, after validating input_dir and before creating the
+output directory, add the equality guard and protect setup:
+
+    if paths_refer_to_same_directory(input_dir, args.out):
+        print(
+            "error: INPUT_DIR and OUTPUT_DIR must be different; this prevents "
+            "a later run from processing its own revision files.",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        os.makedirs(args.out, exist_ok=True)
+    except OSError as exc:
+        print(f"error: could not create output directory: {exc}", file=sys.stderr)
+        return 1
+    log_path = os.path.join(args.out, "batch_log.txt")
+
+Immediately after cfg = load_config() at current line 4761, add:
+
+    if getattr(load_config, "unreadable", False):
+        print(
+            "error: configuration could not be read; refusing to run a batch "
+            "with silent default settings.",
+            file=sys.stderr,
+        )
+        return 1
+
+After placeholder restoration at current lines 4844–4848, replace the warning
+loop with a shared durable-notice collection:
+
+            revised = result.get("revised", "")
+            placeholder_warnings = []
+            if ph_map:
+                revised, placeholder_warnings = restore_placeholders(
+                    revised, ph_map
+                )
+            notices = collect_revision_notices(
+                original,
+                revised,
+                placeholder_warnings,
+                bool(cfg.get("check_letter_conventions", True)),
+            )
+            for warning in notices:
+                emit(f"[WARN] {name}: {warning}")
+
+Replace output path construction at current lines 4850–4851 with:
+
+            revised_path, diff_path = batch_output_paths(args.out, name)
+
+Replace the diff write body at current lines 4858–4864 with:
+
+                with open(diff_path, "w", encoding="utf-8", newline="\n") as fh:
+                    fh.write(
+                        build_batch_review_text(
+                            original, revised, result, notices
+                        )
+                    )
+
+Replace the output exception clause at current lines 4865–4868 with:
+
+            except (OSError, ImportError, ValueError) as exc:
+                emit(f"[FAIL] {name}: could not write output ({exc})")
+                had_failure = True
+                continue
+            except Exception as exc:  # noqa: BLE001 -- preserve per-file isolation
+                emit(f"[FAIL] {name}: unexpected output error ({exc})")
+                had_failure = True
+                continue
+
+Finally, wrap the existing "with open(log_path...)" entry itself in OSError
+handling. This one call-site is deliberately not expanded into a second logging
+framework: if the requested output location cannot open its own log, stderr and a
+non-zero exit are the only truthful channels available without writing somewhere
+the user did not choose.
+
+
+3.5 Modal, snapshotted diff export (F6; prerequisite for E3)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In DiffExportFormatDialog.__init__, immediately after resizable() at current line
+2433, insert:
+
+        self.transient(master)
+        self.grab_set()
+
+In export_diff_file(), immediately after the last_result guard at current lines
+3991–3993 and before the stale check, capture:
+
+        source = self._result_source
+        result = dict(self.last_result)
+        revised = result["revised"]
+        request_context = dict(self._result_context)
+        notices = list(self._review_notices)
+
+Use source/revised in _revision_is_stale's comparison for this operation and in
+both builders at current lines 4009–4014. E3's record branch should use the four
+snapshots above. No attribute should be dereferenced after the format/save
+dialogues except UI methods used to report success.
+
+
+3.6 Clipboard allocation ownership (F9)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Replace current lines 1910–1933 inside set_html_clipboard():
+
+    html_handle = None
+    text_handle = None
+    html_transferred = False
+    text_transferred = False
+    try:
+        html_handle = _global_clipboard_memory(
+            _build_cf_html(html_fragment)
+        )
+        text_handle = _global_clipboard_memory(
+            (plain_text + "\x00").encode("utf-16-le")
+        )
+        _open_clipboard_with_retries(user32, owner_hwnd)
+        try:
+            if not user32.EmptyClipboard():
+                raise ctypes.WinError()
+            if not user32.SetClipboardData(html_format, html_handle):
+                raise ctypes.WinError()
+            html_transferred = True
+            if not user32.SetClipboardData(13, text_handle):
+                raise ctypes.WinError()
+            text_transferred = True
+        finally:
+            user32.CloseClipboard()
+    finally:
+        if html_handle is not None and not html_transferred:
+            kernel32.GlobalFree(html_handle)
+        if text_handle is not None and not text_transferred:
+            kernel32.GlobalFree(text_handle)
+
+
+3.7 Frozen-config live synchronisation (F7)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Add this Scriptorium helper immediately before _maybe_offer_config_migration(),
+currently line 3533:
+
+    def _apply_imported_config_to_live_ui(self):
+        """Synchronise controls affected by a just-imported configuration.
+
+        Launch-only visibility is intentionally not applied to the running
+        window. Topmost and preset choices are ordinary live UI state and must
+        agree immediately with self.cfg.
+        """
+        self.mode_var.set(self.cfg.get("default_mode", self.mode_var.get()))
+        self.strength_var.set(
+            self.cfg.get("default_strength", self.strength_var.get())
+        )
+        self.role_var.set(self.cfg.get("default_role", self.role_var.get()))
+        self._set_selected_tones(
+            self.cfg.get("default_tones", self.selected_tones)
+        )
+        self.diff_view_var.set(
+            self.cfg.get("default_diff_view", self.diff_view_var.get())
+        )
+        self.preset_menu.configure(values=preset_menu_names(self.cfg))
+        self.preset_var.set("(none)")
+        self.attributes("-topmost", bool(self.cfg.get("always_on_top")))
+
+At current line 3560 use encoding="utf-8-sig". Replace the five individual
+control updates at 3584–3591 with:
+
+        self._apply_imported_config_to_live_ui()
+        if not set_autostart(
+                bool(self.cfg.get("start_with_windows")),
+                bool(self.cfg.get("start_minimised"))):
+            messagebox.showwarning(
+                "Startup entry not updated",
+                "Settings were imported, but Scriptorium could not reconcile "
+                "the Windows startup entry. Review Startup & window behaviour "
+                "in Settings.",
+                parent=self,
+            )
+
+
+3.8 Refuse silent Word-table loss (F8)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Replace read_docx() at current lines 1563–1571:
+
+    def read_docx(path):
+        """Return paragraph text from a table-free Word document.
+
+        python-docx keeps table-cell paragraphs out of document.paragraphs.
+        Refusing a document with tables prevents Scriptorium from silently
+        processing an incomplete version while a reading-order-preserving table
+        importer remains deliberately out of scope.
+        """
+        from docx import Document  # optional dependency, imported on demand
+
+        document = Document(path)
+        if document.tables:
+            raise ValueError(
+                "This Word document contains one or more tables. Scriptorium "
+                "cannot yet import their text without risking a changed reading "
+                "order, so nothing was loaded. Copy the required text into "
+                "Original or save a table-free copy and try again."
+            )
+        return "\n".join(paragraph.text for paragraph in document.paragraphs)
+
+
+3.9 Robust Ollama model discovery (F10)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In list_ollama_models(), extend the current exception tuple at lines 1535–1536
+with http.client.HTTPException. Replace lines 1543–1552 with:
+
+    names = []
+    for item in raw:
+        if isinstance(item, dict):
+            name = item.get("name") or item.get("model") or ""
+        elif isinstance(item, str):
+            name = item
+        else:
+            name = ""
+        if isinstance(name, str):
+            name = name.strip()
+            if name:
+                names.append(name)
+    return sorted(set(names), key=str.casefold)
+
+For defence in depth, replace SettingsDialog._detect_models()'s worker at current
+lines 2645–2652 with:
+
+        def worker():
+            """Finish detection even if malformed local metadata raises."""
+            try:
+                models = list_ollama_models()
+                error = ""
+            except Exception as exc:  # noqa: BLE001 -- terminal UI recovery
+                models = []
+                error = str(exc)
+            try:
+                self.after(0, self._finish_model_detection, models, error)
+            except (tk.TclError, RuntimeError):
+                pass
+
+Update _finish_model_detection(self, models, error="") and show error before the
+ordinary no-response wording. This keeps the existing graceful feature gate and
+never allows a worker exception to leave Detect permanently disabled.
+
+
+3.10 Selection-scope primitives (E1; calibration-gated)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Insert these pure helpers beside the document/diff helpers, immediately before
+_tokenise() at current line 1612:
+
+    def make_processing_scope(full_original, selected=None, prefix="", suffix=""):
+        """Return a validated full-document or selected-passage request scope.
+
+        For selection mode, prefix + selected + suffix must reproduce the exact
+        Original snapshot. This invariant guarantees that text outside the
+        selected passage is copied locally without alteration.
+        """
+        if selected is None:
+            return {
+                "kind": "full",
+                "full_original": full_original,
+                "request_text": full_original,
+                "prefix": "",
+                "suffix": "",
+            }
+        if not all(
+                isinstance(value, str)
+                for value in (full_original, selected, prefix, suffix)):
+            raise TypeError("Processing scope values must be text.")
+        if prefix + selected + suffix != full_original:
+            raise ValueError("The selected passage no longer matches Original.")
+        if not selected.strip():
+            raise ValueError("Select a passage containing text first.")
+        return {
+            "kind": "selection",
+            "full_original": full_original,
+            "request_text": selected,
+            "prefix": prefix,
+            "suffix": suffix,
+        }
+
+
+    def assemble_scoped_revision(scope, revised_request_text):
+        """Return the complete suggested revision for a validated scope."""
+        if scope["kind"] == "full":
+            return revised_request_text
+        return scope["prefix"] + revised_request_text + scope["suffix"]
+
+Add this method immediately before process(), current line 3738:
+
+    def process_selection(self):
+        """Start one explicit request for the selected Original passage only."""
+        if self.busy:
+            return
+        try:
+            prefix = self.original_box.get("1.0", "sel.first")
+            selected = self.original_box.get("sel.first", "sel.last")
+            suffix = self.original_box.get("sel.last", "end-1c")
+        except tk.TclError:
+            self._refresh_status("select a passage to process first")
+            return
+
+        full_original = prefix + selected + suffix
+        try:
+            scope = make_processing_scope(
+                full_original,
+                selected=selected,
+                prefix=prefix,
+                suffix=suffix,
+            )
+        except (TypeError, ValueError) as exc:
+            self._refresh_status(str(exc))
+            return
+        self._begin_processing(scope)
+
+Implementation wiring (do only in the calibrated implementation session):
+
+  * Make process() construct make_processing_scope(full_original) and call a new
+    _begin_processing(scope).
+  * Move the current mask/request/worker body into _begin_processing; use
+    scope["request_text"] for masking and the backend, scope["full_original"] for
+    _result_source/stale checks, and scope["kind"] in build_request_context().
+  * In _on_success, restore placeholders in the returned passage first, then call
+    assemble_scoped_revision() before collect_revision_notices(), render/history
+    or export sees the result.
+  * Add Ctrl+Shift+Return in _bind_shortcuts and a "Process selection" command to
+    _show_text_context_menu only for the editable Original widget. Do not add an
+    action-bar button.
+  * Keep the feature out of a release build until section 2.3's real Claude and
+    loadable-Ollama calibration passes.
+
+
+3.11 Change navigator (E2)
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Replace render_diff() at current lines 1617–1645:
+
+    def render_diff(text_widget, original, revised, inline=False):
+        """Render one revision and return displayed ranges for each change.
+
+        A pure deletion has a zero-width range in Clean view because deleted text
+        is intentionally absent there. Its start index remains a valid scroll
+        anchor for review navigation.
+        """
+        text_widget.configure(state="normal")
+        text_widget.delete("1.0", "end")
+
+        original_tokens = _tokenise(original)
+        revised_tokens = _tokenise(revised)
+        matcher = difflib.SequenceMatcher(
+            None, original_tokens, revised_tokens, autojunk=False
+        )
+        change_ranges = []
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            start = text_widget.index("end-1c")
+            if tag == "equal":
+                text_widget.insert("end", "".join(revised_tokens[j1:j2]))
+                continue
+            if tag == "insert":
+                text_widget.insert(
+                    "end", "".join(revised_tokens[j1:j2]), "changed"
+                )
+            elif tag == "delete":
+                if inline:
+                    text_widget.insert(
+                        "end", "".join(original_tokens[i1:i2]), "deleted"
+                    )
+            else:
+                if inline:
+                    text_widget.insert(
+                        "end", "".join(original_tokens[i1:i2]), "deleted"
+                    )
+                text_widget.insert(
+                    "end", "".join(revised_tokens[j1:j2]), "changed"
+                )
+            change_ranges.append((start, text_widget.index("end-1c")))
+
+        text_widget.configure(state="disabled")
+        return change_ranges
+
+In Scriptorium.__init__, after _review_notices, add:
+
+        self._change_ranges = []
+        self._change_cursor = -1
+
+In _build_panes(), after packing the Clean/Inline segmented button at current line
+3259, add:
+
+        change_nav = ctk.CTkFrame(rev_header, fg_color="transparent")
+        change_nav.pack(side="right", padx=(0, 8))
+        self.previous_change_btn = ctk.CTkButton(
+            change_nav,
+            text="Prev",
+            width=48,
+            state="disabled",
+            fg_color="gray30",
+            command=lambda: self._go_to_change(-1),
+        )
+        self.previous_change_btn.pack(side="left")
+        self.change_position_label = ctk.CTkLabel(
+            change_nav, text="0 / 0", width=48
+        )
+        self.change_position_label.pack(side="left", padx=4)
+        self.next_change_btn = ctk.CTkButton(
+            change_nav,
+            text="Next",
+            width=48,
+            state="disabled",
+            fg_color="gray30",
+            command=lambda: self._go_to_change(1),
+        )
+        self.next_change_btn.pack(side="left")
+
+After configuring the changed/deleted tags at current lines 3298–3302, add:
+
+        self.revised_box.tag_config("active_change", underline=True)
+
+Insert these methods immediately before _on_diff_view_change(), current line 3891:
+
+    def _render_active_revision(self):
+        """Render the active result and reset its change navigator."""
+        if not self.last_result:
+            self._change_ranges = []
+        else:
+            self._change_ranges = render_diff(
+                self.revised_box,
+                self._result_source,
+                self.last_result["revised"],
+                inline=(self.diff_view_var.get() == "Inline"),
+            )
+        self._change_cursor = -1
+        self._refresh_change_navigation()
+
+    def _refresh_change_navigation(self):
+        """Synchronise navigator labels and enabled state with its ranges."""
+        count = len(self._change_ranges)
+        state = "normal" if count else "disabled"
+        self.previous_change_btn.configure(state=state)
+        self.next_change_btn.configure(state=state)
+        position = self._change_cursor + 1 if self._change_cursor >= 0 else 0
+        self.change_position_label.configure(text=f"{position} / {count}")
+        self.revised_box.tag_remove("active_change", "1.0", "end")
+
+    def _go_to_change(self, direction):
+        """Cycle to the previous or next displayed change and reveal it."""
+        if not self._change_ranges:
+            return
+        self._change_cursor = (
+            self._change_cursor + direction
+        ) % len(self._change_ranges)
+        start, end = self._change_ranges[self._change_cursor]
+        self.revised_box.tag_remove("active_change", "1.0", "end")
+        if self.revised_box.compare(start, "!=", end):
+            self.revised_box.tag_add("active_change", start, end)
+            self.revised_box.tag_raise("active_change")
+        self.revised_box.see(start)
+        self.change_position_label.configure(
+            text=f"{self._change_cursor + 1} / {len(self._change_ranges)}"
+        )
+
+Replace direct render_diff calls in _on_success, _on_diff_view_change and
+_restore_from_history with self._render_active_revision(). In reject(), clear the
+two navigator attributes and call _refresh_change_navigation(). Add chosen
+shortcuts to _bind_shortcuts and SHORTCUTS only after manually checking they do
+not override native Text navigation on Windows.
+
+
+3.12 Provenance-aware review record (E3)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Insert after build_annotated_markdown_diff(), currently ending at line 1748:
+
+    def _markdown_fenced_section(heading, body, language="text"):
+        """Return a heading and fence that source backticks cannot terminate."""
+        text = body if isinstance(body, str) else str(body)
+        fence = _safe_markdown_fence(text)
+        return f"## {heading}\n\n{fence}{language}\n{text}\n{fence}\n"
+
+
+    def build_review_record(
+            original, revised, request_context, ambiguities=(), notices=(),
+            note=""):
+        """Return a self-contained Markdown record for explicit human review.
+
+        The caller supplies only non-secret request provenance. This helper never
+        serialises configuration wholesale and therefore cannot leak an API key.
+        """
+        tones = " + ".join(request_context.get("tones", ())) or "(keep original)"
+        provenance = "\n".join((
+            f"Generated: {request_context.get('created_at', 'unknown')}",
+            f"Backend: {request_context.get('backend', 'unknown')}",
+            f"Model: {request_context.get('model', 'unknown')}",
+            f"Scope: {request_context.get('scope', 'full')}",
+            f"Mode: {request_context.get('mode', 'unknown')}",
+            f"Strength: {request_context.get('strength', 'unknown')}",
+            f"Role: {request_context.get('role', '(none)')}",
+            f"Tones: {tones}",
+        ))
+
+        review_items = [
+            *(f"Ambiguity: {item}" for item in ambiguities),
+            *(f"Review notice: {item}" for item in notices),
+        ]
+        if note:
+            review_items.append(f"Model note: {note}")
+        review_body = "\n".join(review_items) or "No review notices were reported."
+
+        unified = "\n".join(difflib.unified_diff(
+            original.splitlines(),
+            revised.splitlines(),
+            fromfile="Original",
+            tofile="Suggested revision",
+            lineterm="",
+        )) or "(no wording changes)"
+        return (
+            "# Scriptorium review record\n\n"
+            "Status: Suggested revision — not accepted automatically.\n\n"
+            f"Change summary: {summarise_diff(original, revised)}\n\n"
+            + _markdown_fenced_section("Request provenance", provenance)
+            + "\n"
+            + _markdown_fenced_section("Review notices", review_body)
+            + "\n"
+            + _markdown_fenced_section("Original", original)
+            + "\n"
+            + _markdown_fenced_section("Suggested revision", revised)
+            + "\n"
+            + _markdown_fenced_section("Unified diff", unified, "diff")
+        )
+
+In DiffExportFormatDialog:
+
+  * update the docstring and choose helper to permit "record";
+  * increase geometry/position modestly only if a 920 px/150% DPI check shows it
+    is needed;
+  * add a third button, using the same _choose seam:
+
+        ctk.CTkButton(
+            buttons,
+            text="Review record",
+            command=lambda: self._choose("record"),
+        ).pack(side="left", expand=True, fill="x", padx=(4, 0))
+
+In export_diff_file(), after applying section 3.5's snapshots, add this branch
+before the existing annotated/unified branch:
+
+        if export_format == "record":
+            document = build_review_record(
+                source,
+                revised,
+                request_context,
+                ambiguities=result.get("ambiguities", []),
+                notices=notices,
+                note=result.get("note", ""),
+            )
+        elif export_format == "annotated":
+            document = build_annotated_markdown_diff(source, revised)
+        else:
+            document = build_markdown_diff(source, revised)
+
+
+3.13 Bounded single-instance restore retry (F12)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Replace _signal_existing_instance() at current lines 233–239:
+
+    def _signal_existing_instance(attempts=10, delay=0.05):
+        """Ask the running instance to show, tolerating its start-up window."""
+        kernel32 = _kernel32()
+        for attempt in range(attempts):
+            handle = kernel32.OpenEventW(
+                _EVENT_MODIFY_STATE, False, _RESTORE_EVENT_NAME
+            )
+            if handle:
+                try:
+                    kernel32.SetEvent(handle)
+                finally:
+                    kernel32.CloseHandle(handle)
+                return True
+            if attempt < attempts - 1:
+                time.sleep(delay)
+        return False
+
+
+4. Insertion Map
+----------------
+
+All targets: C:\Scriptorium\scriptorium.py, current v2.25/hash stated above.
+
+  Snippet / proposal                         Exact current anchor
+  -----------------------------------------  -----------------------------------
+  F4 safe tone normalisation                 Replace validate_tones, 508–534
+  F1 Settings Save reference                 SettingsDialog.__init__, 2506–2507
+  F1 invalid backend presentation            SettingsDialog.__init__, 2516–2522
+  F1 retained Claude model menu              SettingsDialog.__init__, 2534–2538
+  F1 enable/disable logic                    Replace _refresh_state, 2669–2673
+  F1 explicit save guard                     Start of SettingsDialog._save,
+                                             before line 2746; replace line 2748
+  F2/F3 request-context helpers              After audit_letter_conventions,
+                                             after line 2211
+  F2/F3 active review state                  Scriptorium.__init__, after line 2972
+  F2 context capture                         process, replace 3770–3785
+  F2 worker callback                         process.worker success, 3800–3801
+  F2/F3 success/history methods              Replace 3805–3867
+  F3 reject state clear                      reject, after line 3924
+  F3 history restoration                     Replace 4487–4512
+  F5 batch helpers                           After BATCH_SUFFIXES, line 4724
+  F5 config unreadable guard                 _run_batch_mode, after line 4761
+  F5 path/setup guard                        _run_batch_mode, 4781–4786
+  F5 notices/output naming/write catches     _run_batch_mode, 4844–4868
+  F6 modal export dialogue                   DiffExportFormatDialog.__init__,
+                                             after line 2433
+  F6 export snapshots                        export_diff_file, after 3991–3993
+  F9 clipboard ownership                     set_html_clipboard, replace 1910–1933
+  F7 migration UI helper                     Before _maybe_offer_config_migration,
+                                             line 3533
+  F7 BOM/live control reconciliation         _maybe_offer_config_migration,
+                                             lines 3560 and 3584–3591
+  F8 Word table refusal                      Replace read_docx, 1563–1571
+  F10 Ollama metadata                        list_ollama_models, 1531–1552
+  F10 detection terminal callback            SettingsDialog._detect_models,
+                                             2645–2652; adjust 2654 signature
+  E1 selection scope helpers                 Before _tokenise, line 1612
+  E1 selection entry point                   Before process, line 3738
+  E1 worker integration                      Refactor process/_on_success only
+                                             after live calibration plan approved
+  E2 range-returning renderer                Replace render_diff, 1617–1645
+  E2 transient state                         Scriptorium.__init__, after line 2972
+  E2 header controls                         _build_panes, after line 3259
+  E2 active-change tag                       _build_panes, after lines 3298–3302
+  E2 navigation methods                      Before _on_diff_view_change, line 3891
+  E2 render call consolidation               _on_success 3839–3840;
+                                             _on_diff_view_change 3891–3896;
+                                             _restore_from_history 4509–4510;
+                                             reject 3917–3926
+  E3 Markdown builder                        After build_annotated_markdown_diff,
+                                             after line 1748
+  E3 third format button                     DiffExportFormatDialog, 2418–2468
+  E3 export branch                           export_diff_file, 4000–4014
+  F12 restore-event retry                    Replace _signal_existing_instance,
+                                             233–239
+
+
+4.1 Verification plan for a future authorised implementation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Pure deterministic tests (no live model)
+  * validate_tones: None, int, dict, nested list/dict, string, tuple, duplicate,
+    unknown, >3 tones and hard conflict.
+  * build_request_context: correct backend/model selection and no key leakage.
+  * collect_revision_notices: placeholder, inventory and letter cases.
+  * batch_output_paths: equal stems across all three suffixes.
+  * make_processing_scope/assemble_scoped_revision: invariant and exact exterior.
+  * build_review_record: backticks, empty notices, restored notices, Unicode and
+    explicit status line.
+  * render_diff: no change, insert, delete, replace and Clean/Inline range counts.
+
+Tk/manual state tests
+  * malformed backend opens Settings fail-closed; explicit click is required.
+  * change toolbar values during a delayed request; result provenance remains the
+    captured values.
+  * restore history during a delayed/retrying request; late callback is ignored
+    and no subsequent paid retry starts.
+  * restore a revision with model and fidelity warnings; banner/export preserve
+    them while omitting the no-longer-relevant stale-source notice.
+  * leave Export diff format chooser open and attempt to interact with the parent;
+    parent is blocked and export uses its snapshot.
+  * 920×600 and 150% DPI check for header navigator and three-format dialogue.
+  * frozen config migration with BOM, user presets, topmost and autostart failure.
+  * malformed Ollama tags response always re-enables Detect.
+
+Batch/document tests
+  * Execute the F5 matrix in its section and inspect every generated companion.
+  * Import a paragraph-only .docx successfully; table-bearing .docx must refuse
+    with the explicit no-content-loaded message; absence of python-docx must keep
+    the existing disabled/explanatory behaviour.
+
+Live calibration
+  * Required only for E1 and for any future prompt/tone modification. Follow the
+    corpus and pass criteria in section 2.3 with real calls, record model tags and
+    outputs, and do not infer safety from prompt wording alone.
+
+Completion criteria
+  * AST parse and focused unit tests pass.
+  * Existing full-document prompts are byte-for-byte unchanged unless a separately
+    approved, calibrated prompt task explicitly changes them.
+  * No automatic acceptance or persistent history is introduced.
+  * No source text leaves the machine when Ollama is selected; invalid backend
+    remains fail-closed everywhere, including Settings.
+  * Every batch revision has a unique review companion containing the same durable
+    safety evidence as the GUI.
+  * Only then update APP_VERSION, ROADMAP, MEMORY and stale docstrings in one
+    reconciled documentation pass.
+
+
+Final recommendation
+--------------------
+
+Implement F1–F4 as one narrowly scoped state-integrity release, then F5–F8 as a
+second batch/document-integrity release. E2 and E3 are safe candidates immediately
+after those foundations because they do not touch model behaviour. E1 has the
+highest day-to-day value, but its implementation must remain behind the explicit
+live-model calibration gate: selection scope changes available context, and the
+project's own v2.4/v2.11 history shows that meaning preservation cannot be trusted
+from plausible prompt design alone.
+
+Do not implement visible streaming, a module split, Credential Manager storage or
+three simultaneous alternatives as part of this work. Their recorded product and
+architecture decisions remain unresolved or explicitly deferred.
