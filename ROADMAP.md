@@ -4,7 +4,7 @@
 When Mark says "lets get started", that is the cue to open these three files
 before doing anything else.
 
-Current shipped version: **2.28** (v2.9 bug-fix pass, v2.10 visual/UX
+Current shipped version: **2.29** (v2.9 bug-fix pass, v2.10 visual/UX
 polish, v2.11 three-tone picker, v2.12 persisted user presets, v2.13 backend
 retry transport, v2.14 hand-testing fixes, v2.15 Explorer drag-and-drop,
 v2.17 readability metrics + shortcuts reference, v2.18 house-style
@@ -16,16 +16,16 @@ audit, v2.25 cancellable retry transport, v2.26 Settings fail-closed
 backend/immutable request provenance/durable history evidence/tone
 type-safety, v2.27 batch output/review parity + modal export + frozen-
 config sync + Word-table refusal, v2.28 change-by-change navigator +
-provenance review-record export — see those sections below). All five
-notes_019 proposals and notes_016's full original proposal set shipped by
-build 2.21, clearing the backlog for the first time since notes_001 opened
-it; v2.22 closed a fresh hand-testing defect (notes_020) found immediately
-after. notes_021's second-generation hardening pass is fully shipped
-except its deliberately-deferred streaming half (v2.23–v2.25; see v2.25's
-own write-up for why streaming stays out of scope). notes_022/023/024's
-follow-on review is now underway: v2.26–v2.28 above close its eight P0/P1
-findings (F1–F8) plus E2/E3; v2.29–v2.31 are scoped below and not yet
-implemented.
+provenance review-record export, v2.29 preset-pack import/export — see
+those sections below). All five notes_019 proposals and notes_016's full
+original proposal set shipped by build 2.21, clearing the backlog for the
+first time since notes_001 opened it; v2.22 closed a fresh hand-testing
+defect (notes_020) found immediately after. notes_021's second-generation
+hardening pass is fully shipped except its deliberately-deferred streaming
+half (v2.23–v2.25; see v2.25's own write-up for why streaming stays out of
+scope). notes_022/023/024's follow-on review is now underway: v2.26–v2.29
+above close its eight P0/P1 findings (F1–F8), E2/E3, and notes_022 proposal
+B; v2.30–v2.31 are scoped below and not yet implemented.
 
 Scope through v2.3 was drawn from twelve accumulated review notes
 (`notes/01_Active/notes_001.txt` – `notes_012.txt`), written independently by
@@ -2557,7 +2557,7 @@ this is a small popup rather than the main window, so the project's
 
 ---
 
-## v2.29 — Preset-pack import/export
+## v2.29 — Preset-pack import/export ✅ shipped 2026-09-07
 
 **Goal:** notes_022 (Lynne) proposal B — a shareable preset-pack file so a
 house style travels between machines without hand-editing
@@ -2582,20 +2582,54 @@ duplicate to win the merge instead of actually being replaced.
    v2.23.
 
 ### Acceptance checklist
-- [ ] Export produces a valid pack file for the current user presets;
+- [x] Export produces a valid pack file for the current user presets;
       importing it into a fresh config round-trips every preset exactly.
-- [ ] A pack with a future/unrecognised `version` is refused with a clear
-      message and does not partially merge.
-- [ ] Importing a pack containing a preset name differing only in case from
+      Verified against real `export_preset_pack()`/`import_preset_pack()`
+      calls: the written file carries the correct `format`/`version`
+      fields, and a round trip through an empty starting config reproduces
+      the exported preset byte-for-byte with no messages.
+- [x] A pack with a future/unrecognised `version` is refused with a clear
+      message and does not partially merge. Verified with `version: 999`:
+      the existing presets dict comes back completely unchanged, one
+      message naming the mismatch.
+- [x] Importing a pack containing a preset name differing only in case from
       an existing one, with "replace existing" ticked, actually replaces
-      it — no duplicate survives under the other casing.
-- [ ] Importing without "replace existing" against colliding names skips
+      it — no duplicate survives under the other casing. Verified: an
+      existing `"My Preset"` and an incoming `"my preset"` resolve to
+      exactly one entry under the pack's own casing, with the pack's
+      values — the exact case-sensitivity bug notes_023/024 flagged against
+      the original draft snippet.
+- [x] Importing without "replace existing" against colliding names skips
       those entries and reports which were skipped, leaving the existing
-      presets untouched.
-- [ ] A pack at exactly `MAX_USER_PRESETS` and one exceeding it are both
-      handled per the existing cap behaviour.
-- [ ] `ast.parse()` clean; full regression pass; rebuilt `.exe` verified;
-      real config untouched.
+      presets untouched. Verified: the existing entry and its original
+      values survive unchanged, exactly one message identifies the skipped
+      pack entry by name.
+- [x] A pack at exactly `MAX_USER_PRESETS` and one exceeding it are both
+      handled per the existing cap behaviour. Covered indirectly:
+      `import_preset_pack()`'s final merge step runs the same
+      `normalise_user_presets()` the rest of the app already relies on for
+      this cap (verified by v2.9's/this project's existing preset-cap
+      coverage), so no separate cap-specific test was needed here.
+- [x] `ast.parse()` clean; full regression pass (F1–F8/E2/E3 from
+      v2.26–v2.28 re-run unaffected, 13 test files total); rebuilt `.exe`
+      (`FileVersion`/`ProductVersion` `2.29.0.0`) launched for real, alive
+      and `Responding: True` after an 8-second soak, closed cleanly. Real
+      `scriptorium_config.json` confirmed untouched (unchanged
+      `LastWriteTime`) throughout.
+
+**Adapted from the note during implementation**: the original draft
+snippet's `import_preset_pack()` popped only exact-case matches before a
+plain `dict.update()`, which is precisely the bug being fixed here — the
+actual implementation instead resolves every incoming pack entry against a
+casefolded lookup of existing names one at a time, so replacement (or
+skip-and-report, when "replace existing" isn't ticked) is decided
+explicitly rather than left to `normalise_user_presets()`'s own
+first-seen-wins iteration order. `PresetManagerDialog` grew a "Preset
+packs" section (Export pack…/Import pack…, a "Replace existing names"
+checkbox, and a status line for reported messages); the dialog's fixed
+height was increased from 340 to 460 to fit it, confirmed by measuring the
+real packed content's required height against the configured window size
+rather than guessing.
 
 ---
 
@@ -2818,7 +2852,7 @@ about.
 | notes_018 | 1 Sep | Zoe | v2.8 (delta) | Closed by v2.9 (Bugs 1–2/S2, 3–7, S1); S3 deliberately not fixed (informational only, see v2.9 write-up) |
 | notes_020 | 2 Sep | Mark | v2.22 (hand-test diagnosis) | Closed by v2.22 |
 | notes_021 | 2 Sep | Codex | v2.21+ (hardening) | Confirmed all five originally-requested areas already shipped by build 2.21; §2.1/2.2/2.4 closed by v2.23; §2.3 closed by v2.23 (conflict feedback) + v2.24 (fidelity audit); §2.5's cancellable retry transport closed by v2.25; §2.5's streaming half explicitly deferred pending two open product decisions (see v2.25) |
-| notes_022 | 3 Sep | Lynne | v2.26+ (forward proposals) | Stale-brief audit confirms v2.11–v2.25 already cover the five original architecture themes (not re-proposed); forward proposals A–E triaged by notes_023/024 — B (preset packs) scoped as v2.29 with two bugs fixed first; A/C/D deferred pending F5/live evidence/UI redesign respectively; E (streaming design) folds into notes_021's existing deferred streaming item |
+| notes_022 | 3 Sep | Lynne | v2.26+ (forward proposals) | Stale-brief audit confirms v2.11–v2.25 already cover the five original architecture themes (not re-proposed); forward proposals A–E triaged by notes_023/024 — B (preset packs) closed by v2.29 with both flagged bugs fixed (version check, casefolded replace); A/C/D deferred pending F5/live evidence/UI redesign respectively; E (streaming design) folds into notes_021's existing deferred streaming item |
 | notes_023 | 7 Sep | Codex | v2.26+ (state-integrity & feature review) | Thirteen confirmed defects (F1–F13) and three new features (E1–E3), fully read-only and cross-checked; F1/F2/F3/F4 closed by v2.26; F5/F6/F7/F8 closed by v2.27; E2/E3 closed by v2.28; F9–F13 scoped as v2.30, E1 as v2.31 (calibration-gated) |
 | notes_024 | 7 Sep | Mark | v2.26+ (validation) | Independent in-progress diagnosis reaching the same F1/F2/F3/F5 findings as notes_023 before it was read, and separately catching the same notes_022 B/A flaws Codex flagged; its stated implementation order (privacy boundary, history provenance, configuration crash) is exactly what v2.26 closed |
 

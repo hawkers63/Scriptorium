@@ -85,7 +85,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.28"
+APP_VERSION = "2.29"
 
 # A small shared palette (notes_017, v2.10) so the two text panes, the diff
 # tags and the notice banner read as one surface instead of drifting
@@ -760,6 +760,93 @@ def normalise_user_presets(value, issues=None):
         clean[name] = preset
         used_names.add(folded)
     return clean
+
+
+# Shareable preset packs (notes_022 §3 B, hardened per notes_023/024's
+# critique of the original draft snippet): a house style should travel
+# between machines without hand-editing scriptorium_config.json.
+PRESET_PACK_FORMAT = "scriptorium.preset_pack"
+PRESET_PACK_VERSION = 1
+
+
+def export_preset_pack(user_presets, path):
+    """Write a shareable preset pack file. Returns (ok: bool, detail: str)."""
+    clean = normalise_user_presets(user_presets)
+    document = {
+        "format": PRESET_PACK_FORMAT,
+        "version": PRESET_PACK_VERSION,
+        "presets": clean,
+    }
+    try:
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(document, fh, indent=2, ensure_ascii=False)
+            fh.write("\n")
+    except OSError as exc:
+        return False, str(exc)
+    return True, f"exported {len(clean)} preset(s)"
+
+
+def import_preset_pack(path, existing, *, replace_existing=False):
+    """Merge a preset pack file into existing user_presets.
+
+    Returns (merged_dict, messages: list[str]). Invalid packs yield
+    (dict(existing), ["..."]) without raising, matching the config-repair
+    style. A pack whose "version" this build does not recognise is refused
+    outright rather than partially merged -- the original draft snippet
+    never checked this field at all.
+
+    Replacement is by casefolded name, not exact spelling: popping only an
+    exact-case match before merging could leave a differently-cased
+    duplicate behind for normalise_user_presets() to resolve by dict
+    insertion order rather than by the explicit replacement the user
+    actually asked for (notes_023/024's own finding against the draft).
+    With replace_existing False (the default), a pack entry that collides
+    case-insensitively with an existing preset is skipped and reported,
+    never silently overwritten.
+    """
+    try:
+        with open(path, "r", encoding="utf-8-sig") as fh:
+            loaded = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        return dict(existing), [f"Could not read preset pack: {exc}"]
+    if not isinstance(loaded, dict) or loaded.get("format") != PRESET_PACK_FORMAT:
+        return dict(existing), ["File is not a Scriptorium preset pack."]
+    if loaded.get("version") != PRESET_PACK_VERSION:
+        return dict(existing), [
+            f"This pack's version ({loaded.get('version')!r}) is not "
+            f"supported by this version of Scriptorium (expected "
+            f"{PRESET_PACK_VERSION})."]
+    incoming = loaded.get("presets", {})
+    if not isinstance(incoming, dict):
+        return dict(existing), ["Pack 'presets' field is not an object."]
+
+    pack_issues = {"messages": [], "omitted": 0}
+    incoming_clean = normalise_user_presets(incoming, issues=pack_issues)
+    messages = list(pack_issues["messages"])
+    if pack_issues["omitted"]:
+        messages.append(f"{pack_issues['omitted']} further pack issue(s) omitted.")
+
+    existing_by_fold = {name.casefold(): name for name in existing}
+    merged = dict(existing)
+    for name, preset in incoming_clean.items():
+        folded = name.casefold()
+        if folded in existing_by_fold:
+            if not replace_existing:
+                messages.append(
+                    f"'{name}' was not imported because a preset named "
+                    f"'{existing_by_fold[folded]}' already exists.")
+                continue
+            del merged[existing_by_fold[folded]]
+        merged[name] = preset
+
+    final_issues = {"messages": [], "omitted": 0}
+    clean = normalise_user_presets(merged, issues=final_issues)
+    messages.extend(final_issues["messages"])
+    if final_issues["omitted"]:
+        messages.append(
+            f"{final_issues['omitted']} further issue(s) omitted merging "
+            "with existing presets.")
+    return clean, messages
 
 
 # User-defined house-style avoid-list (v2.18, notes_019 §2.3) -- words or
@@ -2999,21 +3086,29 @@ class SettingsDialog(ctk.CTkToplevel):
 # way first, then open this to save that combination under a name.
 
 class PresetManagerDialog(ctk.CTkToplevel):
-    """Save the current toolbar combination as a user preset, or delete one."""
+    """Save the current toolbar combination as a user preset, or delete one.
 
-    def __init__(self, master, summary, user_names, on_save, on_delete):
+    Also offers preset-pack import/export (notes_022 §3 B) so a house
+    style can travel between machines without hand-editing
+    scriptorium_config.json.
+    """
+
+    def __init__(self, master, summary, user_names, on_save, on_delete,
+                 on_export_pack, on_import_pack):
         super().__init__(master)
         self.on_save = on_save
         self.on_delete = on_delete
+        self.on_export_pack = on_export_pack
+        self.on_import_pack = on_import_pack
         self.user_names = user_names
 
         self.title("Manage presets")
-        self.geometry("460x340")
+        self.geometry("460x460")
         self.resizable(False, False)
         self.transient(master)
         self.grab_set()
         bind_dialog_chrome(self, self.destroy)
-        self.after_idle(lambda: position_over_parent(self, master, 460, 340))
+        self.after_idle(lambda: position_over_parent(self, master, 460, 460))
 
         ctk.CTkLabel(
             self, text="Save the current writing controls",
@@ -3046,6 +3141,67 @@ class PresetManagerDialog(ctk.CTkToplevel):
             state="normal" if user_names else "disabled",
             command=self._delete,
         ).pack(side="left", pady=4)
+
+        ctk.CTkLabel(
+            self, text="Preset packs", font=ctk.CTkFont(weight="bold")
+        ).pack(anchor="w", padx=18, pady=(18, 4))
+        ctk.CTkLabel(
+            self,
+            text="Share your presets as a file, or bring in someone else's.",
+            text_color="gray65",
+        ).pack(anchor="w", padx=18)
+
+        pack_row = ctk.CTkFrame(self, fg_color="transparent")
+        pack_row.pack(fill="x", padx=18, pady=(6, 0))
+        ctk.CTkButton(
+            pack_row, text="Export pack…", width=150,
+            command=self._export_pack,
+        ).pack(side="left")
+        ctk.CTkButton(
+            pack_row, text="Import pack…", width=150,
+            command=self._import_pack,
+        ).pack(side="left", padx=(8, 0))
+
+        self.replace_existing_var = tk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            self, variable=self.replace_existing_var,
+            text="Replace existing names on import",
+        ).pack(anchor="w", padx=18, pady=(8, 0))
+
+        self.pack_status = ctk.CTkLabel(
+            self, text="", text_color="#e06c75", wraplength=420,
+            justify="left")
+        self.pack_status.pack(anchor="w", padx=18, pady=(6, 12))
+
+    def _export_pack(self):
+        path = filedialog.asksaveasfilename(
+            title="Export preset pack", defaultextension=".json",
+            filetypes=[("Scriptorium preset pack", "*.json")], parent=self)
+        if not path:
+            return
+        ok, detail = self.on_export_pack(path)
+        if ok:
+            self.pack_status.configure(text_color="#98c379", text=detail)
+        else:
+            self.pack_status.configure(text_color="#e06c75",
+                                       text=f"Export failed: {detail}")
+
+    def _import_pack(self):
+        path = filedialog.askopenfilename(
+            title="Import preset pack",
+            filetypes=[("Scriptorium preset pack", "*.json")], parent=self)
+        if not path:
+            return
+        messages = self.on_import_pack(path, self.replace_existing_var.get())
+        if messages:
+            self.pack_status.configure(
+                text_color="#e5c07b", text="\n".join(f"• {m}" for m in messages))
+        else:
+            self.pack_status.configure(text_color="#98c379", text="pack imported")
+        # The dialog's own user_names/delete menu were built before this
+        # import; close rather than show a stale delete list -- Manage
+        # presets can simply be reopened to see the new full set.
+        self.destroy()
 
     def _save(self):
         """Confirm an overwrite here (this dialogue owns the input grab, so
@@ -3354,7 +3510,9 @@ class Scriptorium(ctk.CTk):
             self, summary=summary,
             user_names=list(self.cfg.get("user_presets", {})),
             on_save=self._save_current_preset,
-            on_delete=self._delete_user_preset)
+            on_delete=self._delete_user_preset,
+            on_export_pack=self._export_preset_pack,
+            on_import_pack=self._import_preset_pack)
 
     def _write_user_presets(self, presets):
         """Persist a candidate user_presets collection before changing live state.
@@ -3429,6 +3587,30 @@ class Scriptorium(ctk.CTk):
             return False
         self._refresh_status(f"preset deleted: {name}")
         return True
+
+    def _export_preset_pack(self, path):
+        """Write the current user presets to a shareable pack file."""
+        ok, detail = export_preset_pack(self.cfg.get("user_presets", {}), path)
+        if ok:
+            self._refresh_status(f"preset pack exported: {os.path.basename(path)}")
+        return ok, detail
+
+    def _import_preset_pack(self, path, replace_existing):
+        """Merge a preset pack file into the live user presets.
+
+        Returns the list of messages import_preset_pack() produced (empty
+        if nothing needed reporting). A write failure is reported the same
+        way _write_user_presets() reports any other save failure.
+        """
+        merged, messages = import_preset_pack(
+            path, self.cfg.get("user_presets", {}),
+            replace_existing=replace_existing)
+        error = self._write_user_presets(merged)
+        if error is not None:
+            messages = messages + [error]
+        elif not messages:
+            self._refresh_status(f"preset pack imported: {os.path.basename(path)}")
+        return messages
 
     def _open_tone_picker(self):
         """Open the compact multi-tone selection dialogue."""
