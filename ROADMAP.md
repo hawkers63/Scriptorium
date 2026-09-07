@@ -25,10 +25,16 @@ first time since notes_001 opened it; v2.22 closed a fresh hand-testing
 defect (notes_020) found immediately after. notes_021's second-generation
 hardening pass is fully shipped except its deliberately-deferred streaming
 half (v2.23–v2.25; see v2.25's own write-up for why streaming stays out of
-scope). notes_022/023/024's follow-on review is now underway: v2.26–v2.30
-above close all thirteen confirmed defects (F1–F13), E2/E3, and notes_022
-proposal B; only v2.31 (E1, calibration-gated) remains, scoped below and
-not yet implemented.
+scope). notes_022/023/024's follow-on review has now closed all thirteen
+confirmed defects (F1–F13, v2.26–v2.30 above), E2/E3, and notes_022
+proposal B. **v2.31 (E1, selection-scoped processing) is implemented and
+deterministically tested but deliberately not shipped**: a 2026-09-07
+calibration attempt found the configured Claude API key entirely rejected
+(a different failure from the already-known workspace-scoping issue) and
+one real hallucination failure on the Ollama half that did run — see
+v2.31's own section below for the full corpus, results and what's needed
+to finish it. `process_selection()` exists in the source but is not wired
+into the UI.
 
 Scope through v2.3 was drawn from twelve accumulated review notes
 (`notes/01_Active/notes_001.txt` – `notes_012.txt`), written independently by
@@ -2734,7 +2740,7 @@ exists to catch (cf. v2.24's Windows-path-regex incident, same pattern).
 
 ---
 
-## v2.31 — Selection-scoped processing (calibration-gated)
+## v2.31 — Selection-scoped processing (calibration-gated) — 🚧 implemented, not shipped (calibration blocked 2026-09-07)
 
 **Goal:** notes_023's E1 — explicit selection-scoped processing — the
 highest day-to-day value feature in the review, deliberately shipped last
@@ -2771,23 +2777,108 @@ about.
    than shipping with stronger prose alone.
 
 ### Acceptance checklist
-- [ ] `make_processing_scope()` rejects a selection that doesn't
+- [x] `make_processing_scope()` rejects a selection that doesn't
       reconstruct the exact Original text, and rejects a whitespace-only
-      selection.
-- [ ] A full-document request behaves identically to before
-      selection-scoped processing existed.
-- [ ] A selection request's prefix/suffix reappear byte-for-byte in the
+      selection. Verified directly, plus non-string-input rejection.
+- [x] A full-document request behaves identically to before
+      selection-scoped processing existed. `process()` now just builds
+      `make_processing_scope(original)` and calls the shared
+      `_begin_processing()` — confirmed via the full existing regression
+      suite (16 test files spanning every prior release) with no changes
+      needed to any of it.
+- [x] A selection request's prefix/suffix reappear byte-for-byte in the
       assembled revision; fidelity/letter audits run against the full
-      assembled text, not just the returned fragment.
-- [ ] History, export, Copy and stale-source checks all work correctly
+      assembled text, not just the returned fragment. Verified end-to-end
+      through a real `_on_success()` call: the assembled revision, the diff
+      pane, history and a deliberately-tampered scope (to confirm the audit
+      actually inspects content, not just structure) all behaved correctly.
+- [x] History, export, Copy and stale-source checks all work correctly
       against a selection-scoped result exactly as they do for a
-      full-document one.
-- [ ] The full live-model calibration corpus above passes against both
-      backends per the stated criteria; results (source, response, model
-      tag, verdict) are recorded. Any repeated context-guessing failure
-      keeps the feature disabled rather than shipping.
-- [ ] `ast.parse()` clean; full regression pass; rebuilt `.exe` verified;
-      real config untouched.
+      full-document one. Verified: history stores and restores the
+      `"selection"` scope tag correctly, and a restored entry reassembles
+      to the identical text.
+- [ ] **The live-model calibration corpus did not pass — see below.** Code
+      implementation is complete and deterministically verified (28
+      passing checks across two dedicated test files, on top of the full
+      existing suite); the model-behaviour gate itself is not yet cleared.
+- [x] `ast.parse()` clean; full regression pass (all 16 test files,
+      unaffected by this refactor). **Not rebuilt/shipped** — see below for
+      why; `APP_VERSION` stays at `2.30`.
+
+### Calibration attempt, 2026-09-07 — did not clear the gate
+
+A twelve-case corpus was built covering every category the note requires
+(mid-sentence selections with leading/trailing punctuation; a pronoun
+whose antecedent sits outside the selection; negation/modality/hedges;
+quantities/dates/money/percentages; a quotation; a URL and email together;
+a Windows path with all four placeholder shapes; a Markdown list item; a
+Markdown heading with blank-line boundaries; an already-correct selection;
+a genuinely ambiguous fragment) and run against both backends.
+
+**Claude: blocked entirely.** The configured `scriptorium_config.json` API
+key produced the already-known `400`/workspace-scoping error from the
+"Deferred" section below; the environment's own `ANTHROPIC_API_KEY` (a
+different, supposedly workspace-scoped key) was tried next and returned a
+flat `401 API key is invalid` on every one of the twelve calls. Zero
+Claude calibration data was collected. This blocks the note's own explicit
+requirement to check "both the configured Claude backend and…Ollama" —
+half the comparison never happened.
+
+**Ollama (llama3.2:3b, confirmed the right choice per
+[[scriptorium_testing_gotchas]] — llama3.1:8b was not attempted again
+given the same ~4GiB-free-RAM constraint still holds): mixed.** The
+splice mechanism itself was flawless — `exterior_unchanged: True` in all
+twelve cases, meaning prefix/suffix were never altered regardless of what
+the model returned. But:
+- **One real, severe failure.** The Markdown-list-item case — selecting
+  the imperative-sounding fragment "Review the middle item carefully for
+  errors" — returned entirely unrelated hallucinated content about
+  "licence holders" and "programme events," not a revision of the given
+  text at all. Likely cause: a short fragment phrased as an instruction
+  confused a weak instruction-following model into treating it as a
+  meta-instruction rather than prose to edit — exactly the kind of
+  context-loss failure mode this calibration gate exists to catch.
+- **Minor fidelity drift, twice.** A trailing comma was dropped from a
+  mid-sentence selection's boundary ("...12 March 2026," → "...12 March
+  2026"), which would leave a small grammatical seam once spliced into the
+  fixed suffix. A quotation's straight quotation marks were silently
+  replaced with smart quotes, correctly caught by
+  `audit_revision_fidelity()`'s existing protected-quote check but still a
+  real instance of the model not preserving exact punctuation inside
+  supposedly-protected content.
+- Everything else — placeholder protection (a Windows path plus all four
+  placeholder shapes), the pronoun-antecedent case, negation/modality/
+  hedges, money/percentage, URL+email, the already-correct selection, and
+  the genuinely-ambiguous case — behaved acceptably; a batch of four
+  "placeholder dropped" warnings on the path/placeholder case were
+  correctly detected and reported by the existing `restore_placeholders()`
+  mechanism (unrelated to E1 — llama3.2:3b mangling the `⟦⟧` sentinel
+  brackets is a pre-existing, already-documented limitation of small local
+  models, not a splicing defect), not silently swallowed.
+
+**Decision: do not ship.** Per this task's own stated rule ("if either
+backend repeatedly guesses missing context, do not ship the feature
+merely with stronger prose instructions; keep it disabled") and the
+simple fact that Claude calibration never actually ran, `process_selection()`
+was **deliberately reverted out of the UI** — no "Process selection"
+context-menu entry, no `Ctrl+Shift+Enter` binding, no `SHORTCUTS` row —
+while the method itself, `make_processing_scope()`,
+`assemble_scoped_revision()` and the `_begin_processing()` refactor all
+remain in the tree, fully implemented and tested, reachable only by
+calling `process_selection()` directly (as the test suite does).
+`APP_VERSION` was not bumped and nothing was rebuilt/shipped as v2.31.
+
+**To finish this**: a genuinely workspace-scoped, working Claude API key
+is needed to complete the Claude half of calibration (see the
+"anthropic-workspace-id header" entry below — the account-level fix
+already worked once before; this may just need a fresh key generated the
+same way). Once that's available, re-run the corpus above (the script and
+its saved results are this session's scratch output, not committed to the
+repo) against both backends, decide whether the Markdown-list-item failure
+mode needs a UX mitigation (e.g. refusing/warning on a selection with no
+sentence-ending punctuation, or a short imperative-shaped fragment) or is
+acceptable as a known model-quality limitation, and only then wire the
+three UI entry points back in.
 
 ---
 
@@ -2843,10 +2934,13 @@ about.
 - Recent-revisions history panel (notes_003/005/006) — sound idea, but
   every subsequent review has consistently prioritised the items above it;
   revisit after v2.6 if it's still wanted.
-- `anthropic-workspace-id` header — **resolved 2026-09-01, no code change.**
+- `anthropic-workspace-id` header — diagnosed 2026-09-01 as an
+  account-configuration issue, not a code defect (see below); **recurred
+  2026-09-07 while calibrating v2.31**, so treat as still open until a
+  working key is confirmed in Settings, not as closed history.
   Discovered while hand-testing v2.4: `call_anthropic()` never sent this
   header, and Mark's identity-linked (personal, unscoped/"multi-workspace")
-  API key needs one (`HTTP 400`). Confirmed for real this session, against
+  API key needs one (`HTTP 400`). Confirmed for real that session, against
   the live API with the actual configured key: the error is genuine —
   `"anthropic-workspace-id is required when authenticating with an
   identity-linked API key"` — and `call_anthropic()` already sends the
@@ -2864,6 +2958,16 @@ about.
   change needed; this is an account-configuration action, not a code defect.
   Was pre-existing and unrelated to v2.4 — would have affected a v2.3
   single-tone request identically.
+  **2026-09-07 update**: v2.31's calibration hit the identical `400` again
+  against the key currently stored in `scriptorium_config.json` — the fix
+  above was apparently never actually applied to the live config (or a new
+  unscoped key replaced it since). A second attempt using this session's
+  `ANTHROPIC_API_KEY` environment variable (a different key) failed
+  differently — a flat `401 API key is invalid` on every call, meaning
+  that key is not merely unscoped but not accepted at all. Neither key
+  currently works; a genuinely valid, workspace-scoped key needs to be
+  generated and set (in Settings, or as `ANTHROPIC_API_KEY`) before v2.31's
+  Claude-side calibration can be completed.
 - **Explorer drag-and-drop onto the Original pane** (notes_014 §3.1,
   notes_015 Feature 3) — not implemented. Both notes' own snippets stop at
   `DragAcceptFiles(hwnd, True)` and explicitly defer the actual
@@ -2901,7 +3005,7 @@ about.
 | notes_020 | 2 Sep | Mark | v2.22 (hand-test diagnosis) | Closed by v2.22 |
 | notes_021 | 2 Sep | Codex | v2.21+ (hardening) | Confirmed all five originally-requested areas already shipped by build 2.21; §2.1/2.2/2.4 closed by v2.23; §2.3 closed by v2.23 (conflict feedback) + v2.24 (fidelity audit); §2.5's cancellable retry transport closed by v2.25; §2.5's streaming half explicitly deferred pending two open product decisions (see v2.25) |
 | notes_022 | 3 Sep | Lynne | v2.26+ (forward proposals) | Stale-brief audit confirms v2.11–v2.25 already cover the five original architecture themes (not re-proposed); forward proposals A–E triaged by notes_023/024 — B (preset packs) closed by v2.29 with both flagged bugs fixed (version check, casefolded replace); A/C/D deferred pending F5/live evidence/UI redesign respectively; E (streaming design) folds into notes_021's existing deferred streaming item |
-| notes_023 | 7 Sep | Codex | v2.26+ (state-integrity & feature review) | Thirteen confirmed defects (F1–F13) and three new features (E1–E3), fully read-only and cross-checked; F1/F2/F3/F4 closed by v2.26; F5/F6/F7/F8 closed by v2.27; E2/E3 closed by v2.28; F9–F13 closed by v2.30; E1 scoped as v2.31 (calibration-gated), the only item from this note not yet implemented |
+| notes_023 | 7 Sep | Codex | v2.26+ (state-integrity & feature review) | Thirteen confirmed defects (F1–F13) and three new features (E1–E3), fully read-only and cross-checked; F1/F2/F3/F4 closed by v2.26; F5/F6/F7/F8 closed by v2.27; E2/E3 closed by v2.28; F9–F13 closed by v2.30; E1 implemented as v2.31 but not shipped — calibration blocked (Claude key invalid; one Ollama hallucination failure), see v2.31's own section |
 | notes_024 | 7 Sep | Mark | v2.26+ (validation) | Independent in-progress diagnosis reaching the same F1/F2/F3/F5 findings as notes_023 before it was read, and separately catching the same notes_022 B/A flaws Codex flagged; its stated implementation order (privacy boundary, history provenance, configuration crash) is exactly what v2.26 closed |
 
 `scriptorium_notes_001.txt`, a near-duplicate of notes_014 written under

@@ -1775,6 +1775,55 @@ def read_document_path(path):
 
 
 # --------------------------------------------------------------------------- #
+#  Selection-scoped processing (notes_023 E1, calibration-gated)
+# --------------------------------------------------------------------------- #
+# process() sends the whole Original document; process_selection() sends
+# only the selected passage, splicing it back into the untouched prefix/
+# suffix locally once a result returns. These two pure helpers are the
+# whole seam: they never call the backend and never touch Tk, so the
+# invariant they enforce -- prefix + selected + suffix reproduces Original
+# exactly -- is guaranteed by Python, not merely requested from the model.
+
+def make_processing_scope(full_original, selected=None, prefix="", suffix=""):
+    """Return a validated full-document or selected-passage request scope.
+
+    For selection mode, prefix + selected + suffix must reproduce the
+    exact Original snapshot -- this is what guarantees text outside the
+    selected passage is copied locally and never even sent to the model,
+    on either backend.
+    """
+    if selected is None:
+        return {
+            "kind": "full",
+            "full_original": full_original,
+            "request_text": full_original,
+            "prefix": "",
+            "suffix": "",
+        }
+    if not all(isinstance(value, str)
+               for value in (full_original, selected, prefix, suffix)):
+        raise TypeError("Processing scope values must be text.")
+    if prefix + selected + suffix != full_original:
+        raise ValueError("The selected passage no longer matches Original.")
+    if not selected.strip():
+        raise ValueError("Select a passage containing text first.")
+    return {
+        "kind": "selection",
+        "full_original": full_original,
+        "request_text": selected,
+        "prefix": prefix,
+        "suffix": suffix,
+    }
+
+
+def assemble_scoped_revision(scope, revised_request_text):
+    """Return the complete suggested revision for a validated scope."""
+    if scope["kind"] == "full":
+        return revised_request_text
+    return scope["prefix"] + revised_request_text + scope["suffix"]
+
+
+# --------------------------------------------------------------------------- #
 #  Word-level diff highlighting
 # --------------------------------------------------------------------------- #
 
@@ -4248,20 +4297,77 @@ class Scriptorium(ctk.CTk):
             pass
 
     def process(self):
-        """Send the current text to the backend on a worker thread."""
+        """Send the whole Original document to the backend."""
+        original = self.original_box.get("1.0", "end-1c")
+        self._begin_processing(make_processing_scope(original))
+
+    def process_selection(self):
+        """Send only the selected Original passage to the backend.
+
+        notes_023 E1: prefix and suffix are captured here and never leave
+        this method except as local strings -- they are spliced back onto
+        the returned passage entirely in Python (assemble_scoped_revision(),
+        called from _on_success()), so the unchanged exterior is guaranteed
+        rather than merely requested from the model, on either backend.
+
+        NOT CURRENTLY REACHABLE FROM THE UI. Deliberately -- the note's own
+        gate requires a real live-model calibration pass before this is
+        wired into a context-menu entry or shortcut, and the first attempt
+        (2026-09-07) did not clear that gate: the configured Claude key
+        rejected every call outright (a distinct failure from the already-
+        known workspace-scoping issue), so half the required cross-backend
+        comparison never ran at all, and the Ollama half that did run
+        surfaced one real failure -- a short, imperative-sounding selection
+        ("Review the middle item carefully for errors") produced entirely
+        unrelated hallucinated content rather than a revision of the given
+        text, even though the splice mechanism itself was correct in all
+        twelve cases tested. See ROADMAP.md's v2.31 section for the full
+        corpus, results and next steps. This method, make_processing_scope()
+        and assemble_scoped_revision() are complete and fully tested; only
+        the UI entry points (context-menu item, Ctrl+Shift+Enter) remain
+        deliberately unwired pending a resolved API key and a clean rerun.
+        """
         if self.busy:
             return
-        original = self.original_box.get("1.0", "end-1c")
-        if not original.strip():
+        try:
+            prefix = self.original_box.get("1.0", "sel.first")
+            selected = self.original_box.get("sel.first", "sel.last")
+            suffix = self.original_box.get("sel.last", "end-1c")
+        except tk.TclError:
+            self._refresh_status("select a passage to process first")
+            return
+
+        full_original = prefix + selected + suffix
+        try:
+            scope = make_processing_scope(
+                full_original, selected=selected, prefix=prefix, suffix=suffix)
+        except (TypeError, ValueError) as exc:
+            self._refresh_status(str(exc))
+            return
+        self._begin_processing(scope)
+
+    def _begin_processing(self, scope):
+        """Send scope["request_text"] to the backend on a worker thread.
+
+        Shared by process() (full document) and process_selection() (one
+        passage) so both request kinds are validated, cancelled and
+        audited identically (notes_023 E1) -- the only difference between
+        them is what request_text contains and how the returned text gets
+        spliced back into the full document once a result arrives.
+        """
+        if self.busy:
+            return
+        request_text = scope["request_text"]
+        if not request_text.strip():
             self._refresh_status("nothing to process")
             return
 
         # Protect placeholders by masking them before the model sees the text;
         # they are restored (and checked) in _on_success.
         if self.cfg.get("protect_placeholders", True):
-            masked, ph_map = mask_placeholders(original)
+            masked, ph_map = mask_placeholders(request_text)
         else:
-            masked, ph_map = original, []
+            masked, ph_map = request_text, []
 
         # Stamp this request so a superseded or cancelled result can be ignored,
         # and give it its own cancellation Event (notes_021 §2.5/3.5) -- any
@@ -4274,7 +4380,8 @@ class Scriptorium(ctk.CTk):
         self._request_id += 1
         request_id = self._request_id
         self._set_busy(True)
-        busy_note = "contacting the model…"
+        busy_note = ("processing the selected passage…"
+                    if scope["kind"] == "selection" else "contacting the model…")
         if ph_map:
             busy_note = f"protecting {len(ph_map)} placeholder(s), contacting the model…"
         self._refresh_status(busy_note)
@@ -4282,7 +4389,7 @@ class Scriptorium(ctk.CTk):
         cfg_snapshot = dict(self.cfg)  # Settings changes mid-request affect the next one only
         request_context = build_request_context(
             self.mode_var.get(), self.strength_var.get(), self.role_var.get(),
-            tuple(self.selected_tones), cfg_snapshot)
+            tuple(self.selected_tones), cfg_snapshot, scope=scope["kind"])
 
         try:
             system_prompt = build_system_prompt(
@@ -4314,16 +4421,16 @@ class Scriptorium(ctk.CTk):
                     self._on_error, request_id, f"Unexpected error: {exc}")
             else:
                 self._post_to_ui(
-                    self._on_success, request_id, original, ph_map, result,
+                    self._on_success, request_id, scope, ph_map, result,
                     request_context)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_success(self, request_id, original, ph_map, result, request_context):
+    def _on_success(self, request_id, scope, ph_map, result, request_context):
         """Publish a completed result with immutable provenance and notices.
 
-        request_context is exactly what process() captured before this
-        request's prompt was built (notes_023 F2) — used here, not the
+        request_context is exactly what _begin_processing() captured before
+        this request's prompt was built (notes_023 F2) — used here, not the
         toolbar's current live state, for the letter-convention audit and
         the history label, so a control changed mid-request cannot corrupt
         this result's own record of what actually generated it.
@@ -4331,12 +4438,24 @@ class Scriptorium(ctk.CTk):
         if not self._claim_request(request_id):
             return
 
-        # Restore protected placeholders before anything is shown, stored or
-        # exported, so the diff and the accepted text carry the real values.
+        # Restore protected placeholders before anything else touches the
+        # returned text, so the diff and the accepted text carry the real
+        # values -- and, for a selection-scoped request, before it is
+        # spliced back into the full document below, so a placeholder
+        # inside the selection is never left masked in the assembled text.
         placeholder_warnings = []
         if ph_map:
             result["revised"], placeholder_warnings = restore_placeholders(
                 result["revised"], ph_map)
+
+        # A selection-scoped request only ever sent scope["request_text"]
+        # to the model; splice its revision back into the untouched
+        # prefix/suffix now (notes_023 E1) so every downstream consumer —
+        # fidelity/letter audits, the diff pane, history, export — keeps
+        # operating in full-document terms exactly as it did before this
+        # feature existed. A no-op for an ordinary full-document request.
+        result["revised"] = assemble_scoped_revision(scope, result["revised"])
+        original = scope["full_original"]
 
         # Durable notices (placeholder loss, fidelity, letter-convention) are
         # kept for history/export; the "changed while processing" message is
