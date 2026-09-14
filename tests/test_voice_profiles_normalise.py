@@ -1,13 +1,14 @@
-"""Mechanical (no live model) regression tests for v2.33's voice profiles.
-
-Covers normalise_voice_profile()/normalise_voice_profiles(),
-resolve_active_voice_profile(), and build_voice_instruction() -- the pure
-schema and prompt-assembly plumbing notes_030 proposed ahead of any live
-calibration pass. No network access, no live model.
+"""Mechanical (no live model) regression tests for the voice profile and
+two-pass plumbing notes_030 proposed (v2.33 schema/prompt block; v2.34
+preset.voice field, derive-brief helpers, two-pass mode list) ahead of any
+live calibration pass. No network access, no live model.
 """
 
+import json
 import os
 import sys
+
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import scriptorium  # noqa: E402 -- import must follow the sys.path fix-up above
@@ -231,3 +232,176 @@ def test_normalise_config_drops_active_voice_referencing_missing_profile():
     cfg["active_voice"] = "Ghost"
     clean = scriptorium.normalise_config(cfg)
     assert clean["active_voice"] is None
+
+
+def test_normalise_config_two_pass_defaults_false_and_coerces_strings():
+    clean = scriptorium.normalise_config(dict(scriptorium.DEFAULT_CONFIG))
+    assert clean["two_pass_correct_then_style"] is False
+
+    cfg = dict(scriptorium.DEFAULT_CONFIG)
+    cfg["two_pass_correct_then_style"] = "true"
+    assert scriptorium.normalise_config(cfg)["two_pass_correct_then_style"] is True
+
+
+# --------------------------------------------------------------------------- #
+#  normalise_user_presets() -- preset.voice field (v2.34, notes_030 §2.3)
+# --------------------------------------------------------------------------- #
+
+def test_normalise_user_presets_keeps_valid_voice_reference():
+    profiles = {"Mark": {"style_brief": "brief"}}
+    presets = {"Letter": {"mode": "Correct", "strength": "Standard",
+                          "role": "Academic", "tones": [], "voice": "Mark"}}
+    clean = scriptorium.normalise_user_presets(presets, voice_profiles=profiles)
+    assert clean["Letter"]["voice"] == "Mark"
+
+
+def test_normalise_user_presets_drops_dangling_voice_reference():
+    presets = {"Letter": {"mode": "Correct", "strength": "Standard",
+                          "role": "Academic", "tones": [], "voice": "Ghost"}}
+    clean = scriptorium.normalise_user_presets(presets, voice_profiles={})
+    assert clean["Letter"]["voice"] is None
+
+
+def test_normalise_user_presets_no_voice_profiles_known_drops_silently():
+    presets = {"Letter": {"mode": "Correct", "strength": "Standard",
+                          "role": "Academic", "tones": []}}
+    clean = scriptorium.normalise_user_presets(presets)
+    assert clean["Letter"]["voice"] is None
+
+
+def test_normalise_config_end_to_end_preset_voice_survives():
+    cfg = dict(scriptorium.DEFAULT_CONFIG)
+    cfg["voice_profiles"] = {"Mark": {"style_brief": "brief"}}
+    cfg["user_presets"] = {
+        "Letter": {"mode": "Correct", "strength": "Standard",
+                  "role": "Academic", "tones": [], "voice": "Mark"}}
+    clean = scriptorium.normalise_config(cfg)
+    assert clean["user_presets"]["Letter"]["voice"] == "Mark"
+
+
+# --------------------------------------------------------------------------- #
+#  import_preset_pack() -- must not clear an untouched preset's own voice
+# --------------------------------------------------------------------------- #
+
+def test_import_preset_pack_preserves_existing_presets_voice(tmp_path):
+    voice_profiles = {"Mark": {"style_brief": "brief"}}
+    existing = {"Letter": {"mode": "Correct", "strength": "Standard",
+                          "role": "Academic", "tones": [], "voice": "Mark"}}
+    pack_path = tmp_path / "pack.json"
+    pack_path.write_text(json.dumps({
+        "format": scriptorium.PRESET_PACK_FORMAT,
+        "version": scriptorium.PRESET_PACK_VERSION,
+        "presets": {"Other": {"mode": "Clarify", "strength": "Light",
+                              "role": "(none)", "tones": []}},
+    }), encoding="utf-8")
+
+    merged, messages = scriptorium.import_preset_pack(
+        str(pack_path), existing, voice_profiles=voice_profiles)
+    assert not messages
+    assert merged["Letter"]["voice"] == "Mark"
+    assert merged["Other"]["voice"] is None
+
+
+def test_import_preset_pack_without_voice_profiles_clears_existing_voice():
+    """Documents the pre-fix behaviour so a future caller cannot reintroduce
+    it silently: omitting voice_profiles is only safe when the caller has
+    no voice-bearing presets to preserve."""
+    existing = {"Letter": {"mode": "Correct", "strength": "Standard",
+                          "role": "Academic", "tones": [], "voice": "Mark"}}
+    merged = scriptorium.normalise_user_presets(existing)
+    assert merged["Letter"]["voice"] is None
+
+
+# --------------------------------------------------------------------------- #
+#  resolve_voice_profile() / resolve_active_voice_profile()
+# --------------------------------------------------------------------------- #
+
+def test_resolve_voice_profile_returns_named_profile():
+    profile = {"style_brief": "brief"}
+    cfg = {"voice_profiles": {"Mark": profile}}
+    assert scriptorium.resolve_voice_profile(cfg, "Mark") is profile
+
+
+def test_resolve_voice_profile_none_for_non_string_name():
+    cfg = {"voice_profiles": {"Mark": {"style_brief": "brief"}}}
+    assert scriptorium.resolve_voice_profile(cfg, None) is None
+
+
+def test_resolve_active_voice_profile_reads_cfg_active_voice():
+    profile = {"style_brief": "brief"}
+    cfg = {"voice_profiles": {"Mark": profile}, "active_voice": "Mark"}
+    assert scriptorium.resolve_active_voice_profile(cfg) is profile
+
+
+# --------------------------------------------------------------------------- #
+#  TWO_PASS_ELIGIBLE_MODES (v2.34, notes_030 §2.2 B2)
+# --------------------------------------------------------------------------- #
+
+def test_two_pass_eligible_modes_is_paraphrase_and_clarify_only():
+    assert set(scriptorium.TWO_PASS_ELIGIBLE_MODES) == {"Paraphrase", "Clarify"}
+    assert "Correct" not in scriptorium.TWO_PASS_ELIGIBLE_MODES
+
+
+# --------------------------------------------------------------------------- #
+#  _extract_style_brief() -- derive-brief's plain-text reply parser
+# --------------------------------------------------------------------------- #
+
+def test_extract_style_brief_strips_code_fence():
+    text = "```\nShort, direct sentences.\n```"
+    assert scriptorium._extract_style_brief(text) == "Short, direct sentences."
+
+
+def test_extract_style_brief_strips_surrounding_quotes():
+    assert scriptorium._extract_style_brief('"A terse, formal register."') == \
+        "A terse, formal register."
+
+
+def test_extract_style_brief_caps_length():
+    long_text = "x" * (scriptorium.MAX_STYLE_BRIEF_CHARS + 100)
+    result = scriptorium._extract_style_brief(long_text)
+    assert len(result) == scriptorium.MAX_STYLE_BRIEF_CHARS
+
+
+def test_extract_style_brief_rejects_empty():
+    with pytest.raises(scriptorium.BackendError):
+        scriptorium._extract_style_brief("   ")
+
+
+# --------------------------------------------------------------------------- #
+#  _samples_from_text() / _samples_to_text() -- VoiceProfileDialog's parser
+# --------------------------------------------------------------------------- #
+
+def test_samples_round_trip():
+    samples = ["First sample, one paragraph.", "Second sample here."]
+    text = scriptorium._samples_to_text(samples)
+    assert scriptorium._samples_from_text(text) == samples
+
+
+def test_samples_from_text_drops_blank_entries():
+    text = "First.\n---\n\n---\nSecond."
+    assert scriptorium._samples_from_text(text) == ["First.", "Second."]
+
+
+def test_samples_from_text_caps_count_and_length():
+    samples = [f"sample {i}" for i in range(scriptorium.MAX_VOICE_SAMPLES + 3)]
+    text = "\n---\n".join(samples)
+    result = scriptorium._samples_from_text(text)
+    assert len(result) == scriptorium.MAX_VOICE_SAMPLES
+
+    long_text = "x" * (scriptorium.MAX_SAMPLE_CHARS + 50)
+    result = scriptorium._samples_from_text(long_text)
+    assert len(result[0]) == scriptorium.MAX_SAMPLE_CHARS
+
+
+# --------------------------------------------------------------------------- #
+#  derive_voice_brief() -- validation only; no live backend call is made
+# --------------------------------------------------------------------------- #
+
+def test_derive_voice_brief_rejects_no_samples():
+    with pytest.raises(ValueError):
+        scriptorium.derive_voice_brief([], {"backend": "anthropic"})
+
+
+def test_derive_voice_brief_rejects_blank_only_samples():
+    with pytest.raises(ValueError):
+        scriptorium.derive_voice_brief(["   ", ""], {"backend": "anthropic"})
