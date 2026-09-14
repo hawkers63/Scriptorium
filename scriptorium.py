@@ -88,7 +88,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.32"
+APP_VERSION = "2.33"
 
 # A small shared palette (notes_017, v2.10) so the two text panes, the diff
 # tags and the notice banner read as one surface instead of drifting
@@ -910,6 +910,134 @@ def normalise_house_style_avoid(value):
     return clean
 
 
+# Voice profiles (v2.33, notes_030 §2.1) -- a named style brief (plus an
+# optional preferred Mode/Strength/Role/Tones snapshot) a user can apply so
+# a rewrite imitates their own sentence rhythm and habits rather than a
+# generic register. This sits alongside house_style_avoid above, not in
+# place of it: house_style_avoid only steers away from banned phrases -- it
+# cannot describe a positive style. Capped small for the same reason
+# MAX_HOUSE_STYLE_TERMS is: an open-ended value here would let the system
+# prompt grow without bound from a single pasted sample.
+MAX_VOICE_PROFILES = 8
+MAX_VOICE_NAME_LENGTH = 48
+MAX_VOICE_SAMPLES = 6
+MAX_SAMPLE_CHARS = 1200
+MAX_STYLE_BRIEF_CHARS = 900
+MAX_VOICE_AVOID = 24
+
+# Correct mode must stay minimum-edit (a house-style pass, not a rewrite)
+# until a live-model calibration pass -- the same discipline v2.4/v2.11 used
+# for tone/role work, see ROADMAP.md -- confirms a voice block never
+# restyles an already-correct sentence. False is the safe default; only
+# calibration evidence should flip it (notes_030 §2.1 item 4).
+APPLY_VOICE_IN_CORRECT = False
+
+
+def normalise_voice_profile(profile):
+    """Return one canonical voice profile, or None if it cannot be used."""
+    if not isinstance(profile, dict):
+        return None
+    samples_in = profile.get("samples", [])
+    if isinstance(samples_in, str):
+        samples_in = [samples_in]
+    if not isinstance(samples_in, list):
+        samples_in = []
+    samples = []
+    for item in samples_in:
+        if not isinstance(item, str):
+            continue
+        text = item.strip()
+        if not text:
+            continue
+        samples.append(text[:MAX_SAMPLE_CHARS])
+        if len(samples) >= MAX_VOICE_SAMPLES:
+            break
+
+    brief = profile.get("style_brief", "")
+    if not isinstance(brief, str):
+        brief = ""
+    brief = brief.strip()[:MAX_STYLE_BRIEF_CHARS]
+
+    avoid = normalise_house_style_avoid(profile.get("avoid_extra", []))
+    avoid = avoid[:MAX_VOICE_AVOID]
+
+    preferred = profile.get("preferred")
+    preferred_clean = normalise_preset(preferred) if preferred else None
+
+    if not samples and not brief and preferred_clean is None:
+        return None
+    return {
+        "preferred": preferred_clean,
+        "samples": samples,
+        "style_brief": brief,
+        "avoid_extra": avoid,
+        "active": bool(profile.get("active", False)),
+    }
+
+
+def normalise_voice_profiles(value, issues=None):
+    """Validate the stored voice_profiles mapping, protecting reserved names.
+
+    Mirrors normalise_user_presets() above: a malformed or oversized stored
+    value degrades to fewer/no profiles, never raises, and a name colliding
+    with a built-in preset or the manager label is dropped rather than
+    shadowed.
+    """
+    if not isinstance(value, dict):
+        _record_config_issue(
+            issues,
+            "Voice profiles were ignored because 'voice_profiles' is not "
+            "an object.")
+        return {}
+    cleaned = {}
+    reserved = {name.casefold() for name in WRITING_PRESETS}
+    reserved.add(PRESET_MANAGER_LABEL.casefold())
+    for raw_name, raw_profile in value.items():
+        if not isinstance(raw_name, str):
+            _record_config_issue(issues, "A voice profile with a non-text "
+                                 "name was dropped.")
+            continue
+        name = raw_name.strip()[:MAX_VOICE_NAME_LENGTH]
+        if not name or name.casefold() in reserved:
+            _record_config_issue(
+                issues,
+                f"Voice profile '{raw_name}' was dropped because the name "
+                "is reserved or empty.")
+            continue
+        profile = normalise_voice_profile(raw_profile)
+        if profile is None:
+            _record_config_issue(
+                issues,
+                f"Voice profile '{name}' was dropped because it had no "
+                "usable brief, samples or preferred knobs.")
+            continue
+        if len(cleaned) >= MAX_VOICE_PROFILES:
+            _record_config_issue(
+                issues,
+                "Further voice profiles were omitted (cap "
+                f"{MAX_VOICE_PROFILES}).")
+            break
+        # First active wins; later actives are stored but not flagged.
+        if profile["active"] and any(p.get("active") for p in cleaned.values()):
+            profile["active"] = False
+        cleaned[name] = profile
+    return cleaned
+
+
+def resolve_active_voice_profile(cfg):
+    """Return the active voice profile dict for cfg, or None.
+
+    No toolbar/menu can change the active voice yet (v2.33 only ships the
+    schema and prompt block -- preset integration is notes_030 §2.3/v2.34),
+    so this reads straight from config rather than tracking separate
+    instance state that nothing else would update.
+    """
+    name = cfg.get("active_voice")
+    if not isinstance(name, str):
+        return None
+    return cfg.get("voice_profiles", {}).get(name)
+
+
 def preset_menu_names(cfg):
     """Return built-in preset names, then user preset names, then the
     manager command -- the stable order the toolbar menu is populated in.
@@ -945,6 +1073,8 @@ DEFAULT_CONFIG = {
     "default_diff_view": "Inline",
     "user_presets": {},              # validated personal toolbar combinations
     "house_style_avoid": [],         # words/phrases to steer the prompt away from
+    "voice_profiles": {},            # named style briefs (v2.33, notes_030)
+    "active_voice": None,            # name of the voice profile applied to requests
 }
 
 
@@ -1035,6 +1165,13 @@ def normalise_config(cfg, *, issues=None):
         clean.get("user_presets", {}), issues=issues)
     clean["house_style_avoid"] = normalise_house_style_avoid(
         clean.get("house_style_avoid", []))
+    clean["voice_profiles"] = normalise_voice_profiles(
+        clean.get("voice_profiles", {}), issues=issues)
+    active = clean.get("active_voice")
+    if not isinstance(active, str) or active not in clean["voice_profiles"]:
+        active = next((n for n, p in clean["voice_profiles"].items()
+                       if p.get("active")), None)
+    clean["active_voice"] = active
     return clean
 
 
@@ -1223,6 +1360,59 @@ def build_avoid_instruction(terms):
         "for the rephrase.")
 
 
+def build_voice_instruction(profile, mode):
+    """Return a bounded voice block, or "" if none should apply.
+
+    Subordinate to meaning preservation and to Correct mode's minimum-edit
+    rule: mode == "Correct" returns "" unless APPLY_VOICE_IN_CORRECT has
+    been flipped by calibration evidence (notes_030 §2.1 item 4). Samples
+    are deliberately never inlined here -- only the derived brief and any
+    extra avoid-list travel on every request; the samples themselves are
+    used solely by the (v2.34) derive-brief action.
+    """
+    if not profile:
+        return ""
+    if mode == "Correct" and not APPLY_VOICE_IN_CORRECT:
+        return ""
+    brief = (profile.get("style_brief") or "").strip()
+    extra = profile.get("avoid_extra") or []
+    if not brief and not extra:
+        return ""
+    avoid_bit = ""
+    if extra:
+        listed = ", ".join(f'"{term}"' for term in extra)
+        avoid_bit = (
+            f" Prefer not to use {listed} unless the source already "
+            "requires that wording to keep its meaning.")
+    return (
+        "\n- Author voice: imitate the following personal style when "
+        "choosing wording, rhythm, sentence length and hedging -- and "
+        "only those things:\n"
+        f"  {brief}{avoid_bit}\n"
+        "  Voice guidance must not add facts, anecdotes, opinions, "
+        "commitments or biographical detail that are absent from the "
+        "source. Do not paste sentences from any style sample. If voice "
+        "and factual fidelity compete, keep the source meaning and weaken "
+        "the voice. If voice and the selected editing mode compete, the "
+        "mode wins.")
+
+
+# Appended only to MODE_INSTRUCTIONS["Correct"] (v2.33, notes_030 §2.2 B1):
+# Correct already says "fix only genuine errors", but a long letter can
+# still leave British/American spelling drift when Strength is Standard.
+# This is a checklist of the same British pairs already named in the
+# non-negotiable British-English rule above -- restated as an edit
+# checklist, not a new instruction, so it needs no separate calibration
+# pass beyond what Correct mode already has.
+CORRECT_SPELLING_ADDENDUM = (
+    " Spelling checklist (apply only where the source actually drifts): "
+    "organise/realise not organize/realize; colour/favour/centre not "
+    "color/favor/center; licence (noun) vs license (verb); practice (noun) "
+    "vs practise (verb); programme except computer program; travelling, "
+    "modelling, counselling with the British double-l. Do not restyle a "
+    "sentence whose only issue is a spelling you have already corrected.")
+
+
 # The literal markers run_backend() wraps the user's source text in before
 # sending it to either backend (notes_026: a short imperative-shaped
 # selection such as "Review the middle item carefully for errors" was
@@ -1234,7 +1424,8 @@ SOURCE_TEXT_END = "<<<END SOURCE TEXT TO REVISE>>>"
 
 
 def build_system_prompt(mode, strength, tones, role="(none)",
-                        protect_tokens=False, avoid_words=()):
+                        protect_tokens=False, avoid_words=(),
+                        voice_profile=None):
     """Assemble the system prompt that governs a single rewrite."""
     protect_line = ""
     if protect_tokens:
@@ -1252,13 +1443,15 @@ def build_system_prompt(mode, strength, tones, role="(none)",
 
     tone_line = build_tone_instruction(tones)
     avoid_line = build_avoid_instruction(avoid_words)
+    voice_line = build_voice_instruction(voice_profile, mode)
+    correct_extra = CORRECT_SPELLING_ADDENDUM if mode == "Correct" else ""
 
     return f"""You are a meticulous British English copy-editor with decades of \
 experience in professional publishing.
 
 # Task
-{MODE_INSTRUCTIONS[mode]}
-{STRENGTH_INSTRUCTIONS[strength]}{role_line}{tone_line}{avoid_line}
+{MODE_INSTRUCTIONS[mode]}{correct_extra}
+{STRENGTH_INSTRUCTIONS[strength]}{role_line}{tone_line}{avoid_line}{voice_line}
 
 # Non-negotiable rules
 - Write in British English throughout: use -ise not -ize (organise, realise), \
@@ -4539,7 +4732,8 @@ class Scriptorium(ctk.CTk):
                 request_context["mode"], request_context["strength"],
                 request_context["tones"], request_context["role"],
                 protect_tokens=bool(ph_map),
-                avoid_words=tuple(cfg_snapshot.get("house_style_avoid", [])))
+                avoid_words=tuple(cfg_snapshot.get("house_style_avoid", [])),
+                voice_profile=resolve_active_voice_profile(cfg_snapshot))
         except ValueError as exc:
             # Defence-in-depth: self.selected_tones is only ever set through
             # _set_selected_tones()/config normalisation, both of which
@@ -5775,7 +5969,8 @@ def _run_batch_mode(argv):
                     cfg["default_mode"], cfg["default_strength"], tones,
                     cfg.get("default_role", "(none)"),
                     protect_tokens=bool(ph_map),
-                    avoid_words=tuple(cfg.get("house_style_avoid", [])))
+                    avoid_words=tuple(cfg.get("house_style_avoid", [])),
+                    voice_profile=resolve_active_voice_profile(cfg))
                 result = run_backend(system_prompt, masked, cfg)
             except (BackendError, ValueError) as exc:
                 emit(f"[FAIL] {name}: {exc}")
