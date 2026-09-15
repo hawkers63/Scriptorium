@@ -88,7 +88,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.34"
+APP_VERSION = "2.35"
 
 # A small shared palette (notes_017, v2.10) so the two text panes, the diff
 # tags and the notice banner read as one surface instead of drifting
@@ -487,6 +487,19 @@ TONE_INSTRUCTIONS = {
         "to three months')"
     ),
 }
+
+# A candidate for calibration, not a new default or a fourth tone slot
+# (notes_031 §2.4/D3) -- a developer switch, not a Settings control.
+ENABLE_FIRM_TONE = False
+if ENABLE_FIRM_TONE:
+    TONE_INSTRUCTIONS["Firm"] = (
+        "express the source's stated refusals, limits and conditions "
+        "clearly and courteously. Do not soften a refusal into a tentative "
+        "suggestion or add concessions, apologies, threats, deadlines or "
+        "promises. Preserve existing uncertainty; never turn a question "
+        "into an order or make a qualified position absolute"
+    )
+
 TONES = ["(keep original)", *TONE_INSTRUCTIONS]
 
 # Up to MAX_SELECTED_TONES may be combined, ordered dominant, supporting,
@@ -576,6 +589,22 @@ def validate_tones(tones):
     return normalised
 
 
+def move_selected_tone(tones, tone, step):
+    """Return a new valid order, moving one tone by one position."""
+    ordered = validate_tones(tones)
+    if step not in (-1, 1):
+        raise ValueError("Move a tone one position earlier or later.")
+    if tone not in ordered:
+        return ordered
+    index = ordered.index(tone)
+    destination = index + step
+    if 0 <= destination < len(ordered):
+        ordered[index], ordered[destination] = (
+            ordered[destination], ordered[index]
+        )
+    return validate_tones(ordered)
+
+
 # Writing roles are data-driven *contexts*, not model personas. Each one steers
 # vocabulary, register and rhythm only — it never licenses adding facts or
 # jargon. Role, mode, strength and tone are independent knobs that stack.
@@ -616,16 +645,22 @@ ROLE_INSTRUCTIONS = {
         "technical conclusion the source does not already support."
     ),
     "Executive": (
-        "favour a decisive, authoritative, outcome-focused register that is "
-        "polite but direct, foregrounding decisions and clear next steps."
+        "use clear, composed professional language; foreground decisions "
+        "and next steps only when they are stated in the source. Preserve "
+        "unresolved questions, uncertainty and existing limits; never "
+        "invent a decision, deadline or commitment."
     ),
     "Project Manager": (
-        "favour clear scope, ownership, dependencies, milestones and risks, "
-        "ending on unambiguous next actions rather than open questions."
+        "organise the source's stated scope, owners, dependencies, "
+        "milestones and risks clearly. Keep questions as questions and "
+        "unassigned work unassigned. Do not invent an owner, next action, "
+        "deadline, resolution or commitment."
     ),
     "Client Relations": (
-        "favour a warm, empathetic and reassuring register that stays courteous "
-        "and solution-focused, gently de-escalating where the tone is tense."
+        "use courteous, attentive wording while preserving the source's "
+        "position and level of certainty. Express only apologies, "
+        "reassurances, offers, remedies and commitments already stated; "
+        "never add them merely to make the reply warmer."
     ),
     "Academic": (
         "favour a formal, objective and measured register with careful hedging "
@@ -653,6 +688,27 @@ ROLE_INSTRUCTIONS = {
         "already contain — this is not legal advice."
     ),
 }
+
+ROLE_MODE_PRECEDENCE = (
+    "- Priority: preserve meaning and protected content first; obey the "
+    "selected editing mode next; apply role and tone guidance within "
+    "that remit. In Correct mode, role, tone and strength never permit "
+    "restyling already-correct wording. Preserve questions, refusals, "
+    "conditions, uncertainty and the exact scope of commitments."
+)
+
+# Remains disabled until comparison with existing roles passes calibration
+# (notes_031 §2.4/D2) -- a developer switch, not a Settings control.
+ENABLE_CORRESPONDENCE_ROLE = False
+if ENABLE_CORRESPONDENCE_ROLE:
+    ROLES.append("Personal Correspondence")
+    ROLE_INSTRUCTIONS["Personal Correspondence"] = (
+        "use natural language for a personal letter or email, preserving "
+        "the source's formality, first/second person and stated relationship. "
+        "Keep existing greetings and sign-offs appropriate to that source; "
+        "do not add greetings, closings, intimacy, emotions, biographical "
+        "detail, apologies, offers or commitments that are not stated."
+    )
 
 
 # Named presets are a convenience layer over the four existing toolbar knobs
@@ -1090,6 +1146,17 @@ def resolve_preset(cfg, name):
     return cfg.get("user_presets", {}).get(name)
 
 
+def preset_control_signature(preset):
+    """Compare controls in order while retaining a legacy voice reference."""
+    clean = normalise_preset(preset)
+    if clean is None:
+        return None
+    return (
+        clean["mode"], clean["strength"], clean["role"],
+        tuple(clean["tones"]), preset.get("voice"),
+    )
+
+
 DEFAULT_CONFIG = {
     "backend": "anthropic",          # "anthropic" or "ollama"
     "anthropic_api_key": "",         # left blank -> falls back to env var
@@ -1505,6 +1572,7 @@ experience in professional publishing.
 {STRENGTH_INSTRUCTIONS[strength]}{role_line}{tone_line}{avoid_line}{voice_line}
 
 # Non-negotiable rules
+{ROLE_MODE_PRECEDENCE}
 - Write in British English throughout: use -ise not -ize (organise, realise), \
 "colour", "favour", "centre", "licence" (noun) vs "license" (verb), "practice" \
 (noun) vs "practise" (verb), "programme" (except computer program), single \
@@ -1667,38 +1735,60 @@ def _extract_json(text):
 MAX_REQUEST_ATTEMPTS = 3
 BASE_RETRY_DELAY = 0.75
 MAX_RETRY_DELAY = 10.0
-MAX_RETRY_AFTER = 30.0
+MAX_RETRY_AFTER = 30.0  # automatic-wait budget; a longer server delay stops instead
 
 
 def _retry_after_seconds(headers):
-    """Return a bounded Retry-After delay in seconds, or None if unusable.
+    """Parse a finite server delay without shortening a valid request.
 
-    Retry-After is either an integer seconds count or an HTTP-date; both
-    are valid per RFC 9110. A naive (timezone-less) HTTP-date is treated as
-    UTC, which is what the HTTP date format actually specifies.
+    Retry-After is either a non-negative integer seconds count or an
+    HTTP-date; both are valid per RFC 9110. A naive (timezone-less)
+    HTTP-date is treated as UTC, which is what the HTTP date format
+    actually specifies. Negative/fractional numeric strings, malformed
+    text and non-finite values are all treated as unusable rather than
+    coerced, so a bad header falls back to ordinary exponential backoff
+    instead of silently becoming some other delay.
     """
     value = headers.get("Retry-After") if headers else None
+    if not isinstance(value, str) or len(value) > 128:
+        return None
+    value = value.strip()
     if not value:
         return None
     try:
-        delay = float(value)
-    except (TypeError, ValueError):
-        try:
+        if re.fullmatch(r"[0-9]+", value):
+            delay = float(value)
+        else:
             retry_at = parsedate_to_datetime(value)
             if retry_at.tzinfo is None:
                 retry_at = retry_at.replace(tzinfo=timezone.utc)
             delay = retry_at.timestamp() - time.time()
-        except (TypeError, ValueError, OverflowError):
-            return None
-    return max(0.0, min(delay, MAX_RETRY_AFTER))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(delay):
+        return None
+    return max(0.0, delay)
 
 
 def _retry_delay(failure_index, headers=None):
-    """Return the server's Retry-After if present, else bounded exponential
-    backoff with a little jitter so concurrent retries don't lock-step.
+    """Choose bounded backoff, or stop when the server asks for longer.
+
+    A valid Retry-After of up to MAX_RETRY_AFTER seconds is honoured as
+    the cancellable wait it always was. A longer valid delay is not
+    shortened to fit that budget -- retrying 90 seconds before a
+    120-second hint has elapsed would defeat the point of the header --
+    so this stops the logical request instead of scheduling a wait or
+    a further automatic attempt.
     """
     retry_after = _retry_after_seconds(headers)
     if retry_after is not None:
+        if retry_after > MAX_RETRY_AFTER:
+            seconds = math.ceil(retry_after)
+            raise BackendError(
+                f"The server asked for a pause of about {seconds} seconds. "
+                "This request has stopped without another automatic "
+                "attempt. Wait for that interval, then try Process again."
+            )
         return retry_after
     exponential = BASE_RETRY_DELAY * (2 ** failure_index)
     jitter = secrets.randbelow(251) / 1000  # up to 250ms
@@ -1802,8 +1892,11 @@ def _request_with_retries(request_factory, *, timeout, label,
                     f"{label} returned an error ({exc.code}).\n\n{detail}{trace}"
                 ) from exc
 
-            delay = _retry_delay(attempt, exc.headers)
-            exc.close()
+            # The delay policy may stop the request; close its response either way.
+            try:
+                delay = _retry_delay(attempt, exc.headers)
+            finally:
+                exc.close()
             if on_retry:
                 on_retry(
                     f"{label} is temporarily unavailable; retrying in "
@@ -2390,10 +2483,20 @@ def build_review_record(original, revised, request_context, ambiguities=(),
         fromfile="Original", tofile="Suggested revision", lineterm="",
     )) or "(no wording changes)"
 
+    # Use this export's source/revision snapshots, not the live editor.
+    reading_section = _markdown_fenced_section(
+        "Reading estimates",
+        "Original: " + review_reading_estimate(original)
+        + "\nSuggested revision: " + review_reading_estimate(revised)
+        + "\nEstimates describe length; they do not assess writing quality.",
+    )
+
     return (
         "# Scriptorium review record\n\n"
         "Status: Suggested revision — not accepted automatically.\n\n"
         f"Change summary: {summarise_diff(original, revised)}\n\n"
+        + reading_section
+        + "\n"
         + _markdown_fenced_section("Request provenance", provenance)
         + "\n"
         + _markdown_fenced_section("Review notices", review_body)
@@ -2438,6 +2541,18 @@ def build_html_diff(original, revised):
     return (
         '<div style="font-family:Segoe UI,Arial,sans-serif;'
         'white-space:pre-wrap">' + "".join(output) + "</div>"
+    )
+
+
+def build_clean_revision_html(text):
+    """Render literal revised prose with line breaks and no review marks."""
+    # Only the HTML representation normalises line endings. The separate
+    # Unicode clipboard payload retains the captured revision exactly.
+    normalised = text.replace("\r\n", "\n").replace("\r", "\n")
+    body = html.escape(normalised).replace("\n", "<br>")
+    return (
+        '<div style="font-family:Segoe UI,Arial,sans-serif;'
+        'white-space:pre-wrap">' + body + "</div>"
     )
 
 
@@ -2669,6 +2784,20 @@ def reading_metrics(text):
     # error.
     minutes = word_count / 200
     return label, minutes
+
+
+def review_reading_estimate(text):
+    """Summarise document size using the current counting conventions."""
+    words = len(text.split())
+    summary = f"{words} words; {len(text)} characters"
+    if words < 20:
+        return summary + "; reading estimate not shown below 20 words"
+    _grade, minutes = reading_metrics(text)
+    duration = (
+        "under a minute" if minutes < 1
+        else f"about {math.ceil(minutes)} min read"
+    )
+    return f"{summary}; {duration} (at 200 words/minute)"
 
 
 # --------------------------------------------------------------------------- #
@@ -3006,7 +3135,6 @@ class TonePickerDialog(ctk.CTkToplevel):
         self.minsize(400, 420)
         self.resizable(False, True)
         self.transient(master)
-        self.grab_set()
         bind_dialog_chrome(self, self.destroy)
         self.bind("<Return>", lambda _e: self._apply())
         self.after_idle(lambda: position_over_parent(self, master, 440, 560))
@@ -3016,16 +3144,53 @@ class TonePickerDialog(ctk.CTkToplevel):
             self, text=f"Choose up to {TONE_PICKER_LIMIT} tones",
             font=ctk.CTkFont(size=16, weight="bold"),
         ).pack(anchor="w", padx=18, pady=(16, 2))
-
         ctk.CTkLabel(
             self,
-            text=("Selection order matters: the first tone is dominant, "
-                  "the second supports it, and a third is only a light "
-                  "accent — not an equal third voice."),
-            wraplength=380, justify="left", text_color="gray65",
-        ).pack(anchor="w", padx=18, pady=(0, 10))
+            text=("The first tone is dominant, the second supports it, "
+                  "and the third is a light accent. Move a selected tone "
+                  "earlier or later to change its priority."),
+            wraplength=360, justify="left", text_color="gray65",
+        ).pack(anchor="w", padx=18, pady=(0, 8))
 
-        tone_frame = ctk.CTkScrollableFrame(self, height=350)
+        # Reserve the footer before the list can consume the remaining height.
+        footer = ctk.CTkFrame(self, fg_color="transparent")
+        footer.pack(side="bottom", fill="x", padx=16, pady=(4, 12))
+        self.status_label = ctk.CTkLabel(
+            footer, text="", text_color="gray65", wraplength=360,
+            justify="left", anchor="w",
+        )
+        self.status_label.pack(fill="x", pady=(0, 6))
+
+        order_row = ctk.CTkFrame(footer, fg_color="transparent")
+        order_row.pack(fill="x", pady=(0, 10))
+        self.order_tone_var = ctk.StringVar(value="(no tones)")
+        self.order_tone_menu = ctk.CTkOptionMenu(
+            order_row, values=["(no tones)"], width=144,
+            variable=self.order_tone_var,
+            command=lambda _value: self._refresh_order_controls(),
+        )
+        self.order_tone_menu.pack(side="left")
+        self.earlier_button = ctk.CTkButton(
+            order_row, text="Earlier", width=86,
+            command=lambda: self._move_order_tone(-1),
+        )
+        self.earlier_button.pack(side="left", padx=(6, 0))
+        self.later_button = ctk.CTkButton(
+            order_row, text="Later", width=86,
+            command=lambda: self._move_order_tone(1),
+        )
+        self.later_button.pack(side="left", padx=(6, 0))
+
+        buttons = ctk.CTkFrame(footer, fg_color="transparent")
+        buttons.pack(fill="x")
+        ctk.CTkButton(buttons, text="Clear", width=90, fg_color="gray30",
+                      command=self._clear).pack(side="left")
+        ctk.CTkButton(buttons, text="Cancel", width=90, fg_color="gray30",
+                      command=self.destroy).pack(side="right", padx=(8, 0))
+        ctk.CTkButton(buttons, text="Apply", width=90,
+                      command=self._apply).pack(side="right")
+
+        tone_frame = ctk.CTkScrollableFrame(self, height=240)
         tone_frame.pack(fill="both", expand=True, padx=16, pady=4)
 
         for tone in TONE_INSTRUCTIONS:
@@ -3036,20 +3201,14 @@ class TonePickerDialog(ctk.CTkToplevel):
                 command=lambda name=tone: self._toggle_tone(name),
             ).pack(anchor="w", padx=8, pady=5)
 
-        self.status_label = ctk.CTkLabel(self, text="", text_color="gray65")
-        self.status_label.pack(anchor="w", padx=18, pady=(4, 0))
-
-        buttons = ctk.CTkFrame(self, fg_color="transparent")
-        buttons.pack(fill="x", padx=16, pady=14)
-
-        ctk.CTkButton(buttons, text="Clear", width=90, fg_color="gray30",
-                      command=self._clear).pack(side="left")
-        ctk.CTkButton(buttons, text="Cancel", width=90, fg_color="gray30",
-                      command=self.destroy).pack(side="right", padx=(8, 0))
-        ctk.CTkButton(buttons, text="Apply", width=90,
-                      command=self._apply).pack(side="right")
-
         self._refresh_status()
+        # Acquire modality only once the native window is available.
+        try:
+            self.wait_visibility()
+            self.grab_set()
+        except tk.TclError:
+            # The owner may have closed while Windows was mapping the dialogue.
+            return
 
     def _toggle_tone(self, tone):
         """Track selection order and enforce the picker's soft limit/conflicts."""
@@ -3097,6 +3256,35 @@ class TonePickerDialog(ctk.CTkToplevel):
         self.status_label.configure(
             text=f"{count} of {TONE_PICKER_LIMIT} selected: {description}",
             text_color="gray65")
+        self._refresh_order_controls()
+
+    def _refresh_order_controls(self):
+        """Keep the movement controls aligned with the local selection."""
+        choices = self.selected_order or ["(no tones)"]
+        if self.order_tone_var.get() not in choices:
+            self.order_tone_var.set(choices[0])
+        self.order_tone_menu.configure(
+            values=choices,
+            state="normal" if self.selected_order else "disabled",
+        )
+        index = (
+            self.selected_order.index(self.order_tone_var.get())
+            if self.selected_order else -1
+        )
+        self.earlier_button.configure(
+            state="normal" if index > 0 else "disabled"
+        )
+        self.later_button.configure(
+            state=("normal" if 0 <= index < len(self.selected_order) - 1
+                   else "disabled")
+        )
+
+    def _move_order_tone(self, step):
+        """Change priority without toggling any membership checkbox."""
+        self.selected_order = move_selected_tone(
+            self.selected_order, self.order_tone_var.get(), step
+        )
+        self._refresh_status()
 
     def _focus_initial_control(self):
         """Place keyboard focus somewhere useful on open (notes_027 §2).
@@ -4155,6 +4343,15 @@ class HistoryDialog(ctk.CTkToplevel):
         self.destroy()
 
 
+def original_heading_text(text, drop_available):
+    """Describe the empty editor without inserting document content."""
+    if text:
+        return "Original"
+    if drop_available:
+        return "Original · drop a file or paste text"
+    return "Original · paste text or use Import…"
+
+
 # --------------------------------------------------------------------------- #
 #  Main application
 # --------------------------------------------------------------------------- #
@@ -4326,6 +4523,13 @@ class Scriptorium(ctk.CTk):
         )
         self.preset_menu.grid(row=0, column=9, padx=4)
 
+        # Traces cover user edits and programmatic changes, including history.
+        self._preset_check_job = None
+        self._preset_control_traces = [
+            (variable, variable.trace_add("write", self._queue_preset_check))
+            for variable in (self.mode_var, self.strength_var, self.role_var)
+        ]
+
     def _apply_writing_preset(self, name):
         """Populate the existing Mode/Strength/Role/Tone knobs from a preset.
 
@@ -4353,6 +4557,32 @@ class Scriptorium(ctk.CTk):
         self.active_voice = preset.get("voice")
         voice_bit = f" (voice: {self.active_voice})" if self.active_voice else ""
         self._refresh_status(f"preset applied: {name}{voice_bit}")
+
+    def _queue_preset_check(self, *_args):
+        """Compare after all fields of a preset application have settled."""
+        if not hasattr(self, "preset_var"):
+            return
+        if getattr(self, "_preset_check_job", None) is None:
+            self._preset_check_job = self.after_idle(self._check_preset_match)
+
+    def _check_preset_match(self):
+        """Clear a saved label when the current controls no longer match it."""
+        self._preset_check_job = None
+        expected = preset_control_signature(
+            resolve_preset(self.cfg, self.preset_var.get())
+        )
+        if expected is None:
+            return
+        current = preset_control_signature({
+            "mode": self.mode_var.get(),
+            "strength": self.strength_var.get(),
+            "role": self.role_var.get(),
+            "tones": list(self.selected_tones),
+            "voice": self.active_voice,
+        })
+        if current != expected:
+            # The stored preset and completed revision remain untouched.
+            self.preset_var.set("(none)")
 
     def _open_preset_manager(self):
         """Describe the live controls and open the compact manager dialogue."""
@@ -4572,6 +4802,7 @@ class Scriptorium(ctk.CTk):
         """Apply a validated, ordered tone selection to the current session."""
         self.selected_tones = validate_tones(tones)
         self._refresh_tone_button()
+        self._queue_preset_check()
 
     def _refresh_tone_button(self):
         """Show the current tone combination without overcrowding the toolbar."""
@@ -4590,9 +4821,12 @@ class Scriptorium(ctk.CTk):
         panes.grid_columnconfigure(1, weight=1, uniform="col")
         panes.grid_rowconfigure(1, weight=1)
 
-        ctk.CTkLabel(panes, text="Original", anchor="w",
-                     font=ctk.CTkFont(weight="bold")
-                     ).grid(row=0, column=0, sticky="w", padx=4)
+        # Keep a reference so an empty-state hint can reuse the existing heading.
+        self.original_heading = ctk.CTkLabel(
+            panes, text="Original", anchor="w",
+            font=ctk.CTkFont(weight="bold"),
+        )
+        self.original_heading.grid(row=0, column=0, sticky="w", padx=4)
         rev_header = ctk.CTkFrame(panes, fg_color="transparent")
         rev_header.grid(row=0, column=1, sticky="ew", padx=4)
         ctk.CTkLabel(rev_header, text="Suggested revision", anchor="w",
@@ -4857,6 +5091,7 @@ class Scriptorium(ctk.CTk):
         self._refresh_status()
 
     def _refresh_status(self, extra=""):
+        self._queue_preset_check()
         backend = self.cfg.get("backend", "anthropic")
         if backend == "anthropic":
             where = f"Claude · {self.cfg.get('anthropic_model')}"
@@ -4871,6 +5106,10 @@ class Scriptorium(ctk.CTk):
             where = f"unrecognised backend {backend!r}"
             privacy = "Process will refuse until this is fixed in Settings"
         original = self.original_box.get("1.0", "end-1c")
+        # This runs on Tk's loop, never in the native drop callback.
+        heading = original_heading_text(original, bool(self._drop_old_wndproc))
+        if self.original_heading.cget("text") != heading:
+            self.original_heading.configure(text=heading)
         chars = len(original)
         words = len(original.split()) if original.strip() else 0
         msg = (f"Backend: {where}  —  {privacy}   |   "
@@ -5578,6 +5817,33 @@ class Scriptorium(ctk.CTk):
             return
         self._refresh_status("rich diff copied to clipboard")
 
+    def copy_rich_revision(self):
+        """Copy a captured clean revision through the existing HTML writer."""
+        if not self.last_result:
+            self._refresh_status("nothing to copy with formatting")
+            return
+
+        # Snapshot before a nested dialogue can run callbacks that change
+        # self.last_result; the copy below always uses this captured value,
+        # even if a new result arrives while the confirmation is open.
+        revised = self.last_result["revised"]
+        if self._revision_is_stale() and not messagebox.askyesno(
+                "Revision may be out of date",
+                "The original text changed after this revision was generated. "
+                "Copy this revision with formatting anyway?", parent=self):
+            return
+
+        try:
+            owner = int(str(self.wm_frame()), 0)
+            set_html_clipboard(owner, revised, build_clean_revision_html(revised))
+        except OSError as exc:
+            messagebox.showerror(
+                "Clipboard unavailable",
+                f"Could not copy the revision with formatting.\n\n{exc}",
+                parent=self)
+            return
+        self._refresh_status("revision copied with formatting")
+
     def export_diff_file(self):
         """Export the active revision as a Markdown diff, in a chosen format.
 
@@ -5667,6 +5933,14 @@ class Scriptorium(ctk.CTk):
                 state=("normal" if has_selection and not self.busy
                       else "disabled"),
                 command=self.process_selection)
+        # Extend the existing native menu; no additional toolbar control is needed.
+        if widget is self.revised_box:
+            menu.add_separator()
+            menu.add_command(
+                label="Copy revision with formatting",
+                state="normal" if self.last_result else "disabled",
+                command=self.copy_rich_revision,
+            )
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -5901,6 +6175,8 @@ class Scriptorium(ctk.CTk):
         # first after() call is a perfectly normal Tcl invocation; it just
         # keeps rescheduling itself for the life of the window.
         self._drop_poll_job = self.after(100, self._poll_dropped_files)
+        # Refresh the empty-pane hint now that the hook is actually installed.
+        self._refresh_status()
 
     def _capture_file_drop(self, hwnd, drop_handle):
         """Copy paths and the drop point out of HDROP. No Tk/Tcl calls here.
@@ -6300,6 +6576,14 @@ class Scriptorium(ctk.CTk):
             except Exception:
                 pass
             self.tray_icon = None
+        # Prevent a late idle comparison during shutdown.
+        job = getattr(self, "_preset_check_job", None)
+        if job is not None:
+            self.after_cancel(job)
+            self._preset_check_job = None
+        for variable, trace_id in getattr(self, "_preset_control_traces", ()):
+            variable.trace_remove("write", trace_id)
+        self._preset_control_traces = []
         self._disable_file_drops()
         self._invalidate_inflight()
         self.destroy()

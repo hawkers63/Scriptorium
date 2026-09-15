@@ -1,0 +1,1149 @@
+SCRIPTORIUM — FOCUSED ENHANCEMENT PROPOSALS
+==========================================
+Date: 15 September 2026
+Mandate: Lead Enhancement and Feature Architect; read-only ideation.
+Author: Codex, working to Mark's revised direction.
+Reviewed file: C:\Scriptorium\scriptorium.py
+Observed version: 2.34; 6,619 lines; Git HEAD 366ac4a, main.
+Source SHA-256:
+b04c3e79aae70efe0a392cc074638db4036c7b1c82aeef58742d33db0385ad38
+
+Decision recorded
+-----------------
+Mark has deferred the saved "Mark" voice and author-style emulation.
+The immediate direction is small usability improvements and a stronger
+rewriting process, with carefully justified roles and tones where useful.
+This decision supersedes notes_030's recommendation to continue into live
+voice calibration. This note does not authorise implementation.
+
+The current source already contains v2.33/v2.34 voice-profile code, the
+derive-brief dialogue, preset voice references and optional two-pass work.
+Deferring further work does not itself remove or disable these features.
+No source or configuration was changed to do either. Their operational
+state in Mark's saved configuration was not inspected. All proposed
+rewriting comparisons below use voice off and two-pass off. A future
+decision to hide, disable or remove existing voice functionality should
+be a separate, narrow task; personal profiles should not be deleted as
+an incidental part of a usability change.
+
+This note is the sole file created. The requested 01_Active destination
+takes precedence over the older role file's 00_Drafts convention. All
+three note folders were checked; 030 was the highest existing number.
+No task-tracking integration was available, so this review proceeded as
+a standalone task. No commit, push, build or live model call was made.
+
+
+1. EXECUTIVE SUMMARY
+====================
+
+The five priority areas in the brief already exist in v2.34. Rebuilding
+them would add disruption without giving Mark a new capability. The next
+useful work is a small set of refinements to those existing mechanisms.
+
+Current capability audit
+------------------------
+Priority area        Current evidence in scriptorium.py           Status
+-------------------  -------------------------------------------  --------
+Explorer file drops  Native declarations 335–398; bridge           Present
+                     5837–6064; shared import path 5770–5833.
+User presets         WRITING_PRESETS 663; normalisers 688–807;      Present
+                     user_presets 1111; manager 3651–3820;
+                     persistence 4372–4469; preset packs 817–911.
+Three tones          Both limits are 3 at 499–500; hard conflicts  Present
+                     502–515; ordered prompt 1327–1374;
+                     picker 2995–3132.
+Export/clipboard/    Unified and annotated Markdown 2294–2343;    Present
+metrics              review record 2355–2406; HTML/CF_HTML
+                     2409–2600; reading_metrics 2630–2671;
+                     live counts 4848–4900.
+Retries/preparation  Shared retry transport 1667–1845; backend     Present
+                     wiring 1848–1976; cancellation 1721–1735;
+                     separate response_reader at 1753.
+
+"Present" means confirmed in the current source and supported by the
+project's release history. It does not claim these paths were all driven
+through the Windows desktop again during this review.
+
+Recommended order
+-----------------
+A. Improve the empty Original pane's import guidance. Low risk, small
+   convenience; reuse the working native drop bridge.
+B. Clear a preset's selected name when its controls diverge. Low risk;
+   prevents a saved label implying that edited controls still match it.
+C. Let Mark move selected tones earlier/later without deselecting them.
+   Low to moderate UI risk; no new prompt semantics or schema.
+D. Tighten three existing role instructions, then evaluate one new role
+   (Personal Correspondence) and one new tone (Firm). High user value if
+   demonstrated; moderate semantic risk and a live calibration gate.
+E. Add clean rich-text revision copying and reading estimates to the
+   existing review-record export. Low to moderate risk; no new toolbar row.
+F. Stop automatic retries when a valid server delay exceeds the existing
+   automatic-wait budget. Moderate transport risk, narrowly bounded change.
+
+The best first implementation slice is B, followed by C. They improve
+daily control of rewriting without altering what a fixed prompt asks the
+model to do. A is optional polish. D should be a separate calibrated
+slice. E and F can each be evaluated and shipped independently.
+
+Novelty check for each recommendation
+-----------------------------------
+A: The Original heading is currently static at 4593–4595. No empty-pane
+   drop guidance exists there; the native feature itself already shipped.
+B: No control-variable traces exist. The preset name is reset for manager
+   entry, preset writes and config migration, but ordinary Mode, Strength,
+   Role or Tone edits do not clear it. This is an interface inconsistency,
+   not evidence of wrong request provenance: v2.26 already snapshots that.
+C: The picker retains selection order but offers no reordering controls.
+   The existing order display and three-tone limit are retained.
+D: Existing role wording can pull towards extra actions or reassurance.
+   Personal Correspondence and Firm are absent from the canonical tables.
+   The candidates must earn their place against existing combinations.
+E: Rich copying currently means a marked-up review diff. Clean rich text
+   is absent. The review record has no reading-estimate section. Using
+   that export addresses the earlier concern about status-bar crowding.
+F: An isolated call confirmed that Retry-After: 120 becomes 30.0 seconds.
+   Retry transport itself is already complete; this is a policy refinement.
+
+Severity and evidence
+---------------------
+No release-blocking defect was established in this review. B is a low
+severity usability inconsistency confirmed by source inspection. F is a
+moderate retry-policy issue reproduced using the actual pure helper; its
+frequency against Mark's real backends was not measured. D identifies
+instruction tensions, not newly demonstrated model failures. A, C and E
+are optional enhancements rather than defects.
+
+Explicitly outside this shortlist
+---------------------------------
+Saved-author emulation, additional voice calibration, default two-pass
+rewriting, visible streaming, multiple generated alternatives, a module
+split, multi-file/folder drops and the paused notes_028 visual redesign
+remain outside this proposal. Soft tone-conflict warnings remain deferred:
+ROADMAP.md 3305–3310 asks for observed model failures before adding them.
+No new tone is prohibited merely because its name sounds unlike another.
+
+
+2. DETAILED ARCHITECTURAL PROPOSALS
+==================================
+
+2.1 A — Make the existing Explorer drop feature discoverable
+-----------------------------------------------------------
+User journey:
+  Open Scriptorium with an empty Original pane -> see a short import hint
+  in the existing Original heading -> drop one .txt, .md or .docx file ->
+  normal shared loader -> inspect Original -> Process -> review revision.
+
+Use the current heading, not text inserted into the editor. Suggested
+empty states are "Original · drop a file or paste text" when the native
+hook is installed and "Original · paste text or use Import…" otherwise.
+Once the pane has content, return the heading to "Original". This avoids
+accidentally sending placeholder instructions to the model or including
+them in word counts. Any non-empty buffer, including spaces, hides the
+hint; it is guidance for an empty editor, not content detection.
+
+State: retain the CTkLabel as self.original_heading. Derive its text from
+the live buffer and the existing _drop_old_wndproc installation state.
+Configuration: none. Performance: reuse the Original string that
+_refresh_status() already reads; no new polling or file access.
+Layout: retain the existing row, padding and font. Check the longest
+heading at 920x600 and 1180x760, at 100%, 125%, 150% and 200% Windows
+scaling. Do not shrink the text or move the accepted action-bar groups
+merely to accommodate this optional hint.
+
+Native architecture to preserve:
+  - shell32/user32 ctypes declarations and pointer-sized WNDPROC types;
+  - SetWindowLongPtrW/SetWindowLongW on the existing toplevel;
+  - CallWindowProcW forwarding for messages that are not consumed;
+  - a strong Python reference to the callback until teardown;
+  - DragQueryFileW Unicode path extraction and DragFinish in finally;
+  - plain Python queued events from WNDPROC, drained by the Tk poller;
+  - Original-descendant hit-testing and the one-file extension filter;
+  - confirmation before a successful drop replaces populated Original;
+  - restoration of the old procedure before the window is destroyed.
+
+Microsoft documents the WM_DROPFILES handle, zero return for a processed
+message, and DragFinish cleanup. The existing implementation supplies
+these pieces; DragAcceptFiles alone would not implement the full path.
+Sources: [WM_DROPFILES](https://learn.microsoft.com/en-us/windows/win32/shell/wm-dropfiles),
+[DragFinish](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-dragfinish),
+[SetWindowLongPtrW](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowlongptrw).
+
+Project-specific critical constraint: never call Tk, including after(),
+after_idle() or winfo_containing(), inside the native WNDPROC. ROADMAP.md
+1394–1458 records the fatal re-entrancy failure and its queue/poller fix.
+The hint refresh belongs in ordinary Tk callbacks, never in that hook.
+No cross-integrity message-filter bypass is proposed. A successful hook
+does not establish that an elevated app can receive an Explorer drop.
+
+The current loader performs file reading on Tk's thread. That could pause
+the interface for a large or slow document, but no such pause was measured
+here. Moving it to a worker would require a separate load identifier,
+captured editor state, and an explicit policy for edits made while reading.
+Do not introduce that larger change just to add this hint. Word stays an
+optional python-docx path and retains the current table-content refusal.
+
+Acceptance:
+  - Empty/populated/Clear/Undo states show the appropriate heading.
+  - A forced hook-install failure leaves an accurate Import/paste hint.
+  - A genuine Explorer drop still works in source and packaged builds.
+  - A cancelled replacement, unsupported path and missing python-docx leave
+    editor contents, undo history and in-flight work unchanged.
+
+
+2.2 B — Show whether the selected preset still matches the controls
+-----------------------------------------------------------------
+Example: Mark applies Client reply, then changes Strength from Standard
+to Light. Currently the preset menu can still say Client reply. Clear it
+to the existing "(none)" value once the controls differ. Do not rewrite
+the saved preset automatically. Mark can save the new combination through
+the existing Manage presets dialogue.
+
+Define equality over Mode, Strength, Role, the ordered tones and the
+existing optional voice reference. Comparing tone sets would be wrong:
+Formal -> Concise and Concise -> Formal produce different emphasis.
+Including the legacy voice reference here preserves current compatibility;
+it adds no new voice behaviour and does not resume the deferred project.
+
+Use StringVar.trace_add("write", ...) for Mode/Strength/Role. Schedule a
+single after_idle check so applying a preset's several values is evaluated
+only after the transaction has finished, including the active_voice write.
+Tone changes use the existing _set_selected_tones seam. A queued check
+from _refresh_status covers other current state-changing paths. The check
+only changes the preset selector; it never clears a revision or edits its
+captured request context. The preset selector itself is not traced.
+
+State: one queued callback identifier and the variable trace handles.
+Configuration: unchanged. Current canonical stored shape remains:
+
+    "user_presets": {
+      "Measured reply": {
+        "mode": "Clarify",
+        "strength": "Light",
+        "role": "Client Relations",
+        "tones": ["Diplomatic", "Concise"],
+        "voice": null
+      }
+    }
+
+Keep the 30-preset/48-character limits, reserved names, case-insensitive
+matching, repair reporting and candidate-copy/save-success boundary.
+No migration, new preset-pack version or extra persistence mechanism is
+needed. No API call is made by applying, comparing or saving a preset.
+
+Existing "(none)" remains a no-op. Returning controls manually to a saved
+combination does not automatically select a matching name: several presets
+may share that combination. Applying a preset still explicitly selects it.
+
+Acceptance:
+  - Each individual control change clears a selected preset when needed.
+  - Apply changes all fields before comparison; the intended name survives.
+  - Merely opening/cancelling Tone Picker leaves an exact match selected.
+  - Tone reordering clears the name if it changes the saved order.
+  - Saving, deleting, importing and history restoration remain coherent.
+  - A failed existing save changes neither live config nor stored presets.
+  - Closing while a comparison is queued leaves no pending Tk callback.
+
+
+2.3 C — Reorder the three-tone composition directly
+--------------------------------------------------
+Example: Formal -> Concise -> Diplomatic is selected. Mark decides
+Diplomatic should dominate. Select Diplomatic in a small "Move tone"
+control, then press Earlier twice. Apply commits Diplomatic -> Formal ->
+Concise; Cancel leaves the original order untouched.
+
+Keep all three tiers: dominant, supporting and light accent. Use the
+existing validate_tones boundary before and after a reorder. Membership
+and BooleanVar states do not change. Retain the three hard conflicts:
+Concise/Detailed, Casual/Formal and Neutral/Persuasive. Reordering neither
+resolves nor excuses one of these conflicts. A fourth tone remains invalid.
+
+Do not attach new soft warnings to legal combinations such as
+Direct+Diplomatic or Friendly+Formal. Those are already intentionally legal.
+Prompt generation for any identical ordered input must remain byte-for-byte
+unchanged by this UI-only slice. The existing factual-fidelity/mode/tone
+precedence and anti-embellishment guards remain the authority.
+
+State: selected_order stays a dialogue-local list; add a StringVar for
+which selected tone to move. No application state changes before Apply.
+Configuration: none; existing ordered tones arrays round-trip unchanged.
+Performance: at most three list elements; no backend or file operations.
+
+Layout: retain 440x560, minimum 400x420. Reserve the footer BEFORE packing
+the expanding scrollable list so Apply/Cancel remain visible. The footer
+contains a wrapped order/status line, then a 144px tone menu and two 86px
+Earlier/Later buttons with 6px gaps, followed by the existing action row.
+Use existing dark palette/theme colours; new controls are CustomTkinter.
+Earlier/Later are disabled at the respective edges. Keyboard users can
+Tab through the menu/buttons, Enter applies and Escape cancels.
+
+The full constructor replacement in section 3 avoids a common incomplete
+snippet: appending a footer below an already-expanding pack child can push
+the footer out of a short window. Retained _toggle_tone/_apply/_clear
+methods continue to use the same validation and feedback mechanism.
+
+Acceptance:
+  - Zero, one, two and three tones; moving first/last; repeated moves.
+  - Reordering changes only order, never checkbox membership.
+  - Cancel/close discard local changes; Apply preserves the chosen order
+    through presets, prompt construction and request-context capture.
+  - Three conflicts rejected in every position; legal pairs remain legal.
+  - No content or state from an in-flight request is changed by reordering.
+  - Footer and all controls remain reachable at each size/scaling above.
+
+
+2.4 D — Strengthen roles, then evaluate one role and one tone
+------------------------------------------------------------
+The strongest rewriting improvement is to tighten specific role wording
+before lengthening the menus. Several current phrases warrant calibration:
+  - Executive foregrounds "decisions and clear next steps".
+  - Project Manager ends on "unambiguous next actions rather than open
+    questions". A source that asks a question must be allowed to keep it.
+  - Client Relations favours a "reassuring" register. A courteous rewrite
+    must not add a promise, apology, assurance or solution.
+The global rules already prohibit invented facts. These phrases create
+possible competing instructions; this review has not measured new failures.
+
+D1. Replace only those three role descriptions with bounded alternatives.
+Also state one common hierarchy in build_system_prompt's non-negotiable
+rules: preserve meaning/protected content first; obey the selected mode
+next; apply role and tones within that remit. Correct must stay minimal
+even with Substantial strength and a strongly styled role/tone selected.
+This rule applies with zero, one, two or three tones, complementing the
+three-tone-only explicit hierarchy already in build_tone_instruction.
+
+Do not solve the problem by deleting all role/tone controls in Correct,
+changing default controls, or adding an automatic second call. Those are
+different behaviour changes. A single request still produces one suggested
+revision, ambiguities and a note, followed by explicit human review.
+
+D2. Candidate role: Personal Correspondence.
+Purpose: letters and emails from one person to another, where Executive
+or Client Relations can introduce an unnecessarily organisational register.
+It preserves first/second person, stated relationship, greetings/sign-offs
+already present and the writer's actual level of formality. It cannot infer
+intimacy, emotions or biographical details. It contains no samples, identity
+profile, learned style or permanent author brief. It is a task context.
+Compare against (none)+Friendly/Diplomatic and Client Relations before
+adding it. If those already work as well, a saved preset is sufficient.
+
+D3. Candidate tone: Firm.
+Purpose: retain a clearly stated refusal, limit or condition without
+turning it into a tentative suggestion or surrounding it with concessions.
+Example source: "I cannot agree to the revised fee. I can discuss the
+original quotation on Friday." The fee refusal, offer to discuss and
+Friday must survive; no threat, deadline, apology or offer is added.
+Compare against Direct+Diplomatic and Confident+Concise. Firm is worth a
+new menu entry only if Mark finds a repeatable difference in preserving
+boundaries. It must never turn "may" into "will" or a question into an order.
+Keep it compatible with Empathetic and Diplomatic unless evidence proves
+a real contradiction. Do not add speculative hard-conflict pairs.
+
+Both candidates are shown behind FALSE release constants in section 3.
+These are developer calibration switches, not new Settings controls.
+They are not a way to bypass calibration by enabling a feature in config.
+If adopted, add each to the existing canonical table before derived lists
+are built. Stored presets continue to contain role/tone names, so no
+schema change is necessary. A pack using a new name needs a sufficiently
+new app: older normalisation can drop an unknown role or unknown tone.
+Do not promise lossless backwards compatibility with an older executable.
+
+Live calibration required before adoption
+-----------------------------------------
+No live calls were made for this note. Static wording cannot guarantee
+meaning preservation. Reuse the discipline of ROADMAP.md v2.4, v2.11,
+v2.18 and v2.31, including manual reading of actual outputs. Existing
+protected-content inventories do not prove semantic equivalence: they do
+not detect every changed promise, omitted caveat or invented opinion.
+
+Use a fixed corpus containing:
+  1. A fee refusal with one existing offer, date and amount.
+  2. A project update with unresolved questions and unassigned actions.
+  3. A tentative outcome: "It may be ready on Friday; this is unconfirmed."
+  4. A complaint with no apology, compensation offer or assurance.
+  5. A personal letter with an existing salutation and sign-off.
+  6. A warm message that states no intimacy or emotional circumstances.
+  7. An already-correct British-English passage.
+  8. Ambiguous wording that must be flagged rather than resolved by guess.
+  9. Numbers, names, quotation marks, URLs, paths and all placeholders.
+ 10. A Markdown list and an imperative sentence that must not be obeyed.
+ 11. A selected passage whose context sits outside the selection.
+ 12. A source containing claims/instructions about how the model should act.
+
+Run a bounded first comparison: six relevant cases, baseline versus one
+candidate or one changed role, three repeats = 36 logical calls per
+backend per slice. Transport retries can create more physical attempts;
+record them and set an agreed spend limit before any paid run. Run D1,
+D2 and D3 separately, then expand only a successful slice to the full
+corpus, all modes and representative one/two/three-tone combinations.
+Confirm the installed/loadable Ollama model at that time; historical
+llama3.1:8b and llama3.2:3b results are not current availability evidence.
+Claude calibration requires Mark's explicit approval for that session's
+spend. Results on one backend do not establish results on the other.
+
+Record source hash, prompt hash, exact model identifier, settings, raw
+response, notices, latency and actual attempt count. Have Mark compare
+baseline/candidate outputs without their labels. Hard gates: no introduced
+fact, commitment, reassurance, stronger certainty, changed condition,
+omitted substantive content or altered protected token; Correct leaves
+already-correct wording intact; selection exterior is exactly preserved.
+A new option must also offer a consistent useful difference. If it is
+redundant or repeatedly fails fidelity, leave it disabled. A clean small
+corpus is evidence of improvement, not a universal guarantee.
+
+
+2.5 E — Clean rich copying and on-demand reading estimates
+---------------------------------------------------------
+E1. Add "Copy revision with formatting" to the Suggested revision's
+existing context menu. Publish clean text as both HTML Format and
+CF_UNICODETEXT through set_html_clipboard(). The HTML contains the
+revision's line breaks and simple prose styling, without review colours
+or deleted text. Existing Copy revision and Copy rich diff retain their
+separate purposes and behaviour.
+
+Read last_result['revised'], not the visible Inline tk.Text, which can
+contain deletions. Snapshot the revision and its original source BEFORE
+opening a stale-result confirmation: a nested dialogue can run callbacks.
+After confirmation, copy that captured revision even if a new result has
+arrived. Escaping must treat source HTML/Markdown as literal text, never as
+trusted markup or a command to load remote content.
+
+This does not recover original Word styles, create native Word tracked
+changes or implement RTF. Import currently extracts text, so those styles
+are not available. HTML rendering and preservation of repeated spaces
+vary by receiving application; exact text remains available in the Unicode
+fallback. Microsoft specifies UTF-8 HTML and byte offsets for CF_HTML;
+reuse the existing builder rather than introducing a second writer.
+Source: [HTML Clipboard Format](https://learn.microsoft.com/en-us/windows/win32/dataxchg/html-clipboard-format).
+
+State/config: none. Work is local. HTML construction is linear in text
+length; no SequenceMatcher is needed for a clean revision. Clipboard
+publication retains its existing bounded contention retry and ownership
+cleanup. Verify real pastes into Word, Outlook and a plain text editor,
+including £, accented text, emoji, blank lines, tabs and literal markup.
+An independent reader must check both clipboard formats and byte offsets.
+
+E2. Add an optional-use Reading estimates section to the existing Review
+record export. Compare _result_source with the snapshotted revised text,
+not a subsequently edited Original. Include whitespace-delimited word
+counts, Python character counts and the current approximate reading time
+at 200 words/minute. Retain the 20-word display floor and ceiling rule;
+200 words = about 1 minute, 201 = about 2 minutes. Character counts include
+whitespace and count Unicode code points, not grapheme clusters.
+
+This follows ROADMAP.md 3311–3318's suggested on-demand location and adds
+no status-bar line or configurable speed. Treat a shorter reading time as
+an estimate, never a quality score or reason to accept a rewrite. The
+existing readability grade is heuristic; this proposal does not rank
+revisions by it. No new schema or persisted document text is introduced.
+
+
+2.6 F — Respect long Retry-After values without lengthening the wait
+------------------------------------------------------------------
+Keep the existing shared transport, three-attempt limit, bounded
+exponential backoff with jitter, HTTPError-before-URLError ordering,
+request factories, cancellation events and per-backend status sets.
+Keep malformed JSON and authentication failures outside automatic retry.
+Neither a new SDK nor a new HTTP dependency is required.
+
+Observed case:
+  _retry_after_seconds({'Retry-After': '120'}) returns 30.0 today.
+  Therefore a retryable 429/503 can be retried 90 seconds before the
+  server's requested delay ends. This was reproduced without networking.
+
+Proposed policy: parse the server delay without shortening it. For a
+valid delay of 0–30 seconds, use the current cancellable wait. For a
+longer valid delay, stop this logical request with an actionable message
+and make no automatic follow-up attempt. Keep 30 seconds as the automatic
+wait budget, not as a rewrite of the server's delay. Mark may try again
+later. This does not schedule a background wake-up or reserve a future
+request, and it does not block a deliberate new Process action.
+
+Accept RFC integer delay-seconds or an HTTP date; reject malformed,
+non-finite and oversized header text. Negative/fractional numeric strings
+are invalid delay-seconds under this proposal and use ordinary fallback
+backoff. A past valid date produces a zero wait. Explain that parser
+behaviour change in tests; the current helper accepts floats.
+Source: [RFC 9110, section 10.2.3](https://www.rfc-editor.org/rfc/rfc9110.html#section-10.2.3).
+
+The helper can now raise BackendError. Close the HTTPError response in
+finally around the delay calculation, so the new stop path cannot leak
+the response. No change to API payloads, token limits, endpoints or
+backend selection. The final existing error path still carries request-id
+when available. The long-delay message is a local retry-policy outcome.
+
+Claude documents 429 rate limiting and 529 overload; not every 429 is
+necessarily a brief transient event. A missing header alone is not enough
+to diagnose a spend limit. Keep current bounded attempts unless a reliable
+documented error classification is separately implemented.
+Source: [Claude API errors](https://platform.claude.com/docs/en/api/errors).
+
+Transport limits to state honestly: Event.wait cancellation stops backoff
+and future attempts; it cannot forcibly stop an already-blocked urllib
+socket or guarantee that the server did no work. A retried POST following
+a lost response can duplicate generation work and cost. A socket timeout
+is not a guaranteed overall wall-clock deadline for an entire request.
+Do not present a simple 3 x timeout calculation as a strict upper bound.
+
+Streaming preparation remains sufficient for now: response_reader is the
+existing extension point, but transparent retries require it to have no
+visible partial-output side effects. Ollama streams NDJSON and can report
+an error inside an already-started stream. Claude can likewise report
+errors after the initial successful HTTP response. A future design needs
+backend-specific framing and an explicit partial-result policy; it cannot
+just append transport chunks to the revision pane or feed each chunk to
+json.loads. Mark's decisions about showing/keeping partial drafts remain
+pending, so visible streaming is not proposed for implementation here.
+Sources: [Ollama streaming](https://docs.ollama.com/api/streaming),
+[Ollama errors](https://docs.ollama.com/api/errors),
+[Claude API errors](https://platform.claude.com/docs/en/api/errors).
+
+Acceptance by fault injection, with no paid calls:
+  - 429/503 followed by success; persistent transient errors stop at three.
+  - A 120-second hint makes one attempt and stops; response is closed.
+  - Numeric 0/1/30, long delays, future/past HTTP dates, malformed text,
+    empty header, NaN/infinity, negative and fractional strings.
+  - Cancel before attempt, during short backoff and before a later attempt.
+  - 401/403/404 and successful-HTTP malformed JSON are not retried.
+  - Connection reset still follows existing retry/cancellation behaviour.
+  - No late completion or retry status overwrites a newer request/history.
+
+
+3. MODULAR CODE SNIPPETS
+========================
+
+These are proposed integrations, not changes applied to scriptorium.py.
+The blocks labelled MODULE are complete module-level Python. METHOD
+blocks are complete method definitions, shown without class indentation;
+indent them by four spaces inside the named class. INSERT blocks belong
+inside an existing method at the indentation specified in the insertion
+map. The existing imports already cover the code below. No dependency
+installation, live model call or source write is required to read this note.
+
+3.1 A — Heading hint
+---------------------
+MODULE A1 — insert before the Scriptorium class:
+```python
+def original_heading_text(text, drop_available):
+    """Describe the empty editor without inserting document content."""
+    if text:
+        return "Original"
+    if drop_available:
+        return "Original · drop a file or paste text"
+    return "Original · paste text or use Import…"
+```
+
+INSERT A2 — replace the existing Original label in _build_panes:
+```python
+# Keep a reference so an empty-state hint can reuse the existing heading.
+self.original_heading = ctk.CTkLabel(
+    panes, text="Original", anchor="w",
+    font=ctk.CTkFont(weight="bold"),
+)
+self.original_heading.grid(row=0, column=0, sticky="w", padx=4)
+```
+
+INSERT A3 — immediately after Original is read in _refresh_status:
+```python
+# This runs on Tk's loop, never in the native drop callback.
+heading = original_heading_text(original, bool(self._drop_old_wndproc))
+if self.original_heading.cget("text") != heading:
+    self.original_heading.configure(text=heading)
+```
+
+After _enable_file_drops successfully schedules _poll_dropped_files, call
+self._refresh_status() once. Existing failure branches already refresh
+status. This prevents the initial fallback hint remaining after install.
+
+
+3.2 B — Preset comparison without automatic persistence
+-------------------------------------------------------
+MODULE B1 — insert after resolve_preset, before DEFAULT_CONFIG:
+```python
+def preset_control_signature(preset):
+    """Compare controls in order while retaining a legacy voice reference."""
+    clean = normalise_preset(preset)
+    if clean is None:
+        return None
+    return (
+        clean["mode"], clean["strength"], clean["role"],
+        tuple(clean["tones"]), preset.get("voice"),
+    )
+```
+
+METHOD B2 — add to Scriptorium:
+```python
+def _queue_preset_check(self, *_args):
+    """Compare after all fields of a preset application have settled."""
+    if not hasattr(self, "preset_var"):
+        return
+    if getattr(self, "_preset_check_job", None) is None:
+        self._preset_check_job = self.after_idle(self._check_preset_match)
+
+
+def _check_preset_match(self):
+    """Clear a saved label when the current controls no longer match it."""
+    self._preset_check_job = None
+    expected = preset_control_signature(
+        resolve_preset(self.cfg, self.preset_var.get())
+    )
+    if expected is None:
+        return
+    current = preset_control_signature({
+        "mode": self.mode_var.get(),
+        "strength": self.strength_var.get(),
+        "role": self.role_var.get(),
+        "tones": list(self.selected_tones),
+        "voice": self.active_voice,
+    })
+    if current != expected:
+        # The stored preset and completed revision remain untouched.
+        self.preset_var.set("(none)")
+```
+
+INSERT B3 — end of _build_toolbar, after preset_menu.grid:
+```python
+# Traces cover user edits and programmatic changes, including history.
+self._preset_check_job = None
+self._preset_control_traces = [
+    (variable, variable.trace_add("write", self._queue_preset_check))
+    for variable in (self.mode_var, self.strength_var, self.role_var)
+]
+```
+
+Add self._queue_preset_check() at the end of _set_selected_tones and at
+the start of _refresh_status. No trace is added to preset_var. Existing
+voice changes that refresh status are thereby compared without adding
+new voice controls or changing their behaviour.
+
+INSERT B4 — _quit_app, before native teardown and destroy:
+```python
+# Prevent a late idle comparison during shutdown.
+job = getattr(self, "_preset_check_job", None)
+if job is not None:
+    self.after_cancel(job)
+    self._preset_check_job = None
+for variable, trace_id in getattr(self, "_preset_control_traces", ()):
+    variable.trace_remove("write", trace_id)
+self._preset_control_traces = []
+```
+
+
+3.3 C — Tone order controls with a reserved footer
+-------------------------------------------------
+MODULE C1 — insert after validate_tones:
+```python
+def move_selected_tone(tones, tone, step):
+    """Return a new valid order, moving one tone by one position."""
+    ordered = validate_tones(tones)
+    if step not in (-1, 1):
+        raise ValueError("Move a tone one position earlier or later.")
+    if tone not in ordered:
+        return ordered
+    index = ordered.index(tone)
+    destination = index + step
+    if 0 <= destination < len(ordered):
+        ordered[index], ordered[destination] = (
+            ordered[destination], ordered[index]
+        )
+    return validate_tones(ordered)
+```
+
+METHOD C2 — replace TonePickerDialog.__init__:
+```python
+def __init__(self, master, selected, on_apply):
+    super().__init__(master)
+    self.on_apply = on_apply
+    self.selected_order = list(validate_tones(selected))
+    self.variables = {}
+    self.title("Choose tones")
+    self.geometry("440x560")
+    self.minsize(400, 420)
+    self.resizable(False, True)
+    self.transient(master)
+    bind_dialog_chrome(self, self.destroy)
+    self.bind("<Return>", lambda _event: self._apply())
+    self.after_idle(lambda: position_over_parent(self, master, 440, 560))
+    self.after_idle(self._focus_initial_control)
+
+    ctk.CTkLabel(
+        self, text=f"Choose up to {TONE_PICKER_LIMIT} tones",
+        font=ctk.CTkFont(size=16, weight="bold"),
+    ).pack(anchor="w", padx=18, pady=(16, 2))
+    ctk.CTkLabel(
+        self,
+        text=("The first tone is dominant, the second supports it, "
+              "and the third is a light accent. Move a selected tone "
+              "earlier or later to change its priority."),
+        wraplength=360, justify="left", text_color="gray65",
+    ).pack(anchor="w", padx=18, pady=(0, 8))
+
+    # Reserve the footer before the list can consume the remaining height.
+    footer = ctk.CTkFrame(self, fg_color="transparent")
+    footer.pack(side="bottom", fill="x", padx=16, pady=(4, 12))
+    self.status_label = ctk.CTkLabel(
+        footer, text="", text_color="gray65", wraplength=360,
+        justify="left", anchor="w",
+    )
+    self.status_label.pack(fill="x", pady=(0, 6))
+
+    order_row = ctk.CTkFrame(footer, fg_color="transparent")
+    order_row.pack(fill="x", pady=(0, 10))
+    self.order_tone_var = ctk.StringVar(value="(no tones)")
+    self.order_tone_menu = ctk.CTkOptionMenu(
+        order_row, values=["(no tones)"], width=144,
+        variable=self.order_tone_var,
+        command=lambda _value: self._refresh_order_controls(),
+    )
+    self.order_tone_menu.pack(side="left")
+    self.earlier_button = ctk.CTkButton(
+        order_row, text="Earlier", width=86,
+        command=lambda: self._move_order_tone(-1),
+    )
+    self.earlier_button.pack(side="left", padx=(6, 0))
+    self.later_button = ctk.CTkButton(
+        order_row, text="Later", width=86,
+        command=lambda: self._move_order_tone(1),
+    )
+    self.later_button.pack(side="left", padx=(6, 0))
+
+    buttons = ctk.CTkFrame(footer, fg_color="transparent")
+    buttons.pack(fill="x")
+    ctk.CTkButton(
+        buttons, text="Clear", width=90, fg_color="gray30",
+        command=self._clear,
+    ).pack(side="left")
+    ctk.CTkButton(
+        buttons, text="Cancel", width=90, fg_color="gray30",
+        command=self.destroy,
+    ).pack(side="right", padx=(8, 0))
+    ctk.CTkButton(
+        buttons, text="Apply", width=90, command=self._apply,
+    ).pack(side="right")
+
+    tone_frame = ctk.CTkScrollableFrame(self, height=240)
+    tone_frame.pack(fill="both", expand=True, padx=16, pady=4)
+    for tone in TONE_INSTRUCTIONS:
+        variable = ctk.BooleanVar(value=tone in self.selected_order)
+        self.variables[tone] = variable
+        ctk.CTkCheckBox(
+            tone_frame, text=tone, variable=variable,
+            command=lambda name=tone: self._toggle_tone(name),
+        ).pack(anchor="w", padx=8, pady=5)
+
+    self._refresh_status()
+    # Acquire modality only once the native window is available.
+    try:
+        self.wait_visibility()
+        self.grab_set()
+    except tk.TclError:
+        # The owner may have closed while Windows was mapping the dialogue.
+        return
+```
+
+METHOD C3 — add to TonePickerDialog:
+```python
+def _refresh_order_controls(self):
+    """Keep the movement controls aligned with the local selection."""
+    choices = self.selected_order or ["(no tones)"]
+    if self.order_tone_var.get() not in choices:
+        self.order_tone_var.set(choices[0])
+    self.order_tone_menu.configure(
+        values=choices,
+        state="normal" if self.selected_order else "disabled",
+    )
+    index = (
+        self.selected_order.index(self.order_tone_var.get())
+        if self.selected_order else -1
+    )
+    self.earlier_button.configure(
+        state="normal" if index > 0 else "disabled"
+    )
+    self.later_button.configure(
+        state=("normal" if 0 <= index < len(self.selected_order) - 1
+               else "disabled")
+    )
+
+
+def _move_order_tone(self, step):
+    """Change priority without toggling any membership checkbox."""
+    self.selected_order = move_selected_tone(
+        self.selected_order, self.order_tone_var.get(), step
+    )
+    self._refresh_status()
+```
+
+Add self._refresh_order_controls() at the end of the existing
+TonePickerDialog._refresh_status. Keep _toggle_tone, _clear and _apply;
+all successful selection changes already pass through that refresh.
+Cancelled/invalid selections continue using the existing feedback.
+
+
+3.4 D — Bounded role guidance and calibration-only candidates
+-------------------------------------------------------------
+MODULE D1 — proposed replacements, shown as an executable update after
+ROLE_INSTRUCTIONS for isolated evaluation. On adoption, replace the three
+values in the original dictionary instead of keeping duplicate definitions:
+```python
+# Roles describe presentation within the source's existing commitments.
+ROLE_INSTRUCTIONS.update({
+    "Executive": (
+        "use clear, composed professional language; foreground decisions "
+        "and next steps only when they are stated in the source. Preserve "
+        "unresolved questions, uncertainty and existing limits; never "
+        "invent a decision, deadline or commitment."
+    ),
+    "Project Manager": (
+        "organise the source's stated scope, owners, dependencies, "
+        "milestones and risks clearly. Keep questions as questions and "
+        "unassigned work unassigned. Do not invent an owner, next action, "
+        "deadline, resolution or commitment."
+    ),
+    "Client Relations": (
+        "use courteous, attentive wording while preserving the source's "
+        "position and level of certainty. Express only apologies, "
+        "reassurances, offers, remedies and commitments already stated; "
+        "never add them merely to make the reply warmer."
+    ),
+})
+
+ROLE_MODE_PRECEDENCE = (
+    "- Priority: preserve meaning and protected content first; obey the "
+    "selected editing mode next; apply role and tone guidance within "
+    "that remit. In Correct mode, role, tone and strength never permit "
+    "restyling already-correct wording. Preserve questions, refusals, "
+    "conditions, uncertainty and the exact scope of commitments."
+)
+```
+
+Insert {ROLE_MODE_PRECEDENCE} as its own line immediately after the
+"# Non-negotiable rules" heading inside build_system_prompt's f-string.
+Keep every existing protected-content, source-delimiter and JSON rule.
+This changes prompts and requires D1 calibration even with no new option.
+
+MODULE D2 — after ROLE_INSTRUCTIONS and before WRITING_PRESETS:
+```python
+# Remains disabled until comparison with existing roles passes calibration.
+ENABLE_CORRESPONDENCE_ROLE = False
+if ENABLE_CORRESPONDENCE_ROLE:
+    ROLES.append("Personal Correspondence")
+    ROLE_INSTRUCTIONS["Personal Correspondence"] = (
+        "use natural language for a personal letter or email, preserving "
+        "the source's formality, first/second person and stated relationship. "
+        "Keep existing greetings and sign-offs appropriate to that source; "
+        "do not add greetings, closings, intimacy, emotions, biographical "
+        "detail, apologies, offers or commitments that are not stated."
+    )
+```
+
+MODULE D3 — after TONE_INSTRUCTIONS and BEFORE TONES is derived:
+```python
+# A candidate for calibration, not a new default or a fourth tone slot.
+ENABLE_FIRM_TONE = False
+if ENABLE_FIRM_TONE:
+    TONE_INSTRUCTIONS["Firm"] = (
+        "express the source's stated refusals, limits and conditions "
+        "clearly and courteously. Do not soften a refusal into a tentative "
+        "suggestion or add concessions, apologies, threats, deadlines or "
+        "promises. Preserve existing uncertainty; never turn a question "
+        "into an order or make a qualified position absolute"
+    )
+```
+
+If approved after calibration, consolidate the new entries into the
+existing tables. Do not add a free-form role/tone prompt editor, new
+author profile or arbitrary rules language to support these two labels.
+
+
+3.5 E — Reuse the clipboard and review-record exporters
+-------------------------------------------------------
+MODULE E1 — add after build_html_diff and before _build_cf_html:
+```python
+def build_clean_revision_html(text):
+    """Render literal revised prose with line breaks and no review marks."""
+    # Only the HTML representation normalises line endings. The separate
+    # Unicode clipboard payload retains the captured revision exactly.
+    normalised = text.replace("\r\n", "\n").replace("\r", "\n")
+    body = html.escape(normalised).replace("\n", "<br>")
+    return (
+        '<div style="font-family:Segoe UI,Arial,sans-serif;'
+        'white-space:pre-wrap">' + body + "</div>"
+    )
+```
+
+METHOD E2 — add to Scriptorium beside copy_rich_diff:
+```python
+def copy_rich_revision(self):
+    """Copy a captured clean revision through the existing HTML writer."""
+    if not self.last_result:
+        self._refresh_status("nothing to copy with formatting")
+        return
+
+    # A modal question can process events: capture both strings first.
+    revised = self.last_result["revised"]
+    source = self._result_source
+    current = self.original_box.get("1.0", "end-1c")
+    if current != source and not messagebox.askyesno(
+        "Revision may be out of date",
+        "The original text changed after this revision was generated. "
+        "Copy this revision with formatting anyway?",
+        parent=self,
+    ):
+        return
+
+    try:
+        owner = int(str(self.wm_frame()), 0)
+        set_html_clipboard(owner, revised, build_clean_revision_html(revised))
+    except (OSError, ValueError, tk.TclError) as exc:
+        messagebox.showerror(
+            "Clipboard unavailable",
+            f"Could not copy the revision with formatting.\n\n{exc}",
+            parent=self,
+        )
+        return
+    self._refresh_status("revision copied with formatting")
+```
+
+INSERT E3 — existing _show_text_context_menu, before menu.tk_popup:
+```python
+# Extend the existing native menu; no additional toolbar control is needed.
+if widget is self.revised_box:
+    menu.add_separator()
+    menu.add_command(
+        label="Copy revision with formatting",
+        state="normal" if self.last_result else "disabled",
+        command=self.copy_rich_revision,
+    )
+```
+
+MODULE E4 — add after reading_metrics:
+```python
+def review_reading_estimate(text):
+    """Summarise document size using the current counting conventions."""
+    words = len(text.split())
+    summary = f"{words} words; {len(text)} characters"
+    if words < 20:
+        return summary + "; reading estimate not shown below 20 words"
+    _grade, minutes = reading_metrics(text)
+    duration = (
+        "under a minute" if minutes < 1
+        else f"about {math.ceil(minutes)} min read"
+    )
+    return f"{summary}; {duration} (at 200 words/minute)"
+```
+
+INSERT E5 — in build_review_record, before its return:
+```python
+# Use this export's source/revision snapshots, not the live editor.
+reading_section = _markdown_fenced_section(
+    "Reading estimates",
+    "Original: " + review_reading_estimate(original)
+    + "\nSuggested revision: " + review_reading_estimate(revised)
+    + "\nEstimates describe length; they do not assess writing quality.",
+)
+```
+
+In the existing return expression, insert `+ reading_section + "\n"`
+immediately before the call producing "Request provenance". Retain all
+notices, provenance fields, texts and diff sections in their current order.
+
+
+3.6 F — Server delay parsing and automatic-wait policy
+------------------------------------------------------
+MODULE F1 — replace _retry_after_seconds and _retry_delay:
+```python
+def _retry_after_seconds(headers):
+    """Parse a finite server delay without shortening a valid request."""
+    value = headers.get("Retry-After") if headers else None
+    if not isinstance(value, str) or len(value) > 128:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        if re.fullmatch(r"[0-9]+", value):
+            delay = float(value)
+        else:
+            retry_at = parsedate_to_datetime(value)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            delay = retry_at.timestamp() - time.time()
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(delay):
+        return None
+    return max(0.0, delay)
+
+
+def _retry_delay(failure_index, headers=None):
+    """Choose bounded backoff, or stop when the server asks for longer."""
+    retry_after = _retry_after_seconds(headers)
+    if retry_after is not None:
+        # MAX_RETRY_AFTER now caps automatic waiting, not the server hint.
+        if retry_after > MAX_RETRY_AFTER:
+            seconds = math.ceil(retry_after)
+            raise BackendError(
+                f"The server asked for a pause of about {seconds} seconds. "
+                "This request has stopped without another automatic "
+                "attempt. Wait for that interval, then try Process again."
+            )
+        return retry_after
+    exponential = BASE_RETRY_DELAY * (2 ** failure_index)
+    jitter = secrets.randbelow(251) / 1000
+    return min(exponential + jitter, MAX_RETRY_DELAY)
+```
+
+INSERT F2 — replace the transient HTTP branch's delay/close pair:
+```python
+# The delay policy may stop the request; close its response in either case.
+try:
+    delay = _retry_delay(attempt, exc.headers)
+finally:
+    exc.close()
+```
+
+Keep on_retry and _wait_for_retry immediately after this block. Leave
+the network-exception branch and final non-retryable HTTP branch in place.
+Update the comment on MAX_RETRY_AFTER to describe an automatic-wait budget.
+
+
+4. INSERTION MAP AND VERIFICATION BOUNDARIES
+===========================================
+
+All source locations below refer to C:\Scriptorium\scriptorium.py v2.34,
+HEAD 366ac4a, with the SHA-256 recorded at the top of this note. These are
+current surrounding line numbers, not anticipated post-insertion numbers.
+Re-find the named anchors after each approved slice; do not apply later
+snippets by stale line number alone.
+
+ID    Class/function                 Current anchor and proposed integration
+----  -----------------------------  ---------------------------------------
+A1    Module                         Before class Scriptorium at 4162.
+A2    Scriptorium._build_panes        Replace Original CTkLabel 4593–4595;
+                                     retain same row/column/padding.
+A3    Scriptorium._refresh_status     After original = ... at 4873;
+                                     before counts at 4874–4877.
+A     Scriptorium._enable_file_drops  After poll scheduling at 5903, call
+                                     _refresh_status on the normal Tk path.
+B1    Module                         After resolve_preset 1086–1090;
+                                     before DEFAULT_CONFIG at 1093.
+B2    Scriptorium                    Add beside _apply_writing_preset
+                                     (4329–4355), before manager methods.
+B3    Scriptorium._build_toolbar      After preset_menu.grid at 4327.
+B     Scriptorium._set_selected_tones After _refresh_tone_button at 4574.
+B     Scriptorium._refresh_status     At method entry 4859–4860.
+B4    Scriptorium._quit_app           Before _disable_file_drops at 6303;
+                                     before _invalidate_inflight/destroy.
+C1    Module                         After validate_tones ends at 576;
+                                     before writing-role tables.
+C2    TonePickerDialog.__init__       Replace 2998–3052; retain class and
+                                     its existing non-constructor methods.
+C3    TonePickerDialog                Add before _toggle_tone at 3054.
+C     TonePickerDialog._refresh_status Add order refresh after 3097–3099.
+D1    ROLE_INSTRUCTIONS              Replace Executive 618–621,
+                                     Project Manager 622–625,
+                                     Client Relations 626–629.
+D1    Module                         ROLE_MODE_PRECEDENCE after role table
+                                     ends at 655, before presets at 663.
+D1    build_system_prompt            Add precedence interpolation directly
+                                     after heading at 1507; retain rules
+                                     1508–1545 and source delimiters.
+D2    ROLES / ROLE_INSTRUCTIONS       Evaluation gate after 655; final role
+                                     joins list 588–601 and table 603–655.
+D3    TONE_INSTRUCTIONS / TONES       Evaluation gate after table ends at
+                                     488, before derived TONES at 490.
+E1    Module                         After build_html_diff ends 2441;
+                                     before _build_cf_html at 2444.
+E2    Scriptorium                    Beside copy_rich_diff 5551–5579;
+                                     before export_diff_file at 5581.
+E3    _show_text_context_menu         After process-selection branch ends
+                                     5669; before popup try at 5670.
+E4    Module                         After reading_metrics ends 2671;
+                                     before placeholder protection.
+E5    build_review_record            Before return at 2393; concatenate
+                                     before provenance call at 2397.
+F1    Module                         Replace retry helpers 1673–1705;
+                                     keep constants 1667–1670.
+F2    _request_with_retries           Replace delay/close pair 1805–1806;
+                                     retain progress/wait 1807–1811.
+
+Additional integration checks
+-----------------------------
+User presets/config:
+  normalise_preset 688–712; normalise_user_presets 730–807;
+  normalise_config 1156–1218; save_config 1262–1294;
+  PresetManagerDialog 3651–3820; _write_user_presets 4372–4392.
+  Keep the existing source/frozen config-location distinction. Do not
+  hard-code C:\Scriptorium\scriptorium_config.json in new persistence code.
+
+Prompt/processing:
+  build_tone_instruction 1327–1374; build_system_prompt 1477–1545;
+  _begin_processing 5211–5324; _on_success 5326 onwards;
+  build_request_context 2890; collect_revision_notices 2918;
+  batch loop _run_batch_mode 6404 onwards.
+  D changes a shared prompt seam, so validate GUI, selected-passage and
+  batch callers. Do not add a GUI-only alternate role prompt path.
+
+Win32:
+  declarations 335–398; drop queue/poller 5905–5993; teardown 6047–6064;
+  CF_HTML payload 2444–2473; clipboard ownership 2538–2600.
+  No new native bridge or allocation implementation is proposed.
+
+Checks performed for this report
+--------------------------------
+  - Read current project instructions, ROADMAP.md, recent session context,
+    the active voice proposal and the relevant current source sections.
+  - Confirmed APP_VERSION 2.34, 6,619 source lines and clean initial Git
+    status on main at 366ac4a.
+  - Checked note numbering across Drafts, Active and Archive, including
+    ignored files, and chose 031 without overwriting any earlier note.
+  - Parsed the source and ran 15 isolated, network-free assertions using
+    selected definitions extracted from its AST. Confirmed the three-tone
+    limit, the three hard conflicts, fourth-tone refusal, all three built-in
+    presets, safe Markdown fencing, non-ASCII CF_HTML fragment offsets,
+    199/200/201-word reading-time arithmetic and the 120 -> 30 retry result.
+  - The AST checks did not import or launch Scriptorium, read private config
+    values, contact a backend, touch the clipboard or create test files.
+  - Captured hashes for 86 existing tracked/local configuration files to
+    verify the read-only boundary after the report was written.
+  - Checked primary Microsoft, RFC, Claude and Ollama documentation for
+    the specific native/transport contracts cited in section 2.
+
+Final report verification
+-------------------------
+  - All 20 Python blocks parsed successfully. No snippet code line exceeded
+    79 characters. All four required report sections and insertion anchors
+    were checked in the saved UTF-8 note.
+  - An additional 85 in-memory checks passed against the proposed helpers
+    and a modified AST of the real retry function. These covered heading
+    states, preset equivalence and stale-label clearing, all permutations
+    of a representative three-tone order, invalid moves/conflicts, disabled
+    candidate gates and canonical membership when evaluated, clean HTML
+    escaping and non-ASCII CF_HTML offsets, reading-time boundaries,
+    Retry-After parsing, long-delay refusal and response closure, recovery
+    after 429, exhaustion after three 503 responses, 401 refusal, invalid
+    JSON refusal, and cancellation before the first attempt.
+  - Network opening was mocked; no model was called. The application was
+    not imported or launched, and the clipboard was not changed. The
+    source checks and proposal checks total 100 assertions; they are not
+    a run of the repository's full regression suite.
+  - All 86 previously fingerprinted files remained byte-identical. Git
+    status showed only the new notes/01_Active/notes_031.txt; tracked-file
+    diff and whitespace checks were clean. No source/configuration/test
+    file, asset, executable, roadmap or existing note was changed.
+  - No GUI, Explorer drag, Word/Outlook paste or live-model calibration
+    result is claimed. Dialogue constructors were syntax-checked, not
+    exercised as Windows interfaces. These checks establish proposal
+    integrity, not shipment readiness.
+
+Required after a separately authorised implementation
+------------------------------------------------------
+Run the repository's appropriate existing mechanical tests plus focused
+tests for the adopted slice, using isolated configuration and temporary
+output paths. Verify the real packaged application at default/minimum
+sizes and high DPI for UI/native changes. D additionally needs the live
+calibration gate described above; no result from this note substitutes
+for it. Do not claim a new role is safe because its prompt compiles.
+
+No release number is allocated here. Implement and validate one coherent
+slice at a time if Mark chooses to proceed. The saved-author direction
+remains deferred, and this note's recommendations require no return to it.

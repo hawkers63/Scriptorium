@@ -3293,6 +3293,106 @@ Correct-then-restyle two-pass path.
 
 ---
 
+## v2.35 — Usability refinements + role/tone strengthening (notes_031 A–F) ✅ shipped 2026-09-15
+
+**Goal:** Mark deferred the saved-"Mark"-voice/author-emulation direction
+(no schema, prompt or code change to that boundary here) in favour of small
+usability improvements and a stronger rewriting process. notes_031 (Codex,
+read-only proposal) audited v2.34 and found the five original brief areas
+already shipped; this version implements its six follow-on slices A–F.
+
+1. **A — Empty-pane import hint.** `original_heading_text()` drives the
+   existing `Original` heading (now `self.original_heading`): shows
+   "Original · drop a file or paste text" once `_enable_file_drops()`
+   actually installs the native hook, "Original · paste text or use
+   Import…" if it didn't, and plain "Original" once the pane has any
+   content (including a lone space — this is empty-state guidance, not
+   content detection). No new polling; reuses the existing
+   `_refresh_status()` read of the Original buffer.
+2. **B — Preset-match clearing.** `preset_control_signature()` compares
+   Mode/Strength/Role/ordered-tones/voice; `StringVar.trace_add("write", …)`
+   on Mode/Strength/Role plus a hook in `_set_selected_tones()` queue a
+   single `after_idle` comparison (`_queue_preset_check`/
+   `_check_preset_match`) so a multi-field preset apply is judged only once
+   it's finished. A mismatch resets `preset_var` to `"(none)"`; it never
+   rewrites the stored preset. Traces are torn down in `_quit_app()`
+   alongside any still-pending idle job.
+3. **C — Tone-picker reorder controls.** `move_selected_tone()` plus a
+   rebuilt `TonePickerDialog` footer (reserved before the scrollable list,
+   per notes_031's layout warning) add an Earlier/Later pair that
+   reprioritises a selected tone without touching checkbox membership;
+   `validate_tones()` remains the sole conflict/limit authority before and
+   after a move. Also moved `grab_set()` to fire after `wait_visibility()`
+   (matching the note's safer dialog-construction order) instead of
+   immediately in `__init__`.
+4. **D1 — Bounded role wording + explicit precedence rule.** Tightened
+   `ROLE_INSTRUCTIONS["Executive"/"Project Manager"/"Client Relations"]` so
+   none of the three can be read as licence to invent a decision, resolve
+   an open question, or add unstated reassurance. Added
+   `ROLE_MODE_PRECEDENCE`, interpolated as the first non-negotiable rule in
+   `build_system_prompt()`: preserve meaning/protected content first, obey
+   the selected mode next, apply role/tone only within that remit — Correct
+   mode never permits restyling already-correct wording regardless of
+   role/tone/strength. **This is a live prompt change and, per this
+   project's standing rule (confirmed four times before, blocking shipment
+   once at v2.31), needs an actual calibration pass — Ollama by default,
+   Claude only with Mark's explicit spend approval — using notes_031 §2.4's
+   twelve-item corpus before it's trusted for real work.** No calibration
+   was run this session.
+5. **D2/D3 — candidates, gated off.** `ENABLE_CORRESPONDENCE_ROLE` (adds
+   "Personal Correspondence" to `ROLES`/`ROLE_INSTRUCTIONS`) and
+   `ENABLE_FIRM_TONE` (adds "Firm" to `TONE_INSTRUCTIONS`) are both `False`
+   module-level constants — developer calibration switches, not Settings
+   controls. Neither name appears in `ROLES`/`TONES` at their default
+   value; confirmed by test.
+6. **E — Clean rich-text copy + on-demand reading estimates.**
+   `build_clean_revision_html()` + `copy_rich_revision()` add "Copy revision
+   with formatting" to the Suggested-revision context menu, publishing
+   `last_result["revised"]` (never the visible Inline `tk.Text`, which can
+   contain deletions) as both HTML Format and CF_UNICODETEXT through the
+   existing `set_html_clipboard()`; snapshots the revision before a
+   possible stale-result confirmation so a nested dialog can't swap it out
+   from under the copy. `review_reading_estimate()` adds a "Reading
+   estimates" section to `build_review_record()`'s export (word/character
+   counts, 200wpm estimate, 20-word display floor) — the on-demand,
+   non-status-bar location notes_022 D and this roadmap's own deferred note
+   both asked for, rather than a new always-visible metric.
+7. **F — Honour a long Retry-After instead of shortening it.**
+   `_retry_after_seconds()` now rejects negative/fractional/non-finite/
+   malformed headers instead of coercing them, and no longer silently caps
+   a valid delay to `MAX_RETRY_AFTER` (30s) — `Retry-After: 120` used to
+   become a 30s wait, retrying 90s before the server's own deadline.
+   `_retry_delay()` now raises `BackendError` for a valid delay past the
+   30s automatic-wait budget instead of scheduling any wait, stopping the
+   logical request with an actionable message; `_request_with_retries()`'s
+   HTTPError branch closes `exc` in a `finally` around the delay call so
+   this new stop path can't leak the response. Transient-status retries
+   ≤30s, malformed/negative/non-finite headers, and non-retryable statuses
+   (401/403/404, bad JSON) are all unchanged.
+
+### Acceptance checklist
+- [x] 155/155 tests pass (**39 new**, `tests/test_notes_031_slices.py`) —
+      pure-function coverage for all six slices, consistent with this
+      suite's existing no-GUI-in-CI boundary (pytest.ini).
+- [x] `TonePickerDialog` reorder controls and the full `Scriptorium()`
+      construction path (toolbar traces, empty-pane heading, preset menu)
+      were exercised live against real Tk/CustomTkinter widgets by hand
+      during implementation — not part of the committed suite, but not
+      merely syntax-checked either.
+- [x] Fault-injected `_retry_after_seconds`/`_retry_delay` checks (120→stop,
+      30→wait, negative/NaN/malformed→fallback, past HTTP date→0) — no
+      network opened, no live model called.
+- [x] `ruff check scriptorium.py` clean.
+- [x] `APP_VERSION` = `2.35`; `version_info.txt` = `2.35.0.0`.
+- [ ] **Not done this session:** packaged `.exe` rebuild/smoke test, a real
+      Explorer drag-and-drop, a real Word/Outlook paste of the new rich-copy
+      formats, high-DPI (125–200%) layout check at 920×600, and D1's
+      required live calibration pass. All five need Mark's own machine (the
+      DPI/paste checks) or his spend authorisation (Claude calibration) —
+      flagged here rather than assumed.
+
+---
+
 ## Deferred from notes_022/023/024 planning (2026-09-07)
 
 - **notes_022 A — multi-file/folder drop → batch handoff.** Revisit only
@@ -3424,6 +3524,7 @@ Correct-then-restyle two-pass path.
 | notes_028 | 7 Sep | Grok | — | UI/UX audit of live v2.32; Mark paused further action - left unactioned by design |
 | notes_029 | 7 Sep | DeepSeek | — | Retry-transport analysis; no code change; untracked from git after accidental commit |
 | notes_030 | 14 Sep | Mark / Grok | v2.33-v2.34 (voice) | Voice profiles + Correct addendum + derive-brief UI + preset.voice + two-pass; closed by v2.33/v2.34; live Claude voice calibration still pending Mark's spend authorisation |
+| notes_031 | 15 Sep | Codex | v2.35 (usability + role/tone) | Read-only proposal; saved-voice/author-emulation direction deferred by Mark. A–C/E/F closed by v2.35; D1's tightened role wording + precedence rule shipped live but still needs the note's own calibration pass; D2/D3 (Personal Correspondence role, Firm tone) implemented gated off (`ENABLE_CORRESPONDENCE_ROLE`/`ENABLE_FIRM_TONE` both `False`), pending the same |
 
 `scriptorium_notes_001.txt`, a near-duplicate of notes_014 written under
 `AGENTS.md`'s (now-abandoned) `scriptorium_notes_[N].txt` draft-path
