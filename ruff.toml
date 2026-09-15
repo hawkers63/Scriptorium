@@ -1,0 +1,15 @@
+# Minimal Ruff configuration for first-wave CI.
+# CI runs `ruff check tests` only — scriptorium.py is a large single-module
+# application and would flood line-length / style noise if linted wholesale.
+target-version = "py310"
+line-length = 100
+
+[lint]
+# E/F/W only: isort (I) fights the intentional sys.path-then-import pattern
+# used by the regression tests and the live calibration harness.
+select = ["E", "F", "W"]
+ignore = ["E501"]
+
+[lint.per-file-ignores]
+# Imports must follow the sys.path insert; noqa: E402 is already present.
+"tests/*.py" = ["E402"]

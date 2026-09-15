@@ -1,5 +1,9 @@
 # Scriptorium
 
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/downloads/)
+[![Proprietary | All Rights Reserved](https://img.shields.io/badge/license-Proprietary%20%7C%20All%20Rights%20Reserved-red)](LICENSE)
+[![CI](https://github.com/hawkers63/Scriptorium/actions/workflows/ci.yml/badge.svg)](https://github.com/hawkers63/Scriptorium/actions/workflows/ci.yml)
+
 A lightweight **British English writing assistant** for Windows 11. Scriptorium
 rewords, corrects, and clarifies text while honouring the author's original
 intent. Every result is a *suggested* revision — nothing is applied silently;
@@ -63,14 +67,27 @@ Built in Python with a native-style CustomTkinter interface.
 - **British English throughout** — `organise`, `colour`, `licence`/`license`,
   `-ise` endings, and so on.
 - **British letter conventions (advisory)** — flags when a salutation and
-  sign-off do not match UK convention (impersonal → ‘Yours faithfully’, named
-  → ‘Yours sincerely’), without ever rewriting your text. Toggle in Settings.
+  sign-off do not match UK convention (impersonal → 'Yours faithfully', named
+  → 'Yours sincerely'), without ever rewriting your text. Toggle in Settings.
 - **Meaning-preservation safeguards** — names, numbers, quotations, URLs and
   technical terms are left untouched, and genuine ambiguities are flagged
   rather than silently resolved.
 - **Two backends**
   - **Claude API** — best rewriting quality; text is sent to Anthropic.
   - **Local Ollama** — fully private; nothing leaves your machine.
+
+---
+
+## Screenshots
+
+Placeholder images — real captures will be added later. See
+[`docs/screenshots/README.md`](docs/screenshots/README.md).
+
+![Main window](docs/screenshots/main-window.png)
+
+![Side-by-side diff](docs/screenshots/side-by-side-diff.png)
+
+![Settings](docs/screenshots/settings.png)
 
 ---
 
