@@ -4,7 +4,7 @@
 When Mark says "lets get started", that is the cue to open these three files
 before doing anything else.
 
-Current shipped version: **2.31** (v2.9 bug-fix pass, v2.10 visual/UX
+Current shipped version: **2.34** (v2.9 bug-fix pass, v2.10 visual/UX
 polish, v2.11 three-tone picker, v2.12 persisted user presets, v2.13 backend
 retry transport, v2.14 hand-testing fixes, v2.15 Explorer drag-and-drop,
 v2.17 readability metrics + shortcuts reference, v2.18 house-style
@@ -19,26 +19,27 @@ config sync + Word-table refusal, v2.28 change-by-change navigator +
 provenance review-record export, v2.29 preset-pack import/export, v2.30
 low-risk hardening (clipboard-leak/Ollama-detection/HTTP-error-body/
 single-instance-race fixes) plus documentation-drift cleanup, v2.31
-selection-scoped processing (E1) — see those sections below). All five
-notes_019 proposals and notes_016's full original proposal set shipped by
-build 2.21, clearing the backlog for the first time since notes_001 opened
-it; v2.22 closed a fresh hand-testing defect (notes_020) found immediately
-after. notes_021's second-generation hardening pass is fully shipped
-except its deliberately-deferred streaming half (v2.23–v2.25; see v2.25's
-own write-up for why streaming stays out of scope). notes_022/023/024's
-follow-on review has now closed all thirteen confirmed defects (F1–F13,
-v2.26–v2.30 above), E2/E3, and notes_022 proposal B. **v2.31 (E1,
-selection-scoped processing) is implemented, calibrated and shipped**: an
-initial 2026-09-07 calibration attempt found the configured Claude API key
-entirely rejected (a different failure from the already-known
-workspace-scoping issue) and one real hallucination failure on the Ollama
-half that did run; once the key was fixed, calibration re-ran clean on
-Claude, and notes_026 (Mark's own analysis) drove a prompt-hardening fix
-that resolved the Ollama hallucination too, plus a separately-discovered
-quote-style rule collision. `process_selection()` is now wired into the UI
-(Original pane right-click, Ctrl+Shift+Enter, F1 shortcuts list) — see
-v2.31's own section below for the full corpus, results and the ship
-record.
+selection-scoped processing (E1), v2.32 visual-polish bundle
+(notes_027, all six items), v2.33 voice profile schema + prompt block
+(notes_030 Proposal A/B1), v2.34 VoiceProfileDialog / derive-brief /
+preset.voice / two-pass Correct-then-restyle (notes_030 B2/C) - see those
+sections below). All five notes_019 proposals and notes_016's full
+original proposal set shipped by build 2.21, clearing the backlog for the
+first time since notes_001 opened it; v2.22 closed a fresh hand-testing
+defect (notes_020) found immediately after. notes_021's second-generation
+hardening pass is fully shipped except its deliberately-deferred streaming
+half (v2.23-v2.25; see v2.25's own write-up for why streaming stays out of
+scope). notes_022/023/024's follow-on review has now closed all thirteen
+confirmed defects (F1-F13, v2.26-v2.30 above), E2/E3, and notes_022
+proposal B. **v2.31 (E1) remains shipped**; **v2.32-v2.34 are also shipped**:
+v2.32 closed notes_027's visual-polish bundle after Mark's hand-test of the
+real `.exe`; v2.33/v2.34 delivered notes_030's voice-profile work
+(schema + prompt plumbing, then UI/derive-brief/preset.voice/two-pass), with
+verification at 116/116 tests (50 new) on the VoiceProfileDialog slice.
+`APP_VERSION` / `version_info.txt` are `2.34` / `2.34.0.0`. Live voice
+calibration against a paid Claude backend (notes_030's later slice) stays
+intentionally unrun until Mark authorises spend for that session - see
+v2.33/v2.34 sections below.
 
 Scope through v2.3 was drawn from twelve accumulated review notes
 (`notes/01_Active/notes_001.txt` – `notes_012.txt`), written independently by
@@ -3218,6 +3219,80 @@ it. `APP_VERSION`/`version_info.txt` stay at `2.32`.
 
 ---
 
+## v2.33 — Voice profile schema + prompt block (notes_030 Proposal A/B1) ✅ shipped 2026-09-15
+
+**Goal:** introduce a first-class **voice profile** so rewrites can imitate a
+named writing style (sentence rhythm, openings, hedging, words never used)
+without pasting raw samples into every request. This slice is schema +
+prompt plumbing only - no dialog UI yet.
+
+1. **`voice_profiles` config object.** Named style brief plus optional
+   preferred Mode/Strength/Role/Tones; normalised the same way
+   `user_presets` / `house_style_avoid` already are, with hard caps so a
+   pasted sample cannot grow the system prompt without bound.
+2. **`build_voice_instruction()` / voice block in `build_system_prompt()`.**
+   Subordinate to meaning preservation and the selected mode; skipped
+   entirely in Correct mode (`APPLY_VOICE_IN_CORRECT = False`) until a
+   live-model calibration pass says otherwise; never inlines the user's
+   style samples - only the derived brief.
+3. **Correct-mode British spelling addendum.** Static
+   `CORRECT_SPELLING_ADDENDUM` checklist for Correct mode.
+
+### Acceptance checklist
+- [x] Schema normalises and caps sizes; unknown/oversized input degrades
+      safely (`tests/test_voice_profiles_normalise.py`).
+- [x] Prompt block present for Paraphrase/Clarify when a voice is active;
+      absent in Correct mode per the gate above.
+- [x] No UI yet by design - derive-brief, preset `voice` field and two-pass
+      checkbox belong to v2.34.
+- [x] Live Claude calibration deliberately not run this session (local
+      Ollama default; paid spend needs Mark's explicit per-session go-ahead).
+
+`APP_VERSION` moved forward with this work; the matching `version_info.txt`
+bump lands with v2.34.
+
+---
+
+## v2.34 — VoiceProfileDialog, derive-brief, preset.voice, two-pass (notes_030 B2/C) ✅ shipped 2026-09-15
+
+**Goal:** finish notes_030's interactive voice slice on top of v2.33's
+schema: a dialog to manage profiles, one backend call to derive a style
+brief from pasted samples, optional voice on user presets, and an optional
+Correct-then-restyle two-pass path.
+
+1. **`VoiceProfileDialog`.** Sibling to `PresetManagerDialog`, opened via
+   its new "Voice profiles..." button: create/edit/delete a profile, derive
+   its brief from pasted samples, mark the active voice.
+2. **Derive-brief backend path.** `call_anthropic()` / `call_ollama()` /
+   `run_backend()` take optional `parse_response` / `expect_json` (default
+   remains the existing `{"revised": ...}` contract). `derive_voice_brief()`
+   is the one caller that asks for plain prose via `VOICE_BRIEF_SYSTEM`,
+   with anti-instruction framing for the pasted samples.
+3. **`preset.voice`.** User presets may carry an optional voice profile
+   name; restored by `_apply_writing_preset()` and validated on every
+   `normalise_config()` (unknown names degrade to null). Fixed a real bug
+   while wiring: `import_preset_pack()`'s final re-validation would have
+   silently cleared an untouched preset's valid voice - now threads
+   `voice_profiles` through both internal `normalise_user_presets()` calls.
+4. **Two-pass "Correct, then restyle".** Off by default (Settings
+   checkbox). For Paraphrase/Clarify, an optional Correct/Light/no-voice
+   pass runs first and feeds the requested mode/strength/role/tones/voice
+   pass. Wired into the interactive worker and the headless batch path,
+   with an explicit `cancel_event` check between passes.
+
+### Acceptance checklist
+- [x] VoiceProfileDialog create/edit/delete/derive/active-voice paths
+      covered; verification **116/116** tests pass (**50 new**).
+- [x] Derive-brief uses plain-prose path without breaking the default JSON
+      rewrite contract.
+- [x] `preset.voice` round-trips; pack import no longer clears unrelated
+      presets' voice fields.
+- [x] Two-pass respects the Settings gate, cancel between passes, and batch
+      parity.
+- [x] `APP_VERSION` = `2.34`; `version_info.txt` = `2.34.0.0`.
+
+---
+
 ## Deferred from notes_022/023/024 planning (2026-09-07)
 
 - **notes_022 A — multi-file/folder drop → batch handoff.** Revisit only
@@ -3343,6 +3418,12 @@ it. `APP_VERSION`/`version_info.txt` stay at `2.32`.
 | notes_022 | 3 Sep | Lynne | v2.26+ (forward proposals) | Stale-brief audit confirms v2.11–v2.25 already cover the five original architecture themes (not re-proposed); forward proposals A–E triaged by notes_023/024 — B (preset packs) closed by v2.29 with both flagged bugs fixed (version check, casefolded replace); A/C/D deferred pending F5/live evidence/UI redesign respectively; E (streaming design) folds into notes_021's existing deferred streaming item |
 | notes_023 | 7 Sep | Codex | v2.26+ (state-integrity & feature review) | Thirteen confirmed defects (F1–F13) and three new features (E1–E3), fully read-only and cross-checked; F1/F2/F3/F4 closed by v2.26; F5/F6/F7/F8 closed by v2.27; E2/E3 closed by v2.28; F9–F13 closed by v2.30; E1 closed by v2.31 (calibration cleared on Claude, prompt-hardening fixed the Ollama hallucination), see v2.31's own section |
 | notes_024 | 7 Sep | Mark | v2.26+ (validation) | Independent in-progress diagnosis reaching the same F1/F2/F3/F5 findings as notes_023 before it was read, and separately catching the same notes_022 B/A flaws Codex flagged; its stated implementation order (privacy boundary, history provenance, configuration crash) is exactly what v2.26 closed |
+| notes_025 | 7 Sep | — | v2.31 (calibration tooling) | Calibration tooling / results supporting E1; closed by v2.31 |
+| notes_026 | 7 Sep | Mark | v2.31 (prompt harden) | Prompt-hardening against instruction-injection + quote-style rule collision; closed by v2.31 |
+| notes_027 | 7 Sep | Codex | v2.32 (visual polish) | Six-item visual/typography tightening; closed by v2.32 |
+| notes_028 | 7 Sep | Grok | — | UI/UX audit of live v2.32; Mark paused further action - left unactioned by design |
+| notes_029 | 7 Sep | DeepSeek | — | Retry-transport analysis; no code change; untracked from git after accidental commit |
+| notes_030 | 14 Sep | Mark / Grok | v2.33-v2.34 (voice) | Voice profiles + Correct addendum + derive-brief UI + preset.voice + two-pass; closed by v2.33/v2.34; live Claude voice calibration still pending Mark's spend authorisation |
 
 `scriptorium_notes_001.txt`, a near-duplicate of notes_014 written under
 `AGENTS.md`'s (now-abandoned) `scriptorium_notes_[N].txt` draft-path
