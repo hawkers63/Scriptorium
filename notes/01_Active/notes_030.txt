@@ -1,0 +1,515 @@
+Scriptorium — Enhancement note 030
+Author: Mark / Grok (Lead Enhancement & Feature Architect)
+Date: 14 September 2026
+Against: scriptorium.py APP_VERSION 2.32 (~5,855 lines)
+Destination requested: notes/01_Active/notes_030.txt
+Highest existing archive number checked: notes_028.txt in notes/02_Archive/
+(MEMORY.md also refers to an untracked notes_029.txt; 030 is used to avoid
+another filename collision of the kind logged on 2026-09-07.)
+
+Grounding check (what is already shipped, so it is not re-proposed)
+--------------------------------------------------------------------
+Read ROADMAP.md version history + Deferred sections, MEMORY.md session log,
+scriptorium.py symbols, and scriptorium_config.json keys.
+
+Already shipped and therefore NOT re-proposed:
+- Explorer WM_DROPFILES / DragAcceptFiles subclassing (v2.15+)
+- User presets persisted in scriptorium_config.json (v2.12, user_presets)
+- Three-tone picker with validate_tones / TONE_CONFLICTS / build_tone_instruction
+  precedence ladder (v2.11)
+- Markdown diff export, rich clipboard, reading-time metrics (v2.16 / v2.23)
+- Exponential backoff retry in _request_with_retries() for 429/503 and
+  network errors (v2.13 / v2.21); notes_029 already concluded no further
+  change without a product decision on retrying truncated 200s
+
+Explicitly deferred / out of scope (not reopened here):
+- Visible token streaming (needs Mark's product calls)
+- Multi-file/folder drop batch handoff
+- Soft (advisory) tone conflicts
+- Extra always-on status-bar metrics
+- Splitting scriptorium.py
+- Suggest-3-alternatives response schema
+- Credential Manager for the API key
+
+What Mark asked for in this session
+-----------------------------------
+Accessibility and screen-dimension work is considered finished for a
+single-user machine. The live gap is rephrasing quality, spelling
+correction, and — for long letters — a saved "Mark" voice so Claude
+emulates his writing style and tone rather than a generic register.
+
+
+1. Executive Summary
+====================
+
+The toolbar already stores Mode / Strength / Role / Tones under a named
+user preset. That is a *control snapshot*, not a *voice*. Applying
+"Formal letter" changes knobs; it does not teach the model Mark's
+sentence rhythm, preferred openings, hedging habits, or words he never
+uses. house_style_avoid is the nearest existing seam (a bounded list
+injected by build_avoid_instruction), but it only steers *away* from
+phrases — it cannot describe a positive style.
+
+Proposal A (primary, ready to hand off) introduces a first-class
+**voice profile** object, persisted beside user_presets, named by the
+user (the natural first profile is "Mark"). A profile holds:
+  - short writing samples the user pastes once,
+  - a compact derived style brief (not the raw corpus on every call),
+  - optional preferred Mode/Strength/Role/Tones used when the profile
+    is applied as a preset,
+  - hard caps so the system prompt cannot balloon.
+
+On each rewrite, build_system_prompt() gains one extra bounded block,
+subordinate to meaning preservation and Correct-mode minimum-edit
+rules. The Suggested-revision pane and human-review contract do not
+change.
+
+Proposal B tightens Correct-mode spelling/punctuation without a new
+dependency: a British-English Correct addendum plus an optional
+"Correct, then restyle" two-pass pipeline that reuses the existing
+backend once for Correct and once for Paraphrase/Clarify under the
+voice profile. Two-pass is gated and off by default because it doubles
+token cost.
+
+Proposal C (smaller) adds a "Save current knobs + active voice as
+preset" path so "Mark" appears in the existing preset menu without
+inventing a second menu.
+
+Proposal D (optional later) is a local pre-flight spelling *hint* list
+shown in the notice banner using only difflib against a tiny user
+lexicon — never a third-party spellchecker. Deferred unless Mark wants
+an offline hint before calling Claude.
+
+UX rationale: a long letter should come back sounding like Mark to
+people who know his work, while still only suggesting a revision he
+must accept. Calibration against the live Anthropic model
+(claude-sonnet-4-6 per current config) is mandatory before ship; the
+Ollama path must degrade to the same prompt text without extra
+schema.
+
+
+2. Detailed Architectural Proposals
+===================================
+
+2.1 Voice profile schema (Proposal A)
+-------------------------------------
+New config key, default {}:
+
+  "voice_profiles": {
+    "Mark": {
+      "preferred": {
+        "mode": "Paraphrase",
+        "strength": "Substantial",
+        "role": "Academic",
+        "tones": ["Concise"]
+      },
+      "samples": ["…up to N short excerpts…"],
+      "style_brief": "Short derived description…",
+      "avoid_extra": ["utilise", "delve", "landscape"],
+      "active": true
+    }
+  }
+
+Caps (keep the prompt budget honest):
+  MAX_VOICE_PROFILES = 8
+  MAX_VOICE_NAME_LENGTH = 48
+  MAX_VOICE_SAMPLES = 6
+  MAX_SAMPLE_CHARS = 1200
+  MAX_STYLE_BRIEF_CHARS = 900
+  MAX_VOICE_AVOID = 24
+
+Reserved names: built-in WRITING_PRESETS keys and PRESET_MANAGER_LABEL
+are still reserved. "Mark" is a user name, not a built-in, so it lives
+only in config.
+
+normalise_voice_profiles() mirrors normalise_user_presets(): drop
+malformed entries, cap lengths, never crash start-up. preferred knobs
+are validated through normalise_preset(); if preferred is missing the
+profile still loads and only injects style.
+
+State on Scriptorium:
+  self.voice_profiles : dict
+  self.active_voice   : str | None   # name or None
+Applying a profile copies preferred knobs (same as _apply_writing_preset)
+and sets self.active_voice. Clearing it sets None. The existing
+"(none)" preset does not touch voice.
+
+Prompt injection — new helper build_voice_instruction(profile):
+  - If no profile or empty brief+samples, return "".
+  - Emit a block *after* role/tone/avoid so voice cannot override
+    Correct's "do not restyle already-correct sentences".
+  - Instruct the model to imitate rhythm, hedging, sentence length and
+    lexical habits from the brief; forbid inventing biographical facts
+    found only in the samples; forbid copying sample sentences
+    wholesale into the revision.
+  - Samples themselves are NOT pasted into every request once a brief
+    exists. Samples are used only by the derive-brief action.
+
+Derive-brief action (Settings or Preset manager):
+  One backend call with a dedicated system prompt that *summarises*
+  style from samples into MAX_STYLE_BRIEF_CHARS of British English
+  description (sentence length, formality, first/third person, typical
+  openers/closers, British vs American lexical choices, hedging).
+  Store the brief; do not store the model’s essay. If the backend is
+  down, the user may type the brief by hand.
+
+Meaning-preservation calibration (required before ship):
+  1. Build a small corpus of Mark-like letters (3–5 real excerpts he
+     is willing to paste as samples) plus 3 control texts that are
+     *not* in his voice (a stiff formal letter, a chatty email, a
+     technical note).
+  2. Run each control through Paraphrase + Substantial + voice=Mark
+     and through the same knobs with voice off.
+  3. Score live output for: (a) no new facts, (b) numbers/names
+     intact, (c) recognisable rhythm vs the samples, (d) no copied
+     sample sentences, (e) Correct mode still minimum-edit when voice
+     is on.
+  4. If (e) fails, the voice block must be skipped entirely when
+     mode == "Correct" — that is the safe fallback, encoded as
+     APPLY_VOICE_IN_CORRECT = False until calibration says otherwise.
+
+2.2 Correct-mode spelling tightness and two-pass restyle (Proposal B)
+---------------------------------------------------------------------
+Correct already says "fix only genuine errors". Long letters still
+leave British/American drift and light grammar slips when Strength is
+Standard and a voice block is also present.
+
+B1. Add a Correct addendum constant, appended only when mode ==
+    "Correct", listing the same British pairs already in the system
+    prompt but as an *edit checklist* (organise/organize, colour/color,
+    licence/license noun-verb, practise/practice, programme/program
+    exception). No new facts; no restyle.
+
+B2. Optional two-pass, off by default, config key
+    "two_pass_correct_then_style": false.
+    When enabled and mode is Paraphrase or Clarify:
+      pass 1 = Correct / Light / no voice / no tones
+      pass 2 = requested mode/strength/role/tones + voice
+    Pass 1 output becomes pass 2 source. Cancel_event aborts both.
+    Status line: "Correcting spelling… then restyling as Mark…".
+    Cost: two paid calls. Must be a visible Settings checkbox, not
+    silent.
+
+Do not add a Python spellchecker package. That would violate the
+dependency gate.
+
+2.3 Preset menu integration (Proposal C)
+----------------------------------------
+Extend normalise_preset() / the stored user_preset dict with an
+optional "voice": "<name>" | null. Unknown voice names are dropped
+to null on load (same degrade-gracefully rule as unknown tones).
+
+_save_current_preset() writes the active voice name if set.
+_apply_writing_preset() sets self.active_voice from that field.
+
+A built-in WRITING_PRESETS entry for "Mark" is *not* added. Voice is
+personal; hard-coding it would freeze a brief in source control.
+
+2.4 Local lexicon hints (Proposal D — not ready to ship)
+--------------------------------------------------------
+A user-editable list "lexicon_preferred" of correctly spelled words
+Mark uses. Before a request, difflib.get_close_matches against tokens
+in the original pane can raise a non-blocking notice ("Did you mean
+practise?"). Easy to get wrong on proper nouns. Leave on the shelf
+unless Correct still misses errors after B1 calibration.
+
+2.5 What this does *not* do
+---------------------------
+- Does not stream tokens.
+- Does not change the one-original / one-revision / human-accept
+  contract.
+- Does not put samples on the wire every call (brief only).
+- Does not read the user's disk for "style training" beyond what he
+  pastes.
+- Does not propose Explorer drop, 3-tone, retry, or Markdown diff work.
+
+
+3. Modular Code Snippets
+========================
+
+3.1 Constants and normalisation (insert after MAX_PRESET_NAME_LENGTH)
+
+# -- Voice profiles (notes_030) --------------------------------------------- #
+# A voice is a named style brief plus optional preferred toolbar knobs.
+# It is not a fourth built-in preset. Caps keep build_system_prompt()
+# from growing without bound when a user pastes a whole letter as a
+# "sample".
+MAX_VOICE_PROFILES = 8
+MAX_VOICE_NAME_LENGTH = 48
+MAX_VOICE_SAMPLES = 6
+MAX_SAMPLE_CHARS = 1200
+MAX_STYLE_BRIEF_CHARS = 900
+MAX_VOICE_AVOID = 24
+# Correct mode must stay minimum-edit until live calibration proves
+# that a voice block does not restyle already-correct sentences.
+APPLY_VOICE_IN_CORRECT = False
+
+
+def normalise_voice_profile(profile):
+    """Return one canonical voice profile, or None if it cannot be used."""
+    if not isinstance(profile, dict):
+        return None
+    samples_in = profile.get("samples", [])
+    if isinstance(samples_in, str):
+        samples_in = [samples_in]
+    if not isinstance(samples_in, list):
+        samples_in = []
+    samples = []
+    for item in samples_in:
+        if not isinstance(item, str):
+            continue
+        text = item.strip()
+        if not text:
+            continue
+        samples.append(text[:MAX_SAMPLE_CHARS])
+        if len(samples) >= MAX_VOICE_SAMPLES:
+            break
+
+    brief = profile.get("style_brief", "")
+    if not isinstance(brief, str):
+        brief = ""
+    brief = brief.strip()[:MAX_STYLE_BRIEF_CHARS]
+
+    avoid = normalise_house_style_avoid(profile.get("avoid_extra", []))
+    avoid = avoid[:MAX_VOICE_AVOID]
+
+    preferred = profile.get("preferred")
+    preferred_clean = normalise_preset(preferred) if preferred else None
+
+    if not samples and not brief and preferred_clean is None:
+        return None
+    return {
+        "preferred": preferred_clean,
+        "samples": samples,
+        "style_brief": brief,
+        "avoid_extra": avoid,
+        "active": bool(profile.get("active", False)),
+    }
+
+
+def normalise_voice_profiles(value, issues=None):
+    """Validate the stored voice_profiles mapping."""
+    if not isinstance(value, dict):
+        _record_config_issue(
+            issues,
+            "Voice profiles were ignored because 'voice_profiles' is not "
+            "an object.")
+        return {}
+    cleaned = {}
+    reserved = {name.casefold() for name in WRITING_PRESETS}
+    reserved.add(PRESET_MANAGER_LABEL.casefold())
+    for raw_name, raw_profile in value.items():
+        if not isinstance(raw_name, str):
+            _record_config_issue(issues, "A voice profile with a non-string "
+                                 "name was dropped.")
+            continue
+        name = raw_name.strip()[:MAX_VOICE_NAME_LENGTH]
+        if not name or name.casefold() in reserved:
+            _record_config_issue(
+                issues,
+                f"Voice profile '{raw_name}' was dropped because the name "
+                "is reserved or empty.")
+            continue
+        profile = normalise_voice_profile(raw_profile)
+        if profile is None:
+            _record_config_issue(
+                issues,
+                f"Voice profile '{name}' was dropped because it had no "
+                "usable brief, samples or preferred knobs.")
+            continue
+        if len(cleaned) >= MAX_VOICE_PROFILES:
+            _record_config_issue(
+                issues,
+                "Further voice profiles were omitted (cap "
+                f"{MAX_VOICE_PROFILES}).")
+            break
+        # First active wins; later actives are stored but not flagged.
+        if profile["active"] and any(p.get("active") for p in cleaned.values()):
+            profile["active"] = False
+        cleaned[name] = profile
+    return cleaned
+
+
+3.2 Prompt block (insert after build_avoid_instruction)
+
+def build_voice_instruction(profile, mode):
+    """Return a bounded voice block, or '' if none should apply.
+
+    Subordinate to meaning preservation and to Correct-mode minimum
+    edit. Samples are never inlined here — only the derived brief and
+    any extra avoid-list. See notes_030 §2.1 calibration item (e).
+    """
+    if not profile:
+        return ""
+    if mode == "Correct" and not APPLY_VOICE_IN_CORRECT:
+        return ""
+    brief = (profile.get("style_brief") or "").strip()
+    extra = profile.get("avoid_extra") or []
+    if not brief and not extra:
+        return ""
+    avoid_bit = ""
+    if extra:
+        listed = ", ".join(f'"{term}"' for term in extra)
+        avoid_bit = (
+            f" Prefer not to use {listed} unless the source already "
+            "requires that wording to keep its meaning.")
+    return (
+        "\n- Author voice: imitate the following personal style when "
+        "choosing wording, rhythm, sentence length and hedging — and "
+        "only those things:\n"
+        f"  {brief}{avoid_bit}\n"
+        "  Voice guidance must not add facts, anecdotes, opinions, "
+        "commitments or biographical detail that are absent from the "
+        "source. Do not paste sentences from any style sample. If voice "
+        "and factual fidelity compete, keep the source meaning and "
+        "weaken the voice. If voice and the selected editing mode "
+        "compete, the mode wins."
+    )
+
+
+CORRECT_SPELLING_ADDENDUM = (
+    " Spelling checklist (apply only where the source actually drifts): "
+    "organise/realise not organize/realize; colour/favour/centre not "
+    "color/favor/center; licence (noun) vs license (verb); practice "
+    "(noun) vs practise (verb); programme except computer program; "
+    "travelling, modelling, counselling with the British double-l. "
+    "Do not restyle a sentence whose only issue is a spelling you have "
+    "already corrected."
+)
+
+
+# In build_system_prompt(), after avoid_line = build_avoid_instruction(...):
+#
+#     voice_line = build_voice_instruction(voice_profile, mode)
+#     correct_extra = (
+#         CORRECT_SPELLING_ADDENDUM if mode == "Correct" else ""
+#     )
+#
+# Then include {voice_line} after {avoid_line} in the Task section, and
+# append {correct_extra} to the Correct MODE_INSTRUCTIONS line only
+# (or concatenate onto MODE_INSTRUCTIONS[mode] when mode == "Correct").
+#
+# Signature becomes:
+#   def build_system_prompt(mode, strength, tones, role="(none)",
+#                           protect_tokens=False, avoid_words=(),
+#                           voice_profile=None):
+
+
+3.3 Derive-brief system prompt (used only from the manager dialogue)
+
+VOICE_BRIEF_SYSTEM = """\
+You are summarising a writer's habitual style for a copy-editor.
+Read the samples as evidence of *how* the author writes, not as
+content to reuse. Return only a compact British English brief, no
+more than 120 words, covering: typical sentence length; formality;
+person (I / we / impersonal); hedging and modality; characteristic
+openings and closings; words or constructions the author favours;
+words the author appears to avoid. Do not quote more than four
+consecutive words from any sample. Do not invent biographical facts.
+Do not give advice. Output the brief only.
+"""
+
+
+3.4 Config defaults
+
+# Inside DEFAULT_CONFIG, beside "user_presets": {}:
+#   "voice_profiles": {},
+#   "active_voice": None,
+#   "two_pass_correct_then_style": False,
+#
+# In normalise_config():
+#   clean["voice_profiles"] = normalise_voice_profiles(
+#       clean.get("voice_profiles", {}), issues=issues)
+#   active = clean.get("active_voice")
+#   if not isinstance(active, str) or active not in clean["voice_profiles"]:
+#       active = next((n for n, p in clean["voice_profiles"].items()
+#                      if p.get("active")), None)
+#   clean["active_voice"] = active
+#   clean["two_pass_correct_then_style"] = bool(
+#       clean.get("two_pass_correct_then_style", False))
+
+
+3.5 Two-pass sketch (inside the existing worker, not a new thread)
+
+# Pseudocode only — wire into the same path that today calls
+# run_backend() once per Process click (around the cfg_snapshot /
+# avoid_words site near lines 4542 and 5778).
+#
+#     profile = voice_profiles.get(active_voice)
+#     if (cfg_snapshot.get("two_pass_correct_then_style")
+#             and mode in ("Paraphrase", "Clarify")):
+#         first = run_backend(..., mode="Correct", strength="Light",
+#                             tones=[], role="(none)",
+#                             voice_profile=None)
+#         source_for_style = first["revised"]
+#         result = run_backend(..., source=source_for_style,
+#                              voice_profile=profile)
+#     else:
+#         result = run_backend(..., voice_profile=profile)
+
+
+4. Insertion Map
+================
+
+File: scriptorium.py (v2.32)
+
+A. Constants + normalise_voice_profile / normalise_voice_profiles
+   After MAX_PRESET_NAME_LENGTH (currently line 685) and before
+   normalise_preset (line 688), or immediately after
+   normalise_user_presets ends (~line 887, beside
+   normalise_house_style_avoid).
+
+B. DEFAULT_CONFIG keys
+   Around lines 944–947 ("user_presets", "house_style_avoid").
+
+C. normalise_config()
+   Beside the existing
+     clean["user_presets"] = normalise_user_presets(...)
+     clean["house_style_avoid"] = normalise_house_style_avoid(...)
+   at lines 1034–1037.
+
+D. build_voice_instruction + CORRECT_SPELLING_ADDENDUM
+   Immediately after build_avoid_instruction (ends ~line 1223).
+
+E. build_system_prompt()
+   Signature and assembly at lines 1236–1261. Pass voice_profile
+   through from the two run_backend call sites (~4542 and ~5778).
+
+F. Preset persistence
+   normalise_preset() lines 688–712 — accept optional "voice" string.
+   _save_current_preset() line 3771 — write active voice name.
+   _apply_writing_preset() (search nearby _open_preset_manager at
+   3736) — restore active voice.
+   PresetManagerDialog class at line 3319 — add a Voice tab or a
+   short "Voice profiles…" button; keep the dialogue one purpose
+   if the tab would crowd it: a sibling VoiceProfileDialog is
+   cleaner.
+
+G. Settings
+   Near letters_var / check_letter_conventions (3025–3029) add the
+   two-pass checkbox. Persist in the same save path that already
+   writes house_style_avoid (3285).
+
+H. Tests
+   tests/ already holds calibration helpers. Add
+   tests/test_voice_profiles_normalise.py for the pure functions
+   (no backend) before any live calibration file.
+
+
+Recommended slice
+-----------------
+v2.33  Voice profile schema + prompt block + "Mark" saved in config
+       (APPLY_VOICE_IN_CORRECT = False). Hand-typed brief allowed.
+v2.34  Derive-brief action + preset.voice field + Settings checkbox
+       for two-pass (still default off).
+v2.35  Live calibration against claude-sonnet-4-6; only then consider
+       flipping APPLY_VOICE_IN_CORRECT or enabling two-pass by default.
+
+Hand-off note
+-------------
+No source file was modified in this session. Config was read only;
+the API key in scriptorium_config.json was not copied into this note.
+Implementers should run the existing calibration discipline in
+ROADMAP.md (real backend calls, not assumed-safe wording) on the
+voice block before any .exe is given to Mark.
+"""
