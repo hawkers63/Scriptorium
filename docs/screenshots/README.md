@@ -1,19 +1,12 @@
-# Screenshot placeholders
+# Screenshots
 
-This folder holds README screenshots for Scriptorium.
+UI captures for the Scriptorium README.
 
-The image paths referenced from the root `README.md` are intentional
-placeholders. Real captures of the application should replace them later:
+| File | Shows |
+|------|--------|
+| `main-window.png` | Main window with Original / Suggested revision panes |
+| `open-menus.png` | Toolbar with Role (and related) menus open |
+| `settings.png` | Settings dialogue (backend, safeguards, house style) |
 
-| File | Intended subject |
-|------|------------------|
-| `main-window.png` | Main editing window with Original and Revision panes |
-| `side-by-side-diff.png` | Side-by-side (or inline) diff highlighting |
-| `settings.png` | Settings dialogue |
+These are © 2026 Mark Hawksworth. All rights reserved.
 
-Do **not** commit fabricated or stub PNG binaries. Until genuine captures
-are available, broken-image placeholders in the README are expected and
-acceptable.
-
-Keep filenames stable so README links do not need to change when the
-captures are added.

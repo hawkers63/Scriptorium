@@ -80,16 +80,19 @@ Built in Python with a native-style CustomTkinter interface.
 
 ## Screenshots
 
-Placeholder images — real captures will be added later. See
-[`docs/screenshots/README.md`](docs/screenshots/README.md).
+See [`docs/screenshots/README.md`](docs/screenshots/README.md).
 
 ![Main window](docs/screenshots/main-window.png)
 
-![Side-by-side diff](docs/screenshots/side-by-side-diff.png)
+*Main window — Original and Suggested revision panes with mode, strength, role, tone and preset controls.*
+
+![Open menus](docs/screenshots/open-menus.png)
+
+*Toolbar menus open — Role list (and other selectors) for steering register.*
 
 ![Settings](docs/screenshots/settings.png)
 
----
+*Settings — Claude or Ollama backend, placeholder protection, British letter conventions, house style.*
 
 ## Requirements
 
