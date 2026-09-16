@@ -7,7 +7,7 @@ labels: bug
 
 ## Summary
 
-A clear, concise description of what went wrong.
+Describe what went wrong and where you saw it.
 
 ## Steps to reproduce
 
@@ -23,6 +23,15 @@ What you expected to happen.
 
 What actually happened, including any error dialogue or traceback.
 
+## Scope
+
+- [ ] Rewriting result
+- [ ] Import/export
+- [ ] Settings or configuration
+- [ ] UI layout or accessibility
+- [ ] Backend connection
+- [ ] Build, packaging, or repository automation
+
 ## Environment
 
 - Scriptorium version (Help / About, or `APP_VERSION` if known):
@@ -33,4 +42,5 @@ What actually happened, including any error dialogue or traceback.
 
 ## Additional context
 
-Screenshots, log snippets, or configuration notes that do **not** include API keys or other secrets.
+Screenshots, log snippets, or configuration notes that do **not** include API
+keys or other secrets.

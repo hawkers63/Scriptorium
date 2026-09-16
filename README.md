@@ -1,199 +1,245 @@
 # Scriptorium
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/downloads/)
-[![Proprietary | All Rights Reserved](https://img.shields.io/badge/license-Proprietary%20%7C%20All%20Rights%20Reserved-red)](LICENSE)
+[![Version](https://img.shields.io/badge/version-2.36-2f6fed)](scriptorium.py)
+[![Python](https://img.shields.io/badge/python-3.10%2B-3776ab?logo=python&logoColor=white)](https://www.python.org/downloads/)
+[![Windows](https://img.shields.io/badge/platform-Windows%2011-0078d4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows)
 [![CI](https://github.com/hawkers63/Scriptorium/actions/workflows/ci.yml/badge.svg)](https://github.com/hawkers63/Scriptorium/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/hawkers63/Scriptorium/actions/workflows/codeql.yml/badge.svg)](https://github.com/hawkers63/Scriptorium/actions/workflows/codeql.yml)
+[![Licence](https://img.shields.io/badge/licence-Proprietary%20%7C%20All%20Rights%20Reserved-red)](LICENSE)
 
-A lightweight **British English writing assistant** for Windows 11. Scriptorium
-rewords, corrects, and clarifies text while honouring the author's original
-intent. Every result is a *suggested* revision — nothing is applied silently;
-you review each change and accept, reject, copy or undo it.
+Scriptorium is a lightweight British English writing assistant for Windows 11.
+It gives you a focused desktop workspace for revising prose with Claude or a
+local Ollama model while keeping every suggested change visible, reviewable,
+and under your control.
 
-Built in Python with a native-style CustomTkinter interface.
-
----
-
-## Features
-
-- **Three editing modes**
-  - **Paraphrase** — reword while preserving meaning and tone.
-  - **Correct** — fix grammar, spelling, punctuation and usage, making the
-    minimum changes necessary.
-  - **Clarify** — improve readability and structure without adding new claims.
-- **Adjustable strength** — Light, Standard, or Substantial.
-- **Optional tone control** — choose up to three of twelve tones (Formal,
-  Neutral, Casual, Friendly, Diplomatic, Empathetic, Direct, Confident,
-  Concise, Detailed, Constructive, Persuasive) via a compact picker. The
-  first tone chosen is dominant, the second supports it, and a third is
-  only a light accent that's weakened or dropped rather than allowed to
-  change content, certainty or scope. Each tone is a bounded, data-driven
-  instruction rather than a bare label, so it can only reshape wording and
-  register — never invent facts, evidence or detail. Genuinely
-  contradictory pairs (e.g. Concise + Detailed, Neutral + Persuasive) are
-  refused with an explanation.
-- **Writing roles** — an optional context (Creative, Software Developer,
-  Engineer, Executive, Project Manager, Client Relations, Academic,
-  Technical Writer, Journalist, Legal & Compliance, Lawyer) that steers
-  vocabulary and register without ever adding facts, technical conclusions
-  or legal interpretation the source doesn't already contain. Role, mode,
-  strength and tone are independent controls that stack.
-- **Placeholder protection** — placeholders like `[Name]`, `{{Date}}`,
-  `{amount}` and `<Date>` are masked before the text is sent and restored
-  afterwards, so they are never reworded; if the model drops one, you are
-  warned. Toggle it in Settings.
-- **Side-by-side diff** — the revision sits beside the original with changed
-  words highlighted, with a Clean / Inline toggle; the inline view also shows
-  deleted words struck through in red.
-- **Review controls** — Accept, Reject, Copy revision, Copy summary, Undo,
-  plus Copy/Paste for the Original pane and Import/Export. Text in both
-  panes can also be selected and copied (or, for Original, pasted into) via
-  right-click.
-- **Softer / Stronger** — one-click re-run at the next strength notch down or
-  up, instead of changing Strength and pressing Process separately.
-- **Writing presets** — a few built-in Mode/Strength/Role/Tone combinations
-  (Formal letter, Client reply, Technical note), plus your own: save the
-  current toolbar controls under a name via the Preset menu's "Manage
-  presets…" command, or delete one later. Applying a preset is always a
-  one-off copy — every control stays independently editable afterwards.
-- **Minimise to tray, start with Windows** (optional) — the minimise button
-  sends the window straight to the system tray instead of the taskbar; the
-  close button always quits completely, tray icon included. A "Start with
-  Windows" option launches it minimised at logon. Needs the optional
-  `pystray` and `Pillow` packages — Settings explains and disables the
-  checkbox if they aren't installed, and the app works exactly the same
-  without them.
-- **Import and export** — plain text and Markdown always; Word `.docx` files
-  too when the optional `python-docx` package is installed.
-- **British English throughout** — `organise`, `colour`, `licence`/`license`,
-  `-ise` endings, and so on.
-- **British letter conventions (advisory)** — flags when a salutation and
-  sign-off do not match UK convention (impersonal → 'Yours faithfully', named
-  → 'Yours sincerely'), without ever rewriting your text. Toggle in Settings.
-- **Meaning-preservation safeguards** — names, numbers, quotations, URLs and
-  technical terms are left untouched, and genuine ambiguities are flagged
-  rather than silently resolved.
-- **Two backends**
-  - **Claude API** — best rewriting quality; text is sent to Anthropic.
-  - **Local Ollama** — fully private; nothing leaves your machine.
+Built with Python, CustomTkinter, and standard-library HTTP calls, it keeps the
+interface calm: original text on the left, a suggested revision on the right,
+and just enough controls to tune the rewrite without turning the app into a
+prompt laboratory.
 
 ---
 
-## Screenshots
+## Showcase
 
-See [`docs/screenshots/README.md`](docs/screenshots/README.md).
+| Main workspace | Settings |
+| --- | --- |
+| ![Scriptorium main window](docs/screenshots/main-window.png) | ![Scriptorium settings dialogue](docs/screenshots/settings.png) |
 
-![Main window](docs/screenshots/main-window.png)
+| Toolbar and menus |
+| --- |
+| ![Scriptorium toolbar menus](docs/screenshots/open-menus.png) |
 
-*Main window — Original and Suggested revision panes with mode, strength, role, tone and preset controls.*
+> Placeholder: add an animated GIF here showing paste, process, review,
+> accept, and copy once a short capture is available.
 
-![Open menus](docs/screenshots/open-menus.png)
+---
 
-*Toolbar menus open — Role list (and other selectors) for steering register.*
+## Why Scriptorium
 
-![Settings](docs/screenshots/settings.png)
+- **Review-first rewriting** - every revision is shown beside the source text,
+  with inline differences and clear accept, reject, undo, copy, import, and
+  export controls.
+- **British English by design** - user-facing text, spelling, prompts, and
+  advisory checks follow British conventions.
+- **Choice of backends** - use Claude for stronger rewriting quality or Ollama
+  for a fully local workflow.
+- **Tone and role steering** - combine editing mode, strength, writing role,
+  and up to three bounded tones without allowing the model to invent facts.
+- **Meaning-preservation safeguards** - placeholders, names, numbers, URLs,
+  quotations, and technical terms are protected or flagged.
+- **Windows-native niceties** - optional tray support, start-with-Windows, and
+  drag-and-drop import keep it comfortable as a small desktop tool.
+- **Private by default** - configuration is local, live API keys are excluded
+  from Git, and the repository remains proprietary.
 
-*Settings — Claude or Ollama backend, placeholder protection, British letter conventions, house style.*
+---
+
+## Feature Tour
+
+### Editing Modes
+
+- **Paraphrase** - reword while preserving meaning and tone.
+- **Correct** - fix grammar, spelling, punctuation, and usage with minimal
+  intervention.
+- **Clarify** - improve readability and structure without adding new claims.
+
+### Rewrite Controls
+
+- Strength levels: **Light**, **Standard**, and **Substantial**.
+- Writing roles for contexts such as technical writing, client replies,
+  project updates, executive communication, legal and compliance material, and
+  software development.
+- Multi-tone composition with conflict checks, priority ordering, and
+  safeguards against embellishment.
+- One-click **Softer** and **Stronger** reruns for quick tuning.
+- Built-in and user-defined presets for repeatable combinations of mode,
+  strength, role, and tones.
+
+### Review And Export
+
+- Side-by-side clean and inline diff views.
+- Copy revision, copy summary, accept, reject, and undo.
+- Plain text and Markdown import/export.
+- Optional Word `.docx` import/export via `python-docx`.
+- Optional tray and autostart support via `pystray` and `Pillow`.
+
+---
 
 ## Requirements
 
-- Windows 11 with Python 3.10 or newer.
-- One dependency:
+- Windows 11.
+- Python 3.10 or newer.
+- `customtkinter`, installed from `requirements.txt`.
+- Optional extras:
+  - `python-docx` for Word import/export.
+  - `pystray` and `Pillow` for tray and start-with-Windows support.
+  - Ollama, if you want local model processing.
 
-  ```
-  pip install -r requirements.txt
-  ```
+---
 
-  That installs `customtkinter`, the only required package. Two optional
-  extras add features but aren't required to run Scriptorium at all:
+## Installation
 
-  ```
-  pip install python-docx        # Word (.docx) import/export
-  pip install pystray pillow     # minimise to tray / start with Windows
-  ```
+Clone the private repository and enter the project folder:
+
+```powershell
+git clone https://github.com/hawkers63/Scriptorium.git
+cd Scriptorium
+```
+
+Create and activate a virtual environment:
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+Install the required dependency:
+
+```powershell
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+Install optional extras only when you need them:
+
+```powershell
+pip install python-docx
+pip install pystray pillow
+```
 
 ---
 
 ## Running
 
-```
+Run from source:
+
+```powershell
 python scriptorium.py
 ```
 
-or double-click **Scriptorium.bat**.
+Or double-click:
 
-On first launch, open **Settings (the gear icon)** and either paste a Claude API
-key or switch the backend to Ollama.
+```text
+Scriptorium.bat
+```
+
+On first launch, open **Settings** and choose one backend:
+
+- **Claude API** - paste an Anthropic API key or set the
+  `ANTHROPIC_API_KEY` environment variable.
+- **Ollama** - select the Ollama backend and choose an installed local model.
 
 ---
 
 ## Configuration
 
-Settings are stored in `scriptorium_config.json`, created next to the script on
-first run. **This file is deliberately excluded from Git** (see `.gitignore`)
-because it holds your API key in plain text.
+Scriptorium creates `scriptorium_config.json` next to the script when run from
+source. The packaged executable stores settings under `%LOCALAPPDATA%`.
 
-To set up a fresh copy, duplicate the template and add your own key:
+Never commit `scriptorium_config.json`. It can contain a live Anthropic API key
+in plain text and is intentionally ignored by Git.
 
-```
+To start from the template:
+
+```powershell
 copy scriptorium_config.example.json scriptorium_config.json
 ```
 
-Alternatively, leave the key blank in the config and set the
-`ANTHROPIC_API_KEY` environment variable instead — the app reads that as a
-fallback.
-
-> The Claude API key is a pay-as-you-go key from `console.anthropic.com`. It is
-> separate from a Claude.ai subscription.
-
-### Using the local Ollama backend
-
-1. Install [Ollama](https://ollama.com) and pull a model, for example
-   `ollama pull llama3.1:8b`.
-2. In Settings, switch the backend to **ollama**, then either type the model
-   tag or press **Detect** to list the models Ollama currently has installed.
-3. With Ollama running, all processing stays on your machine.
-
-To keep the (large) model files on another drive, set the `OLLAMA_MODELS`
-environment variable to that folder (for example `D:\\Ollama_Models`) before
-starting Ollama.
+The Claude API key is a pay-as-you-go key from `console.anthropic.com`. It is
+separate from a Claude.ai subscription.
 
 ---
 
-## Building a standalone `.exe`
+## Local Ollama Backend
 
-Package Scriptorium into a single Windows executable that needs no separate
-Python install:
+Install Ollama, pull a model, and choose it in Scriptorium settings:
 
+```powershell
+ollama pull llama3.1:8b
 ```
+
+With Ollama running, processing stays on your machine. To store large model
+files on another drive, set `OLLAMA_MODELS` before starting Ollama.
+
+---
+
+## Building The Windows App
+
+Install PyInstaller and build from the tracked spec file:
+
+```powershell
 pip install pyinstaller
 pyinstaller scriptorium.spec
 ```
 
-The build produces `dist\\Scriptorium.exe`. The equivalent one-off command,
-without the spec file, is:
+The build output is written to `dist\Scriptorium.exe`. Build artefacts and
+packaged executables are ignored by Git.
 
-```
-pyinstaller --onefile --windowed --collect-all customtkinter --name Scriptorium scriptorium.py
-```
+---
 
-When run as the packaged `.exe`, settings (including your API key) are stored
-under `%LOCALAPPDATA%\\Scriptorium` rather than next to the script.
+## Repository Automation
+
+This repository is prepared for a small but professional maintenance loop:
+
+- **CI** runs focused Python checks and tests on `main` and pull requests.
+- **CodeQL** scans Python code for security issues.
+- **Dependabot** watches Python and GitHub Actions dependencies.
+- **Formatting checks** can be run through the proposed Ruff workflow.
+- **Release drafting** can create GitHub releases from pushed version tags once
+  Mark approves the workflow.
+
+Workflow changes must be reviewed before they are finalised because this is a
+private proprietary repository.
 
 ---
 
 ## Roadmap
 
-- Further robustness and polish (from ongoing review) — see `ROADMAP.md`.
+Ongoing product notes live in `ROADMAP.md` and the private notes folder.
+
+Near-term themes:
+
+- Preserve the app's small, single-purpose desktop identity.
+- Strengthen rewrite reliability and review clarity.
+- Keep roles, tones, and presets useful without turning them into author
+  imitation.
+- Continue improving Windows polish and repository hygiene.
+
+---
+
+## Security
+
+Do not open public issues containing keys, configuration dumps, local paths, or
+private repository details. See `SECURITY.md` for the reporting process.
 
 ---
 
 ## Copyright
 
-© 2026 Mark Hawksworth. All rights reserved.
+Copyright (c) 2026 Mark Hawksworth. All rights reserved.
 
-Scriptorium is a private, proprietary work. There is no public licence.
-You may not copy, modify, redistribute, or create derivative works
-without Mark Hawksworth's prior written consent. Access to the private
-GitHub repository is not a grant of those rights.
+Scriptorium is private, proprietary software. Access to the repository does not
+grant permission to copy, modify, redistribute, sublicense, or create derivative
+works without Mark Hawksworth's prior written consent.
 
 See `LICENSE`, `COPYRIGHT.md`, and `SECURITY.md`.
