@@ -1,6 +1,6 @@
 # Scriptorium runtime dependency.
 # Everything else (urllib, tkinter, json, difflib, winreg) ships with Python.
-customtkinter>=5.2.0
+customtkinter>=6.0.0
 
 # Optional extras (NOT installed by the line above):
 #
