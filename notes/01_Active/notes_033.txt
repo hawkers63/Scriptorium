@@ -1,0 +1,311 @@
+SCRIPTORIUM — FLUENT DESIGN INVESTIGATION
+=========================================
+Date: 15 September 2026
+Mandate: Lead UI/UX; read-only investigation following notes_032.
+Author: Grok.
+Against: scriptorium.py APP_VERSION 2.35 (HEAD 6602fa5).
+This note does not authorise implementation. No source was modified.
+
+Why this note exists
+--------------------
+Mark asked to investigate the Fluent Design system after the v2.35 visual
+audit (notes_032). Scriptorium's own brief is a "modern, cohesive Windows 11
+aesthetic" using CustomTkinter only — no third-party theme engines. Fluent
+is the language Windows 11 actually speaks. This note records what Fluent
+is now, what Scriptorium already matches, what CustomTkinter cannot do, and
+which notes_032 items survive a Fluent filter.
+
+Sources (current Microsoft guidance, not 2017 marketing):
+  https://learn.microsoft.com/en-us/windows/apps/design/design-principles
+  https://learn.microsoft.com/en-us/windows/apps/design/guidelines-overview
+  https://learn.microsoft.com/en-us/windows/apps/design/signature-experiences/geometry
+  https://learn.microsoft.com/en-us/windows/apps/design/signature-experiences/typography
+  https://learn.microsoft.com/en-us/windows/apps/design/signature-experiences/layering
+  https://learn.microsoft.com/en-us/windows/apps/design/style/mica
+  https://learn.microsoft.com/en-us/windows/apps/develop/ui/materials
+  https://fluent2.microsoft.design/material
+  https://fluent2.microsoft.design/shapes
+  https://fluent2.microsoft.design/layout
+  https://fluent2.microsoft.design/typography
+  https://fluent2.microsoft.design/design-tokens
+
+
+1. WHAT FLUENT IS IN 2026
+=========================
+
+Three layers people conflate. They are not the same product.
+
+1.1 Fluent Design System (2017, "Project Neon")
+    Five building blocks: Light, Depth, Motion, Material, Scale.
+    Acrylic blur, Reveal highlight, parallax. Windows 10 era.
+    Reveal highlight was retired in WinUI 2.6. Large-surface Acrylic was
+    retired for Windows 11 app chrome in favour of Mica.
+
+1.2 Windows 11 signature Fluent (what "feels like Windows" means)
+    Principles (Learn, last updated Dec 2025 / Aug 2026):
+      Effortless — fast, precise, no hunting.
+      Calm      — softer, decluttered, fades so the work stays in front.
+      Personal  — follows the user's theme, wallpaper, accent.
+      Familiar  — refreshed look, no new learning curve.
+      Complete + Coherent — one visual language across the shell.
+
+    Signature experiences: colour used sparingly for hierarchy; two-layer
+    elevation (base chrome vs content); Mica on long-lived windows,
+    Acrylic only on transient flyouts; 8px overlay / 4px control geometry;
+    Segoe UI Variable type ramp; short, reactive motion.
+
+1.3 Fluent 2 (cross-platform token system)
+    Global tokens (raw hex, radii, 4px spacing ramp) plus alias tokens
+    (colorNeutralForeground1, colorBrandBackground, …). Components consume
+    aliases, never raw globals. Light / dark / high-contrast remap the
+    aliases. This is how WinUI, Fluent UI React and the web kits stay in
+    step. It is not a Tk theme.
+
+For Scriptorium, (1.2) is the relevant contract. (1.1) is historical.
+(1.3) is the naming discipline notes_017 already started with PANE_*/DIFF_*
+constants — not a reason to import Fluent UI.
+
+1.4 Materials (Fluent 2 + WinUI 3)
+
+Material   Kind          Use on                          Not for
+---------- ------------- ------------------------------- ----------------------
+Solid      opaque        most UI, including this app     —
+Mica       opaque,       long-lived window backdrop      controls, cards
+           wallpaper-
+           tinted once
+Acrylic    frosted glass transient flyouts, menus,       app chrome, text panes
+                         search suggestions
+Smoke      translucent   dim the parent under a modal    everyday surfaces
+           black
+
+Mica is captured once from the wallpaper (cheap) and goes neutral when the
+window is inactive — that is how Windows shows focus. Acrylic is live blur
+and is reserved for light-dismiss surfaces. Smoke is always black, not
+theme-aware.
+
+CustomTkinter paints opaque frames. It cannot show wallpaper through the
+client area without DWM "sheet of glass" + transparent widgets, which
+fights CTk's own drawing. Honest solid layers are the Fluent-correct
+choice for a Tk app, not a fake blur.
+
+
+2. CONCRETE FLUENT VALUES (the useful bits)
+===========================================
+
+Geometry (Win11 signature)
+  Overlay / window / dialog / flyout corner radius : 8px
+  In-page control (button, text box, combo, slider): 4px
+  Elements under ~32px                              : 2px
+  Cards / large surfaces                            : 8px (Fluent 2 "Large")
+  Snapped or maximised window corners               : 0px
+  Adjacent controls that share an edge              : 0px on the shared edge
+  ControlCornerRadius / OverlayCornerRadius are the
+  two WinUI knobs; do not invent a third radius.
+
+Spacing (Fluent 2, 4px grid)
+  0, 2, 4, 6, 8, 10, 12, 16, 20, 24, 28, 32, 36, 40, 48…
+  2 / 6 / 10 exist to align icons. Prefer the ramp over 7, 9, 11, 13, 15.
+
+Typography (Win11, Segoe UI Variable; Tk can only ask for Segoe UI)
+  Caption  12/16 Regular     — status, helper, fine print
+  Body     14/20 Regular     — pane text, most UI
+  Body     14/20 Semibold    — emphasis (do not use Italic)
+  Subtitle 16/22 Semibold    — dialog titles (CTk size=16 weight=bold)
+  Title    20/28 Semibold    — page titles (Scriptorium has none)
+  Minimum legible: 14px Semibold or 12px Regular.
+
+Colour (Win11 dark, typical shell — not a token dump)
+  Base / window        ~#202020
+  Surface / card       ~#2C2C2C
+  Hairline             1px, slightly lighter than the fill
+  Text                 near-white / #E6E6E6
+  Secondary text       ~60% opacity (CTk gray65 / gray60)
+  Accent               one system accent; default Microsoft blue ~#0078D4
+                       (dark-mode hover/fill is often a lighter blue)
+  Accent is for primary action, selection, progress — not decoration.
+  Windows: "emphasizing significant items only when necessary."
+
+Layering (Win11 is a two-layer app, not a stack of cards)
+  Base layer     chrome: title, nav, commanding (toolbar + action bar)
+  Content layer  the work (the two panes)
+  Dialog         elevation 128, 1px stroke; Smoke on the parent is optional
+  Flyout         elevation 32
+  Card           elevation 8
+  Control rest   elevation 2, 1px stroke
+  Inactive window: Mica goes neutral. For solid apps, slightly flatten
+  contrast rather than adding a new colour.
+
+Motion
+  Reactive, short, tied to input. Not looping decoration.
+  Windows 11 dropped most "light" effects; interactivity is animation.
+  A 600ms busy pulse (already shipped) is calmer than a 200ms flicker and
+  matches Calm better than a snappier Fluent web token would.
+
+Commanding
+  One obvious primary action; secondary actions quieter; destructive
+  actions visually distinct and confirmed. Accept as green and Process as
+  blue is already this pattern.
+
+
+3. SCRIPTORIUM AGAINST FLUENT
+=============================
+
+Already aligned (do not restyle)
+  Dark-only utility that recedes behind the text — Calm.
+  Dual pane as the content layer; toolbar + two action rows as chrome —
+  the Win11 two-layer model, even if the fills are currently too similar.
+  One accent family (CTk blue BUSY_BLUE #1F6AA5; Accept #2F7D4F as the
+  single success colour; everything else gray30).
+  Segoe UI 13 on the panes (one pixel under Body 14; readable; leave it).
+  Dialog titles at 16 bold. Escape to dismiss. Parent-centred dialogues.
+  Word-level diffs with fills, not neon ink. Amber notice as a warning
+  layer, not a third accent.
+  British English, familiar desktop verbs (Process, Accept, Import…).
+  No learning curve — Familiar.
+
+Honest gaps, ranked by whether CustomTkinter can close them
+
+Gap                         Fluent want              CTk / this app
+--------------------------- ------------------------ ------------------------------
+Pane chrome mismatch        content layer is one     Original is CTkTextbox,
+                            surface                  Revised is tk.Text in a
+                                                     default frame. notes_032 A.
+Control radius              4px in-page, 8px overlay CTk defaults ~6–8 on
+                                                     everything. Can set
+                                                     corner_radius per widget.
+Overlay radius              8px on dialogs           CTkToplevel is a Win32
+                                                     window; OS already rounds
+                                                     the HWND on Win11. Inner
+                                                     CTk frames can be 8.
+4px spacing ramp            4, 8, 12, 16             PANE_SPACING_AFTER is 7;
+                                                     some pady 5, 10, 18 mix.
+                                                     Cosmetic; not a defect.
+Caption vs body             12 caption, 14 body      Status is 12 (correct).
+                                                     Notice body is 12 (should
+                                                     stay caption-sized).
+                                                     Helper copy gray60 size 11
+                                                     is below Fluent's 12px
+                                                     floor — bump to 12 if
+                                                     touched.
+Mica backdrop               wallpaper-tinted window  Needs DWM system backdrop
+                                                     + transparent client. CTk
+                                                     paints opaque. Fake-tinted
+                                                     #202020 is not Mica.
+Acrylic flyouts             blurred menus            Tk Menu / CTk OptionMenu
+                                                     cannot host Acrylic.
+Smoke under modals          dim the parent           No CTk overlay widget
+                                                     without a full-window
+                                                     frame that eats clicks.
+                             Do not fake it.
+System accent               follow Settings > Colours Would need a registry /
+                                                     DWM read and a light/dark
+                                                     pair. Hardcoded dark is a
+                                                     product choice (notes_032).
+Segoe UI Variable opsz      optical size axis        Tk named font "Segoe UI"
+                                                     is the static face. Fine.
+Connected motion            geometry morphs          Not available. Don't fake
+                                                     with after() hops.
+High contrast               alias remap              Out of scope. Dark-only.
+
+Dependency gate
+  pywinstyles / win32mica / sv-ttk / ttkbootstrap would be a third-party
+  theme engine. The project brief forbids that. ctypes against dwmapi is
+  already how Explorer drops work, so a *narrow* DWM call (immersive dark
+  title bar — CTk already does this; optional DWMWA_SYSTEMBACKDROP_TYPE
+  on the HWND) is technically in-family, but Mica still will not show
+  through opaque CTk frames. Do not add a package. Do not extend the
+  frame into the client (DwmExtendFrameIntoClientArea -1) — CTk will
+  draw holes or white flash.
+
+Light / Personal
+  Fluent's Personal principle wants the app to follow the OS theme.
+  Scriptorium is locked to ctk.set_appearance_mode("dark") (line 4404)
+  with dark-only hexes. That is a product decision, not an accident.
+  Do not add light mode as a Fluent homework exercise. If Mark ever
+  wants "follow Windows", that is a separate version with tuple colours
+  on every hex, not a one-line appearance_mode change.
+
+
+4. FLUENT FILTER ON NOTES_032
+=============================
+
+Keep (Fluent-calm, low blast radius)
+  A2/A3  insertbackground + matching selectbackground (#264F78 is the
+         Win11 / VS Code dark selection; it is the Fluent selection
+         colour in all but name).
+  A4     1px hairline + 8px overlay radius on both panes (content layer
+         as one surface). Use Overlay radius 8 on the pane cards, not
+         Control radius 4 — they are content, not buttons.
+  A5     Notice wraplength follows width (Calm: no overflow).
+  A6     Clean-view deletion hint on the status extra, not the 48px label.
+  A7     Pulse restore to BUSY_BLUE only (one accent, no leftover light
+         pair — that pair is a CTk light-mode fossil).
+  B1     arm_modal / wait_visibility (Effortless: no hung grab).
+  B2/B3  Reserved footers on Voice profiles and Manage presets
+         (Familiar commanding: Save stays findable).
+  B4     Settings fill-x (geometry that flexes at 150% DPI).
+
+Adjust
+  A1 PANE_BORDER #2D3033 — fine as a 1px stroke on the content layer.
+     Do not add a drop shadow. Win11 cards use elevation 8 + 1px stroke;
+     CTk shadows are ugly and not Fluent.
+  Pane corner_radius=6 in notes_032 → 8, to match OverlayCornerRadius.
+  Control buttons stay at CTk's default (treat as ControlCornerRadius 4
+  only if a later pass restyles every CTkButton; do not mix 4 and 8 on
+  the same row of action-bar buttons).
+  A8 status wrap — yes. Do not add a second status line (notes_022 D
+     still deferred; Fluent Calm says declutter).
+  Optional amber dismiss chip — yes, it keeps warning colour on the
+     warning layer instead of a gray30 hole.
+
+Defer or refuse
+  C row-2 width trims — still gated on a 920px hand-test. Fluent does
+    not ask us to shrink labels; it asks us not to crowd. Measure first.
+  D toolbar wrap / dropping Mode+Strength labels — still paused
+    (notes_028). Fluent Familiar: those labels are how Windows Settings
+    itself marks segmented controls. Keep them until overflow is seen.
+  Real Mica / Acrylic / Smoke — refuse until/unless the toolkit is no
+    longer CustomTkinter.
+  Following the OS accent or OS light/dark — refuse without a product
+    call from Mark.
+  Character-level diffs, extra metrics, streaming — unchanged deferred.
+
+Spacing snap (only if a touched line is already being edited)
+  PANE_SPACING_AFTER 7 → 8 (one step on the Fluent ramp; 7 was a Tk
+  default leftover). Do not sweep the file changing every pady=10 to 8
+  or 12; that is churn, not Calm.
+
+
+5. RECOMMENDED POSTURE
+======================
+
+Treat Fluent as a decision filter, not a restyle.
+
+  1. Scriptorium should look like a calm Windows 11 *utility*, not like
+     WinUI Gallery and not like a CustomTkinter demo.
+  2. Materials: solid layers, 1px strokes, two-layer chrome/content.
+     No blur packages, no fake Mica tint, no Smoke overlay.
+  3. Colour: keep the existing dark palette; accent only on Process and
+     Accept; warnings use DIFF_DEL_FG; success uses a named OK_FG.
+  4. Geometry: overlay 8, control 4 if restyled as a set, 4px spacing
+     ramp when a number is already moving.
+  5. Motion: keep the 600ms pulse; do not add entrance animations.
+  6. Ship notes_032 A+B under this filter (pane radius 8 not 6). Skip C
+     and D until Mark's 920/1180 look says they are needed.
+
+This investigation does not reopen notes_028, does not add a dependency,
+and does not propose splitting scriptorium.py.
+
+Primary references for an implementer:
+  Windows 11 principles
+    https://learn.microsoft.com/en-us/windows/apps/design/design-principles
+  Geometry (4 / 8)
+    https://learn.microsoft.com/en-us/windows/apps/design/signature-experiences/geometry
+  Layering
+    https://learn.microsoft.com/en-us/windows/apps/design/signature-experiences/layering
+  Mica (why we are not faking it)
+    https://learn.microsoft.com/en-us/windows/apps/design/style/mica
+  Fluent 2 materials / shapes / 4px ramp
+    https://fluent2.microsoft.design/material
+    https://fluent2.microsoft.design/shapes
+    https://fluent2.microsoft.design/layout

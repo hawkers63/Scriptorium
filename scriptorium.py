@@ -88,7 +88,7 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 APP_NAME = "Scriptorium"
-APP_VERSION = "2.35"
+APP_VERSION = "2.36"
 
 # A small shared palette (notes_017, v2.10) so the two text panes, the diff
 # tags and the notice banner read as one surface instead of drifting
@@ -103,7 +103,7 @@ PANE_FONT = ("Segoe UI", 13)
 PANE_INSET_X = 14
 PANE_INSET_Y = 12
 PANE_SPACING_BEFORE = 4
-PANE_SPACING_AFTER = 7
+PANE_SPACING_AFTER = 8    # was 7; one step onto the Fluent 4px spacing ramp
 DIFF_INS_FG = "#7ee0c3"    # ~10.6:1 against PANE_BG
 DIFF_INS_BG = "#12342d"    # a fill, not just foreground ink -- easier to scan
 DIFF_DEL_FG = "#ffb3ba"    # ~9.9:1, a safer margin than the old #e06c75 (5.23:1)
@@ -116,6 +116,17 @@ AMBER_TITLE = "#ffe3a3"    # ~12.9:1 against AMBER_BG
 AMBER_RULE = "#d6a529"
 BUSY_BLUE = "#1f6aa5"       # matches CTk's default blue accent
 BUSY_BLUE_DARK = "#15517d"  # alternate shade for the busy-pulse animation
+
+# Chrome the two panes and the dialogues share (notes_033/034 Fluent filter):
+# a single hairline stroke, one selection colour, and named status colours
+# instead of the same handful of hexes typed out at each call site.
+PANE_BORDER = "#2d3033"     # 1px hairline; content-layer stroke
+SELECT_BG = "#264f78"       # Win11 / VS Code dark selection
+OK_FG = "#98c379"           # success microcopy on dialogues
+DANGER_BG = "#8b3a3a"       # destructive Delete buttons
+AMBER_DISMISS = "#3a3324"   # notice dismiss-button fill -- stays on the warning layer
+AMBER_DISMISS_HOVER = "#4a402c"
+OVERLAY_RADIUS = 8          # Fluent OverlayCornerRadius; pane cards, notice
 
 def _config_dir():
     """Return the folder that holds scriptorium_config.json.
@@ -396,6 +407,46 @@ _shell32.DragQueryFileW.argtypes = (
 _shell32.DragQueryFileW.restype = wintypes.UINT
 _shell32.DragFinish.argtypes = (wintypes.HANDLE,)
 _shell32.DragFinish.restype = None
+
+
+class MONITORINFO(ctypes.Structure):
+    """MONITORINFO for GetMonitorInfoW -- rcWork excludes the taskbar."""
+
+    _fields_ = (
+        ("cbSize", wintypes.DWORD),
+        ("rcMonitor", wintypes.RECT),
+        ("rcWork", wintypes.RECT),
+        ("dwFlags", wintypes.DWORD),
+    )
+
+
+_user32.MonitorFromWindow.argtypes = (wintypes.HWND, wintypes.DWORD)
+_user32.MonitorFromWindow.restype = wintypes.HANDLE
+_user32.GetMonitorInfoW.argtypes = (wintypes.HANDLE, ctypes.POINTER(MONITORINFO))
+_user32.GetMonitorInfoW.restype = wintypes.BOOL
+_MONITOR_DEFAULTTONEAREST = 2
+
+
+def monitor_work_area(widget):
+    """Return (left, top, right, bottom) of widget's monitor work area.
+
+    Failure (a destroyed widget, an unexpected Win32 result) returns None so
+    callers can keep their unclamped geometry rather than guessing.
+    """
+    try:
+        hwnd = int(widget.winfo_id())
+    except (tk.TclError, ValueError, TypeError):
+        return None
+    try:
+        hmon = _user32.MonitorFromWindow(hwnd, _MONITOR_DEFAULTTONEAREST)
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(MONITORINFO)
+        if not hmon or not _user32.GetMonitorInfoW(hmon, ctypes.byref(info)):
+            return None
+    except (OSError, ValueError, OverflowError):
+        return None
+    work = info.rcWork
+    return (work.left, work.top, work.right, work.bottom)
 
 
 # Current Claude model IDs (verified against the Claude Platform docs).
@@ -3079,6 +3130,23 @@ def bind_dialog_chrome(window, on_close):
     window.protocol("WM_DELETE_WINDOW", on_close)
 
 
+def arm_modal(window):
+    """Acquire a grab only after the native window is mapped.
+
+    grab_set() in __init__, before Windows has shown the toplevel, is the
+    classic CustomTkinter race on this platform (first fixed on
+    TonePickerDialog, v2.35 C); every modal now uses the same order.
+    TclError covers the owner closing while this window is still mapping.
+    """
+    if not window.winfo_exists():
+        return
+    try:
+        window.wait_visibility()
+        window.grab_set()
+    except tk.TclError:
+        return
+
+
 def configure_ctk_textbox_text_metrics(textbox):
     """Best-effort alignment of a CTkTextbox's inner text metrics with the
     Revised pane's tk.Text (notes_027 §2): CTkTextbox wraps a private inner
@@ -3093,7 +3161,12 @@ def configure_ctk_textbox_text_metrics(textbox):
         return
     inner.configure(
         padx=PANE_INSET_X, pady=PANE_INSET_Y,
-        spacing1=PANE_SPACING_BEFORE, spacing3=PANE_SPACING_AFTER)
+        spacing1=PANE_SPACING_BEFORE, spacing3=PANE_SPACING_AFTER,
+        insertbackground=PANE_FG,
+        selectbackground=SELECT_BG,
+        selectforeground=PANE_FG,
+        inactiveselectbackground=SELECT_BG,
+    )
 
 
 def position_over_parent(window, master, width, height):
@@ -3101,7 +3174,10 @@ def position_over_parent(window, master, width, height):
 
     Uses the parent's live geometry rather than Tk's own placement, so a
     session with the main window on a secondary display doesn't have its
-    dialogs pop up on the primary one instead.
+    dialogs pop up on the primary one instead. Also clamps to that monitor's
+    work area (excluding the taskbar) so a dialog near the bottom of a short
+    display cannot land partly underneath it; a failed work-area lookup
+    keeps the plain centred position rather than guessing.
     """
     window.update_idletasks()
     try:
@@ -3111,6 +3187,11 @@ def position_over_parent(window, master, width, height):
         return
     x = px + max(0, (pw - width) // 2)
     y = py + max(0, (ph - height) // 2)
+    work = monitor_work_area(master)
+    if work is not None:
+        left, top, right, bottom = work
+        x = min(max(x, left), max(left, right - width))
+        y = min(max(y, top), max(top, bottom - height))
     window.geometry(f"{width}x{height}+{x}+{y}")
 
 
@@ -3202,13 +3283,7 @@ class TonePickerDialog(ctk.CTkToplevel):
             ).pack(anchor="w", padx=8, pady=5)
 
         self._refresh_status()
-        # Acquire modality only once the native window is available.
-        try:
-            self.wait_visibility()
-            self.grab_set()
-        except tk.TclError:
-            # The owner may have closed while Windows was mapping the dialogue.
-            return
+        arm_modal(self)
 
     def _toggle_tone(self, tone):
         """Track selection order and enforce the picker's soft limit/conflicts."""
@@ -3221,7 +3296,7 @@ class TonePickerDialog(ctk.CTkToplevel):
                     self.variables[tone].set(False)
                     self.status_label.configure(
                         text=f"Choose no more than {TONE_PICKER_LIMIT} tones.",
-                        text_color="#e06c75")
+                        text_color=DIFF_DEL_FG)
                     self.after(1800, self._refresh_status)
                     return
                 self.selected_order.append(tone)
@@ -3234,7 +3309,7 @@ class TonePickerDialog(ctk.CTkToplevel):
                     self.selected_order.remove(tone)
                     self.variables[tone].set(False)
                     self.status_label.configure(
-                        text=conflict, text_color="#e06c75")
+                        text=conflict, text_color=DIFF_DEL_FG)
                     self.after(2400, self._refresh_status)
                     return
         elif tone in self.selected_order:
@@ -3387,9 +3462,6 @@ class DiffExportFormatDialog(ctk.CTkToplevel):
         self.geometry("560x210")
         self.resizable(False, False)
         self.transient(master)
-        self.grab_set()  # modal (notes_023 F6) -- Reject/History behind this
-                         # dialogue must not be able to change state export
-                         # is about to read
         bind_dialog_chrome(self, on_close=self.destroy)
         position_over_parent(self, master, 560, 210)
 
@@ -3419,6 +3491,10 @@ class DiffExportFormatDialog(ctk.CTkToplevel):
             buttons, text="Review record",
             command=lambda: self._choose("record"),
         ).pack(side="left", expand=True, fill="x", padx=(4, 0))
+
+        # Modal (notes_023 F6): Reject/History behind this dialogue must not
+        # be able to change the state export is about to read.
+        arm_modal(self)
 
     def _choose(self, value):
         self.result = value
@@ -3454,7 +3530,6 @@ class SettingsDialog(ctk.CTkToplevel):
         self.resizable(False, True)
         self.minsize(480, 420)
         self.transient(master)
-        self.grab_set()  # modal
         bind_dialog_chrome(self, self.destroy)
         self.after_idle(lambda: position_over_parent(self, master, 520, 640))
 
@@ -3490,19 +3565,19 @@ class SettingsDialog(ctk.CTkToplevel):
         seg.pack(fill="x", padx=16, pady=(2, 4))
         self.backend_status = ctk.CTkLabel(
             body, text="", text_color="#f0c674",
-            font=ctk.CTkFont(size=11), justify="left", wraplength=460)
+            font=ctk.CTkFont(size=12), justify="left", wraplength=460)
         self.backend_status.pack(anchor="w", padx=16)
 
         ctk.CTkLabel(body, text="Claude API key (pay-as-you-go, from "
                      "console.anthropic.com)").pack(anchor="w", **pad)
-        self.key_entry = ctk.CTkEntry(body, show="*", width=480)
+        self.key_entry = ctk.CTkEntry(body, show="*")
         self.key_entry.insert(0, cfg.get("anthropic_api_key", ""))
-        self.key_entry.pack(padx=16, pady=(2, 0))
+        self.key_entry.pack(fill="x", padx=16, pady=(2, 0))
         self.key_entry.bind("<Return>", lambda _e: self._save())
         ctk.CTkLabel(body, text="Stored in plain text in the config file. "
                      "Leave blank to use the ANTHROPIC_API_KEY env variable.",
                      text_color="gray60",
-                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=16)
+                     font=ctk.CTkFont(size=12)).pack(anchor="w", padx=16)
 
         ctk.CTkLabel(body, text="Claude model").pack(anchor="w", **pad)
         self.model_var = ctk.StringVar(
@@ -3515,15 +3590,14 @@ class SettingsDialog(ctk.CTkToplevel):
         ollama_row = ctk.CTkFrame(body, fg_color="transparent")
         ollama_row.pack(fill="x", padx=16, pady=(2, 0))
         current_model = cfg.get("ollama_model", DEFAULT_OLLAMA_MODEL)
-        self.ollama_combo = ctk.CTkComboBox(ollama_row, width=360,
-                                            values=[current_model])
+        self.ollama_combo = ctk.CTkComboBox(ollama_row, values=[current_model])
         self.ollama_combo.set(current_model)
-        self.ollama_combo.pack(side="left")
+        self.ollama_combo.pack(side="left", fill="x", expand=True)
         self.detect_btn = ctk.CTkButton(ollama_row, text="Detect", width=110,
                                         command=self._detect_models)
         self.detect_btn.pack(side="left", padx=(8, 0))
         self.ollama_status = ctk.CTkLabel(body, text="", text_color="gray60",
-                                          font=ctk.CTkFont(size=11))
+                                          font=ctk.CTkFont(size=12))
         self.ollama_status.pack(anchor="w", padx=16)
 
         self.protect_var = tk.BooleanVar(
@@ -3554,15 +3628,15 @@ class SettingsDialog(ctk.CTkToplevel):
             body, text="Words or phrases to steer away from wherever meaning "
                        "allows — never by deleting a required fact, only by "
                        f"rephrasing (up to {MAX_HOUSE_STYLE_TERMS}).",
-            text_color="gray60", font=ctk.CTkFont(size=11), justify="left",
+            text_color="gray60", font=ctk.CTkFont(size=12), justify="left",
             wraplength=460).pack(anchor="w", padx=16)
 
         self.avoid_terms = list(cfg.get("house_style_avoid", []))
         avoid_add_row = ctk.CTkFrame(body, fg_color="transparent")
         avoid_add_row.pack(fill="x", padx=16, pady=(6, 0))
-        self.avoid_entry = ctk.CTkEntry(avoid_add_row, width=340,
+        self.avoid_entry = ctk.CTkEntry(avoid_add_row,
                                         placeholder_text="e.g. leverage")
-        self.avoid_entry.pack(side="left")
+        self.avoid_entry.pack(side="left", fill="x", expand=True)
         self.avoid_entry.bind("<Return>", lambda _e: self._add_avoid_term())
         ctk.CTkButton(avoid_add_row, text="Add", width=80,
                       command=self._add_avoid_term).pack(side="left", padx=(8, 0))
@@ -3612,6 +3686,7 @@ class SettingsDialog(ctk.CTkToplevel):
 
         self._refresh_state()
         self.after_idle(self._focus_initial_control)
+        arm_modal(self)
 
     def _focus_initial_control(self):
         """Place keyboard focus on the first useful Settings control
@@ -3855,70 +3930,79 @@ class PresetManagerDialog(ctk.CTkToplevel):
         self.user_names = user_names
 
         self.title("Manage presets")
-        self.geometry("460x510")
-        self.resizable(False, False)
+        self.geometry("460x560")
+        self.resizable(False, True)
+        self.minsize(440, 420)
         self.transient(master)
-        self.grab_set()
         bind_dialog_chrome(self, self.destroy)
-        self.after_idle(lambda: position_over_parent(self, master, 460, 510))
+        self.after_idle(lambda: position_over_parent(self, master, 460, 560))
+
+        # A fixed, non-scrollable body (v2.32) stopped fitting once the
+        # Voice section was added in v2.34 -- the Delete row and everything
+        # below it could clip at the dialog's own fixed height. Scrollable
+        # body, same as Settings/Voice profiles.
+        body = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=0, pady=0)
 
         ctk.CTkLabel(
-            self, text="Save the current writing controls",
+            body, text="Save the current writing controls",
             font=ctk.CTkFont(size=16, weight="bold"),
         ).pack(anchor="w", padx=18, pady=(18, 4))
         ctk.CTkLabel(
-            self, text=summary, wraplength=420, justify="left",
+            body, text=summary, wraplength=420, justify="left",
             text_color="gray65",
         ).pack(anchor="w", padx=18, pady=(0, 10))
 
         self.name_entry = ctk.CTkEntry(
-            self, placeholder_text="Preset name", width=420)
+            body, placeholder_text="Preset name", width=420)
         self.name_entry.pack(padx=18, pady=(0, 4))
-        self.save_status = ctk.CTkLabel(self, text="", text_color="#e06c75")
+        self.save_status = ctk.CTkLabel(body, text="", text_color=DIFF_DEL_FG)
         self.save_status.pack(anchor="w", padx=18)
-        ctk.CTkButton(self, text="Save current controls",
+        ctk.CTkButton(body, text="Save current controls",
                       command=self._save).pack(fill="x", padx=18, pady=(4, 0))
 
         ctk.CTkLabel(
-            self, text="Delete a user preset", font=ctk.CTkFont(weight="bold")
+            body, text="Delete a user preset", font=ctk.CTkFont(weight="bold")
         ).pack(anchor="w", padx=18, pady=(18, 4))
         choices = user_names or ["(no user presets)"]
         self.delete_var = ctk.StringVar(value=choices[0])
+        delete_row = ctk.CTkFrame(body, fg_color="transparent")
+        delete_row.pack(fill="x", padx=18, pady=4)
         self.delete_menu = ctk.CTkOptionMenu(
-            self, values=choices, variable=self.delete_var,
+            delete_row, values=choices, variable=self.delete_var,
             state="normal" if user_names else "disabled")
-        self.delete_menu.pack(side="left", padx=(18, 8), pady=4)
+        self.delete_menu.pack(side="left")
         ctk.CTkButton(
-            self, text="Delete", width=100, fg_color="#8b3a3a",
+            delete_row, text="Delete", width=100, fg_color=DANGER_BG,
             state="normal" if user_names else "disabled",
             command=self._delete,
-        ).pack(side="left", pady=4)
+        ).pack(side="left", padx=(8, 0))
 
         ctk.CTkLabel(
-            self, text="Voice", font=ctk.CTkFont(weight="bold")
+            body, text="Voice", font=ctk.CTkFont(weight="bold")
         ).pack(anchor="w", padx=18, pady=(18, 4))
         ctk.CTkLabel(
-            self,
+            body,
             text="A saved writing style a rewrite can imitate (v2.34, "
                  "notes_030). Kept separate from presets -- a voice is "
                  "personal, not a shareable house-style knob.",
             text_color="gray65", wraplength=420, justify="left",
         ).pack(anchor="w", padx=18)
         ctk.CTkButton(
-            self, text="Voice profiles…",
+            body, text="Voice profiles…",
             command=self._open_voice_profiles,
         ).pack(fill="x", padx=18, pady=(6, 0))
 
         ctk.CTkLabel(
-            self, text="Preset packs", font=ctk.CTkFont(weight="bold")
+            body, text="Preset packs", font=ctk.CTkFont(weight="bold")
         ).pack(anchor="w", padx=18, pady=(18, 4))
         ctk.CTkLabel(
-            self,
+            body,
             text="Share your presets as a file, or bring in someone else's.",
             text_color="gray65",
         ).pack(anchor="w", padx=18)
 
-        pack_row = ctk.CTkFrame(self, fg_color="transparent")
+        pack_row = ctk.CTkFrame(body, fg_color="transparent")
         pack_row.pack(fill="x", padx=18, pady=(6, 0))
         ctk.CTkButton(
             pack_row, text="Export pack…", width=150,
@@ -3931,14 +4015,15 @@ class PresetManagerDialog(ctk.CTkToplevel):
 
         self.replace_existing_var = tk.BooleanVar(value=False)
         ctk.CTkCheckBox(
-            self, variable=self.replace_existing_var,
+            body, variable=self.replace_existing_var,
             text="Replace existing names on import",
         ).pack(anchor="w", padx=18, pady=(8, 0))
 
         self.pack_status = ctk.CTkLabel(
-            self, text="", text_color="#e06c75", wraplength=420,
+            body, text="", text_color=DIFF_DEL_FG, wraplength=420,
             justify="left")
         self.pack_status.pack(anchor="w", padx=18, pady=(6, 12))
+        arm_modal(self)
 
     def _open_voice_profiles(self):
         self.on_open_voice_profiles()
@@ -3951,9 +4036,9 @@ class PresetManagerDialog(ctk.CTkToplevel):
             return
         ok, detail = self.on_export_pack(path)
         if ok:
-            self.pack_status.configure(text_color="#98c379", text=detail)
+            self.pack_status.configure(text_color=OK_FG, text=detail)
         else:
-            self.pack_status.configure(text_color="#e06c75",
+            self.pack_status.configure(text_color=DIFF_DEL_FG,
                                        text=f"Export failed: {detail}")
 
     def _import_pack(self):
@@ -3967,7 +4052,7 @@ class PresetManagerDialog(ctk.CTkToplevel):
             self.pack_status.configure(
                 text_color="#e5c07b", text="\n".join(f"• {m}" for m in messages))
         else:
-            self.pack_status.configure(text_color="#98c379", text="pack imported")
+            self.pack_status.configure(text_color=OK_FG, text="pack imported")
         # The dialog's own user_names/delete menu were built before this
         # import; close rather than show a stale delete list -- Manage
         # presets can simply be reopened to see the new full set.
@@ -4064,9 +4149,24 @@ class VoiceProfileDialog(ctk.CTkToplevel):
         self.resizable(False, True)
         self.minsize(480, 480)
         self.transient(master)
-        self.grab_set()
         bind_dialog_chrome(self, self.destroy)
         self.after_idle(lambda: position_over_parent(self, master, 520, 620))
+
+        # Save/Delete/Close used to be packed inside the scrollable body
+        # (below), where they could scroll out of view at minsize 480x480
+        # with a long brief and several samples. Reserve the footer on the
+        # toplevel, side="bottom", BEFORE the scrollable body is packed, the
+        # same fix Settings already uses.
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row.pack(fill="x", padx=16, pady=(6, 18), side="bottom")
+        ctk.CTkButton(btn_row, text="Save", width=100,
+                      command=self._save).pack(side="left")
+        self.delete_btn = ctk.CTkButton(
+            btn_row, text="Delete", width=100, fg_color=DANGER_BG,
+            state="disabled", command=self._delete)
+        self.delete_btn.pack(side="left", padx=(8, 0))
+        ctk.CTkButton(btn_row, text="Close", width=100, fg_color="gray30",
+                      command=self.destroy).pack(side="right")
 
         body = ctk.CTkScrollableFrame(self, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=0, pady=0)
@@ -4099,7 +4199,7 @@ class VoiceProfileDialog(ctk.CTkToplevel):
             body,
             text=f"Hand-typed or derived below (up to {MAX_STYLE_BRIEF_CHARS} "
                  "characters).",
-            text_color="gray60", font=ctk.CTkFont(size=11),
+            text_color="gray60", font=ctk.CTkFont(size=12),
         ).pack(anchor="w", padx=16)
         self.brief_box = ctk.CTkTextbox(body, height=90)
         self.brief_box.pack(fill="x", padx=16, pady=(2, 0))
@@ -4112,7 +4212,7 @@ class VoiceProfileDialog(ctk.CTkToplevel):
                  "its own paragraph, separated by a line containing just "
                  "---. Used only to derive a brief below -- never sent on "
                  "an ordinary rewrite request.",
-            text_color="gray60", font=ctk.CTkFont(size=11), wraplength=460,
+            text_color="gray60", font=ctk.CTkFont(size=12), wraplength=460,
             justify="left",
         ).pack(anchor="w", padx=16)
         self.samples_box = ctk.CTkTextbox(body, height=110)
@@ -4125,14 +4225,14 @@ class VoiceProfileDialog(ctk.CTkToplevel):
             command=self._derive_brief)
         self.derive_btn.pack(side="left")
         self.brief_status = ctk.CTkLabel(body, text="", text_color="gray60",
-                                         font=ctk.CTkFont(size=11),
+                                         font=ctk.CTkFont(size=12),
                                          wraplength=460, justify="left")
         self.brief_status.pack(anchor="w", padx=16, pady=(4, 0))
 
         ctk.CTkLabel(body, text="Avoid (optional)").pack(anchor="w", **pad)
         ctk.CTkLabel(
             body, text="Comma-separated words this voice prefers not to use.",
-            text_color="gray60", font=ctk.CTkFont(size=11),
+            text_color="gray60", font=ctk.CTkFont(size=12),
         ).pack(anchor="w", padx=16)
         self.avoid_entry = ctk.CTkEntry(
             body, placeholder_text="e.g. utilise, delve, landscape")
@@ -4145,20 +4245,10 @@ class VoiceProfileDialog(ctk.CTkToplevel):
         ).pack(anchor="w", padx=16, pady=(12, 0))
 
         self.save_status = ctk.CTkLabel(
-            body, text="", text_color="#e06c75", wraplength=460,
+            body, text="", text_color=DIFF_DEL_FG, wraplength=460,
             justify="left")
-        self.save_status.pack(anchor="w", padx=16, pady=(8, 0))
-
-        btn_row = ctk.CTkFrame(body, fg_color="transparent")
-        btn_row.pack(fill="x", padx=16, pady=(6, 18))
-        ctk.CTkButton(btn_row, text="Save", width=100,
-                      command=self._save).pack(side="left")
-        self.delete_btn = ctk.CTkButton(
-            btn_row, text="Delete", width=100, fg_color="#8b3a3a",
-            state="disabled", command=self._delete)
-        self.delete_btn.pack(side="left", padx=(8, 0))
-        ctk.CTkButton(btn_row, text="Close", width=100, fg_color="gray30",
-                      command=self.destroy).pack(side="right")
+        self.save_status.pack(anchor="w", padx=16, pady=(8, 18))
+        arm_modal(self)
 
     def _load_profile(self, choice):
         self.save_status.configure(text="")
@@ -4188,7 +4278,7 @@ class VoiceProfileDialog(ctk.CTkToplevel):
         samples = _samples_from_text(self.samples_box.get("1.0", "end-1c"))
         if not samples:
             self.brief_status.configure(
-                text_color="#e06c75",
+                text_color=DIFF_DEL_FG,
                 text="Paste at least one writing sample first.")
             return
         self.derive_btn.configure(state="disabled")
@@ -4216,12 +4306,12 @@ class VoiceProfileDialog(ctk.CTkToplevel):
         self.derive_btn.configure(state="normal")
         if error:
             self.brief_status.configure(
-                text_color="#e06c75", text=f"Could not derive a brief: {error}")
+                text_color=DIFF_DEL_FG, text=f"Could not derive a brief: {error}")
             return
         self.brief_box.delete("1.0", "end")
         self.brief_box.insert("1.0", brief)
         self.brief_status.configure(
-            text_color="#98c379",
+            text_color=OK_FG,
             text="Style brief updated below — review before saving.")
 
     def _save(self):
@@ -4236,7 +4326,7 @@ class VoiceProfileDialog(ctk.CTkToplevel):
             self.save_status.configure(text=error)
             return
         self.save_status.configure(
-            text_color="#98c379", text=f"Saved '{name}'.")
+            text_color=OK_FG, text=f"Saved '{name}'.")
         # Refresh in place (rather than close, unlike PresetManagerDialog's
         # single-purpose save) so Derive-brief -> Save -> keep editing the
         # same profile doesn't require reopening the dialog each time.
@@ -4291,7 +4381,6 @@ class HistoryDialog(ctk.CTkToplevel):
         self.resizable(False, True)
         self.minsize(420, 300)
         self.transient(master)
-        self.grab_set()
         bind_dialog_chrome(self, self.destroy)
         self.after_idle(lambda: position_over_parent(self, master, 480, 420))
 
@@ -4313,6 +4402,7 @@ class HistoryDialog(ctk.CTkToplevel):
         else:
             for entry in reversed(entries):  # most recent first
                 self._add_row(body, entry)
+        arm_modal(self)
 
     def _add_row(self, parent, entry):
         row = ctk.CTkFrame(parent, fg_color="gray17", corner_radius=6)
@@ -4860,7 +4950,9 @@ class Scriptorium(ctk.CTk):
         # widget next to the right's darker themed tk.Text (notes_017 §1.2).
         self.original_box = ctk.CTkTextbox(
             panes, wrap="word", fg_color=PANE_BG, text_color=PANE_FG,
-            font=ctk.CTkFont(family=PANE_FONT[0], size=PANE_FONT[1]))
+            font=ctk.CTkFont(family=PANE_FONT[0], size=PANE_FONT[1]),
+            border_width=1, border_color=PANE_BORDER,
+            corner_radius=OVERLAY_RADIUS)
         self.original_box.grid(row=1, column=0, sticky="nsew", padx=(0, 6), pady=4)
         configure_ctk_textbox_text_metrics(self.original_box)
         # <<Modified>> covers every kind of change (typing, cut, paste,
@@ -4875,7 +4967,9 @@ class Scriptorium(ctk.CTk):
                 allow_process_selection=True))
 
         # Revised: a themed tk.Text so we can apply diff tags reliably.
-        revised_frame = ctk.CTkFrame(panes)
+        revised_frame = ctk.CTkFrame(
+            panes, fg_color=PANE_BG, border_width=1,
+            border_color=PANE_BORDER, corner_radius=OVERLAY_RADIUS)
         revised_frame.grid(row=1, column=1, sticky="nsew", padx=(6, 0), pady=4)
         revised_frame.grid_rowconfigure(0, weight=1)
         revised_frame.grid_columnconfigure(0, weight=1)
@@ -4886,7 +4980,9 @@ class Scriptorium(ctk.CTk):
             font=PANE_FONT, background=PANE_BG, foreground=PANE_FG,
             insertbackground=PANE_FG, relief="flat", state="disabled",
             highlightthickness=0, spacing1=PANE_SPACING_BEFORE,
-            spacing3=PANE_SPACING_AFTER)
+            spacing3=PANE_SPACING_AFTER,
+            selectbackground=SELECT_BG, selectforeground=PANE_FG,
+            inactiveselectbackground=SELECT_BG)
         self.revised_box.grid(row=0, column=0, sticky="nsew")
         scroll = ctk.CTkScrollbar(revised_frame, command=self.revised_box.yview)
         scroll.grid(row=0, column=1, sticky="ns")
@@ -4921,7 +5017,7 @@ class Scriptorium(ctk.CTk):
         # runs before this method) rather than self, so pack(before=self.status)
         # below still refers to a sibling under the same master.
         self.notice_frame = ctk.CTkFrame(self._bottom_frame, fg_color=AMBER_BG,
-                                         corner_radius=6)
+                                         corner_radius=OVERLAY_RADIUS)
         rule = ctk.CTkFrame(self.notice_frame, width=4, fg_color=AMBER_RULE,
                             corner_radius=0)
         rule.pack(side="left", fill="y")
@@ -4938,11 +5034,22 @@ class Scriptorium(ctk.CTk):
             notice_text, text="", justify="left", anchor="w",
             text_color=AMBER_FG, font=ctk.CTkFont(size=12), wraplength=880)
         self.notice_label.pack(fill="x", anchor="w", pady=(2, 0))
+        self.notice_frame.bind("<Configure>", self._sync_notice_wraplength)
         ctk.CTkButton(
-            self.notice_frame, text="✕", width=32, fg_color="gray30",
+            self.notice_frame, text="✕", width=32,
+            fg_color=AMBER_DISMISS, hover_color=AMBER_DISMISS_HOVER,
             command=self.notice_frame.pack_forget
         ).pack(side="right", padx=(0, 8), pady=8)
         # packed on demand in _show_ambiguities()
+
+    def _sync_notice_wraplength(self, event):
+        """Wrap the notice body to the banner's live width, not a fixed guess."""
+        if event.widget is not self.notice_frame:
+            return
+        # 4px rule + 32px dismiss button + inner padx 10*2 + dismiss padx 8.
+        usable = max(240, event.width - 64)
+        if int(self.notice_label.cget("wraplength") or 0) != usable:
+            self.notice_label.configure(wraplength=usable)
 
     def _pack_button_group(self, row, column, sticky, padx=0):
         """A transparent grid cell holding one left-to-right button cluster
@@ -5073,9 +5180,18 @@ class Scriptorium(ctk.CTk):
 
     def _build_statusbar(self):
         self.status = ctk.CTkLabel(self._bottom_frame, text="", anchor="w",
-                                   text_color="gray65",
+                                   justify="left", text_color="gray65",
                                    font=ctk.CTkFont(size=12))
         self.status.pack(fill="x", padx=16, pady=(0, 8))
+        self.status.bind("<Configure>", self._sync_status_wraplength)
+
+    def _sync_status_wraplength(self, event):
+        """Wrap the status line to its own live width, not a fixed guess."""
+        if event.widget is not self.status:
+            return
+        usable = max(200, event.width)
+        if int(self.status.cget("wraplength") or 0) != usable:
+            self.status.configure(wraplength=usable)
 
     # -- helpers ------------------------------------------------------------ #
 
@@ -5112,8 +5228,13 @@ class Scriptorium(ctk.CTk):
             self.original_heading.configure(text=heading)
         chars = len(original)
         words = len(original.split()) if original.strip() else 0
-        msg = (f"Backend: {where}  —  {privacy}   |   "
-               f"{words} words, {chars} characters")
+        if self.busy:
+            # Keep the busy note itself visible rather than crowding it out
+            # with the privacy clause, which does not change mid-request.
+            msg = f"Backend: {where}   |   {words} words, {chars} characters"
+        else:
+            msg = (f"Backend: {where}  —  {privacy}   |   "
+                   f"{words} words, {chars} characters")
         # A handful of words cannot produce a stable Flesch score, hence the
         # floor -- below it the label would look precise but be meaningless.
         if words >= 20:
@@ -5315,7 +5436,7 @@ class Scriptorium(ctk.CTk):
             if self._pulse_job is not None:
                 self.after_cancel(self._pulse_job)
                 self._pulse_job = None
-            self.process_btn.configure(fg_color=["#3a7ebf", BUSY_BLUE])
+            self.process_btn.configure(fg_color=BUSY_BLUE)
             self.progress.stop()
             self.progress.pack_forget()
 
@@ -5719,12 +5840,16 @@ class Scriptorium(ctk.CTk):
             self._change_cursor + direction) % len(self._change_ranges)
         start, end = self._change_ranges[self._change_cursor]
         self.revised_box.tag_remove("active_change", "1.0", "end")
-        if self.revised_box.compare(start, "!=", end):
+        hidden = self.revised_box.compare(start, "==", end)
+        if not hidden:
             self.revised_box.tag_add("active_change", start, end)
             self.revised_box.tag_raise("active_change")
         self.revised_box.see(start)
         self.change_position_label.configure(
             text=f"{self._change_cursor + 1} / {len(self._change_ranges)}")
+        if hidden:
+            self._refresh_status(
+                "deletion only — switch to Inline to see it")
 
     def _on_diff_view_change(self, _value=None):
         """Re-render the current revision when the Clean/Inline toggle changes."""

@@ -4,7 +4,7 @@
 When Mark says "lets get started", that is the cue to open these three files
 before doing anything else.
 
-Current shipped version: **2.34** (v2.9 bug-fix pass, v2.10 visual/UX
+Current shipped version: **2.36** (v2.9 bug-fix pass, v2.10 visual/UX
 polish, v2.11 three-tone picker, v2.12 persisted user presets, v2.13 backend
 retry transport, v2.14 hand-testing fixes, v2.15 Explorer drag-and-drop,
 v2.17 readability metrics + shortcuts reference, v2.18 house-style
@@ -22,8 +22,10 @@ single-instance-race fixes) plus documentation-drift cleanup, v2.31
 selection-scoped processing (E1), v2.32 visual-polish bundle
 (notes_027, all six items), v2.33 voice profile schema + prompt block
 (notes_030 Proposal A/B1), v2.34 VoiceProfileDialog / derive-brief /
-preset.voice / two-pass Correct-then-restyle (notes_030 B2/C) - see those
-sections below). All five notes_019 proposals and notes_016's full
+preset.voice / two-pass Correct-then-restyle (notes_030 B2/C), v2.35
+usability refinements + role/tone strengthening (notes_031 A-F), v2.36
+Fluent-filtered visual hygiene + dialog commanding (notes_033/034 A+B) -
+see those sections below). All five notes_019 proposals and notes_016's full
 original proposal set shipped by build 2.21, clearing the backlog for the
 first time since notes_001 opened it; v2.22 closed a fresh hand-testing
 defect (notes_020) found immediately after. notes_021's second-generation
@@ -31,15 +33,27 @@ hardening pass is fully shipped except its deliberately-deferred streaming
 half (v2.23-v2.25; see v2.25's own write-up for why streaming stays out of
 scope). notes_022/023/024's follow-on review has now closed all thirteen
 confirmed defects (F1-F13, v2.26-v2.30 above), E2/E3, and notes_022
-proposal B. **v2.31 (E1) remains shipped**; **v2.32-v2.34 are also shipped**:
-v2.32 closed notes_027's visual-polish bundle after Mark's hand-test of the
-real `.exe`; v2.33/v2.34 delivered notes_030's voice-profile work
-(schema + prompt plumbing, then UI/derive-brief/preset.voice/two-pass), with
-verification at 116/116 tests (50 new) on the VoiceProfileDialog slice.
-`APP_VERSION` / `version_info.txt` are `2.34` / `2.34.0.0`. Live voice
-calibration against a paid Claude backend (notes_030's later slice) stays
-intentionally unrun until Mark authorises spend for that session - see
-v2.33/v2.34 sections below.
+proposal B. **v2.31-v2.35 are shipped**: v2.32 closed notes_027's
+visual-polish bundle after Mark's hand-test of the real `.exe`;
+v2.33/v2.34 delivered notes_030's voice-profile work (schema + prompt
+plumbing, then UI/derive-brief/preset.voice/two-pass), with verification
+at 116/116 tests (50 new) on the VoiceProfileDialog slice; **v2.35
+(notes_031 A-F)** adds the empty-pane import hint, preset-match clearing,
+tone Earlier/Later reorder, tightened role wording + explicit
+preserve-meaning → mode → role/tone precedence, gated-off Personal
+Correspondence / Firm candidates, clean rich-copy + on-demand reading
+estimates, and honouring a long Retry-After by stopping instead of
+shortening it (155/155 tests, 39 new). **v2.36 (notes_033/034 A+B)** fixes
+two real defects Mark found after v2.35 (Voice profiles' Save/Delete/Close
+could scroll out of view; Manage presets' fixed body no longer fit) via a
+shared `arm_modal()` grab-race fix plus reserved footers/scrollable bodies,
+and applies the Fluent Design filter from notes_033 to the two panes and
+notice banner (8px overlay radius, matching selection colour, responsive
+wrapping) and to leftover ungrouped hex colours (now named constants). No
+prompt, role, tone or calibration surface touched. `APP_VERSION` /
+`version_info.txt` are `2.36` / `2.36.0.0`. Live Claude calibration for
+voice (notes_030) and for v2.35 D1's prompt change (notes_031) stay
+intentionally unrun until Mark authorises spend - see those sections below.
 
 Scope through v2.3 was drawn from twelve accumulated review notes
 (`notes/01_Active/notes_001.txt` – `notes_012.txt`), written independently by
@@ -66,6 +80,14 @@ tagging the version. Work through tasks in the listed order — later tasks in
 a release sometimes depend on earlier ones (noted inline). Update
 `MEMORY.md` as tasks complete; tick items here only once verified, not once
 written.
+
+**Keep the Releases summary current.** Whenever `APP_VERSION` moves (or a
+version section is marked shipped), update the **Current shipped version**
+line at the top of this file in the same change - version number, short
+theme, and the closing `APP_VERSION` / `version_info.txt` sentence must
+match the code. Do not leave a shipped `## vX.XX` section while the header
+still names an older build.
+
 
 Do not re-derive fixes from the older notes (001–008) — those defects are
 already closed in v2.0. Notes 009–013 are the live backlog this roadmap is
@@ -3390,6 +3412,142 @@ already shipped; this version implements its six follow-on slices A–F.
       required live calibration pass. All five need Mark's own machine (the
       DPI/paste checks) or his spend authorisation (Claude calibration) —
       flagged here rather than assumed.
+
+---
+
+## v2.36 — Fluent-filtered visual hygiene + dialog commanding (notes_033/034 A+B) ✅ shipped 2026-09-16
+
+**Goal:** after v2.35, Mark's own hand-test of the running app (recorded at
+the top of the working `notes_031.txt`, superseding the Codex proposal that
+version number previously held) found two real defects — Voice profiles'
+Save/Delete/Close could scroll out of view at minsize, and Manage presets'
+fixed 510px body no longer fit once the Voice section was added — plus a
+third, the action-bar's row 2 being tight at 920px, which Mark asked to
+hold back for a later visually-measured pass rather than fix blind. Grok's
+notes_033 (read-only Fluent Design System investigation) and notes_034
+(the implementation hand-off built on it) treat Fluent as a decision
+filter, not a restyle: keep Scriptorium's existing dark, two-layer, solid-
+material look; close the handful of gaps that are actually wrong (radius,
+one selection colour, a few leftover hex literals); refuse everything
+CustomTkinter cannot do honestly (Mica/Acrylic/Smoke, following the OS
+accent, light mode). This version ships notes_034's slices A (visual
+hygiene) and B (dialog commanding) only; C (title-bar document identity)
+and the row-2/toolbar items stay deferred to a later version, per Mark's
+own choice.
+
+1. **B — `arm_modal()`.** Lifts the `wait_visibility()`-before-`grab_set()`
+   order already proven on `TonePickerDialog` (v2.35 C) into one shared
+   helper, used at the end of `__init__` by every modal dialog
+   (`TonePickerDialog`, `DiffExportFormatDialog`, `SettingsDialog`,
+   `PresetManagerDialog`, `VoiceProfileDialog`, `HistoryDialog`).
+   `ShortcutsDialog` stays non-modal, unchanged.
+2. **B — `VoiceProfileDialog` reserved footer (fixes Mark's defect #1).**
+   Save/Delete/Close move out of the `CTkScrollableFrame` body and onto a
+   `btn_row` packed directly on the toplevel, `side="bottom"`, *before* the
+   scrollable body is packed — the same fix Settings already used (notes_017
+   §1.7). The commanding row can no longer scroll out of view regardless of
+   brief length or sample count; confirmed live (constructed the real
+   dialog class against a CTk root at its 480×480 minsize and asserted the
+   Delete button stays mapped within the window's bounds).
+3. **B — `PresetManagerDialog` scrollable body (fixes Mark's defect #2).**
+   The dialog's previously fixed, non-resizable 460×510 body is now a
+   `CTkScrollableFrame` at 460×560 (`resizable(False, True)`, minsize
+   440×420); the Delete-preset row moves into its own transparent frame so
+   its `side="left"` pair isn't affected by the wider scrollable parent.
+   Confirmed live the same way as (2): constructed at 440×420 minsize,
+   Delete menu stays reachable.
+4. **B — monitor-work-area clamp.** New `MONITORINFO`/`monitor_work_area()`
+   (via `GetMonitorInfoW`/`MonitorFromWindow`, the same ctypes pattern the
+   Explorer-drop code already uses) plus a `position_over_parent()` clamp so
+   a dialog centred near the bottom of a short display can no longer land
+   partly under the taskbar. A failed lookup keeps the old unclamped centre
+   rather than guessing. Verified live against the real desktop's monitor
+   (returned its actual 1920×1040 work area) and against a deliberately
+   oversized dialog (clamped to the work area instead of raising).
+5. **B — Settings fill-x.** `key_entry`, `ollama_combo` and `avoid_entry`
+   drop their fixed pixel widths for `fill="x"`/`expand=True`, so they no
+   longer clip at 150–200% DPI or the dialog's own 480px minimum width.
+6. **A — Pane chrome.** New named constants (`PANE_BORDER`, `SELECT_BG`,
+   `OK_FG`, `DANGER_BG`, `AMBER_DISMISS`/`_HOVER`, `OVERLAY_RADIUS = 8`,
+   matching Fluent's `OverlayCornerRadius` rather than notes_032's original
+   6px guess) applied to both panes (`border_width=1`, `border_color=
+   PANE_BORDER`, `corner_radius=OVERLAY_RADIUS` on Original's `CTkTextbox`
+   and the Revised `CTkFrame`, the latter now also `fg_color=PANE_BG` so it
+   reads as one surface with its inner `tk.Text` rather than a default-grey
+   rim) and to the notice banner. `configure_ctk_textbox_text_metrics()`
+   and the Revised `tk.Text` both gain a matching `SELECT_BG` selection
+   colour (the Win11/VS Code dark selection) plus `insertbackground` on
+   Original. `PANE_SPACING_AFTER` moves from 7 to 8, one step onto the
+   Fluent 4px spacing ramp.
+7. **A — Responsive wrapping.** The notice banner and the status label both
+   bind `<Configure>` to resize their own `wraplength` to their live width
+   (guarded against re-entrant `configure()` calls) instead of a fixed
+   880px/no-wrap guess. The notice's dismiss button becomes an
+   `AMBER_DISMISS` chip (with a `_HOVER` shade) instead of a bare `gray30`
+   square, keeping the warning colour on the warning layer.
+8. **A — Busy-state polish.** The status line omits the privacy clause
+   while `self.busy` is true (keeps the "Working…" note itself visible
+   instead of crowding it out — the clause doesn't change mid-request
+   anyway). The Process-button busy pulse now restores to `BUSY_BLUE` alone
+   instead of re-setting a `["#3a7ebf", BUSY_BLUE]` light/dark pair left
+   over from when the app supported light mode. `_go_to_change()` now shows
+   "deletion only — switch to Inline to see it" on the status line when the
+   navigator lands on a zero-width Clean-view deletion, in addition to the
+   existing "n / count" position label.
+9. **A — Named colours everywhere.** Every remaining literal `#e06c75`
+   (superseded by `DIFF_DEL_FG` back in the diff-colour pass), `#98c379`
+   and `#8b3a3a` — scattered across `TonePickerDialog`, `PresetManagerDialog`
+   and `VoiceProfileDialog` status/Delete-button colours — now reference
+   `DIFF_DEL_FG`/`OK_FG`/`DANGER_BG`. Helper labels at the Fluent-floor-
+   violating size 11 are bumped to 12 in the two dialogues this slice
+   already restructures (`SettingsDialog`, `VoiceProfileDialog`); other
+   size-11 labels elsewhere are untouched, per notes_034's own scope.
+
+Explicitly not this slice (Mark's own choice, notes_034's own
+recommendation, or notes_033's Fluent-filter refusal):
+Action-bar row-2 width trims and toolbar wrapping (notes_032 C/D — Mark
+asked to hold this for a real 920/1180px, 100%/150% DPI look at the built
+`.exe` rather than a blind fix); session document identity / title-bar
+basename (notes_034 C — a new feature, not a fix; held for a possible
+v2.37 once this slice has had Mark's own look); real Mica/Acrylic/Smoke,
+following the OS accent, and light mode (CustomTkinter paints opaque
+frames — faking any of these would look worse than the current solid dark
+utility); D1 role-wording calibration and the gated D2/D3 candidates
+(separate, still needs Mark's spend authorisation, untouched here). No
+prompt, role, tone, voice or calibration surface is touched by this
+version.
+
+### Acceptance checklist
+- [x] 155/155 existing tests pass, unchanged — this slice is UI-only and
+      adds no new pure-function logic that pytest's no-GUI boundary
+      (`pytest.ini`) could cover; no new test file was added, matching
+      notes_034's own stated expectation.
+- [x] `ruff check scriptorium.py` clean.
+- [x] `ast.parse()` clean.
+- [x] Live-instantiated (not just syntax-checked) against a real CTk root
+      on this machine: `monitor_work_area()`/`position_over_parent()`'s
+      clamp (real monitor work area returned; an oversized dialog clamped
+      instead of raising), `arm_modal()` (real grab acquired), the pane
+      chrome constructors (`CTkTextbox`/`CTkFrame` with the new
+      `border_width`/`corner_radius`/`fg_color` kwargs, `tk.Text` with the
+      new selection kwargs), and both fixed dialogs (`VoiceProfileDialog`'s
+      footer confirmed outside the scrollable body and mapped within the
+      window at 480×480 minsize; `PresetManagerDialog`'s Delete menu
+      confirmed reachable at 440×420 minsize).
+- [x] Packaged `.exe` rebuilt this session (`pyinstaller scriptorium.spec`);
+      version resource confirmed `2.36.0.0`; launched and stayed running
+      (no immediate crash) before being closed — a first-run privacy
+      dialog most likely appeared and was not dismissed interactively (no
+      native-window automation available in this environment), so a fresh
+      `%LOCALAPPDATA%\Scriptorium\scriptorium_config.json` now exists on
+      this machine from that launch.
+- [ ] **Not done this session, needs Mark's own eyes:** the actual visual
+      look (pane radius/border/selection colour, notice/status wrapping,
+      dialog footers) has only been verified structurally (widgets
+      construct, are mapped, sit at the right pixel offsets) — not
+      *looked at*. Real Explorer drag-and-drop, a real Word/Outlook paste,
+      and the 920×600/1180×760 100%/150% DPI hand-test gate notes_034
+      itself asks for are all still outstanding.
 
 ---
 

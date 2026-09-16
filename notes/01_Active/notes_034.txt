@@ -1,0 +1,612 @@
+SCRIPTORIUM — FLUENT-FILTERED IMPLEMENTATION NOTE
+=================================================
+Date: 15 September 2026
+Mandate: Lead Enhancement and Feature Architect; read-only ideation.
+Author: Grok, building on notes_033 against notes_032.
+Against: scriptorium.py APP_VERSION 2.35 (6,903 lines, HEAD 6602fa5).
+Source SHA-256:
+e2c065bfcd440ef37f30819230dd88b7b36f63be073382ea52b7e09ebec61b9c
+This note does not authorise implementation. No source was modified.
+
+Why this note exists
+--------------------
+Mark asked to produce notes_034.
+Notes_033 is a Fluent Design investigation, not a restyle. Its recommendation
+is to treat Fluent as a *decision filter* and ship notes_032 A+B under that
+filter (overlay radius 8, not 6). This note is the hand-off: the same A+B
+work, Fluent-adjusted, plus one small new feature that uses an existing seam.
+
+The requested 01_Active destination takes precedence over the older role
+file's 00_Drafts convention, matching notes_031–033. All three note folders
+were checked first: 033 is the highest existing number, so this file is 034.
+
+
+1. EXECUTIVE SUMMARY
+====================
+
+The five priority areas in the standing brief already exist in v2.35.
+Rebuilding them would add disruption without giving Mark a new capability.
+notes_032 already listed the live visual/dialog gaps; notes_033 then said
+which of those gaps are Fluent-correct and which to refuse. Nothing in
+A+B has landed. That is the next useful slice.
+
+What was checked so this is not a stale re-proposal
+---------------------------------------------------
+Read ROADMAP.md (shipped v2.11–v2.35, Deferred sections, notes_022 A/C/D/E),
+MEMORY.md (notes_028 pause; notes_029 no-change on retries), notes_030–033,
+and the live scriptorium.py symbols below.
+
+Priority area        Live evidence                                    Status
+-------------------  -----------------------------------------------  --------
+Explorer file drops  WM_DROPFILES 335–398; poller/bridge ~5837–6110   Shipped
+User presets         WRITING_PRESETS; user_presets; PresetManager     Shipped
+Three tones          Both limits = 3; TONE_CONFLICTS; picker + reorder Shipped
+Export / clipboard / build_markdown_diff; CF_HTML; reading_metrics    Shipped
+  metrics            + on-demand estimates in the review record
+Retry transport      _request_with_retries; cancellable; long          Shipped
+                     Retry-After stops rather than shortening
+
+Explicitly not reopened (notes_033 + ROADMAP Deferred)
+  Real Mica / Acrylic / Smoke; fake wallpaper tint; light mode; OS accent
+  follow; notes_028 toolbar wrap / dropping Mode+Strength labels / moving
+  Copy revision back to row 1; character-level diffs; extra always-on
+  status metrics; visible streaming; folder-drop batch; soft tone conflicts;
+  Credential Manager; splitting scriptorium.py; D2/D3 gated role/tone
+  (ENABLE_CORRESPONDENCE_ROLE / ENABLE_FIRM_TONE still False — Mark's
+  calibration call, not this slice); live Claude spend for voice or D1.
+
+Recommended order
+-----------------
+A. Fluent-filtered visual hygiene (notes_032 A, radius and spacing adjusted).
+   Low risk. No layout membership change. No prompt surface.
+B. Dialog commanding (notes_032 B + a work-area clamp on the existing
+   position_over_parent helper). Highest user-visible value: Voice profiles
+   Save can still scroll away; Settings still grabs before map.
+C. Session document identity — basename in the title bar after Import or
+   drop. New, tiny, extends _load_file_path / clear_all. Optional follow-on
+   once A+B has had Mark's look.
+
+Skip notes_032 C (row-2 width trims) and D (toolbar) until a 920/1180
+100% and 150% DPI look of the *current* .exe says they are needed.
+Fluent Familiar: do not shrink labels to satisfy a static pixel sum.
+
+Suggested version slice: v2.36 = A+B only. v2.37 = C if A+B looks right.
+
+
+2. DETAILED ARCHITECTURAL PROPOSALS
+===================================
+
+2.1 A — Fluent-filtered visual hygiene
+--------------------------------------
+State. Named palette only; no config keys; no persistence. The two panes
+stay one Original CTkTextbox and one Revised tk.Text — swapping Original
+to raw tk.Text would lose CTk theming for a one-pixel border.
+
+Fluent adjustments versus notes_032
+  Overlay radius 8 on pane cards and the notice banner (notes_032 used 6;
+  notes_033: content surfaces use OverlayCornerRadius, not Control 4).
+  PANE_SPACING_AFTER 7 → 8, the one Fluent-ramp snap that is already a
+  leftover Tk default. Do not sweep every pady=10.
+  SELECT_BG #264F78 is the Win11 / VS Code dark selection; keep it. It is
+  the Fluent selection colour in all but name.
+  Pulse restore to BUSY_BLUE alone (drop the leftover CTk light-pair).
+  Optional amber dismiss chip: yes — warning colour stays on the warning
+  layer. Do not add a drop shadow.
+  Helper copy currently at size 11 on dialogues this slice already
+  touches: bump to 12 (Fluent's minimum Regular). Leave untouched
+  size-11 labels elsewhere.
+
+Chrome
+  PANE_BORDER #2D3033, 1px hairline, corner_radius=8, Revised frame
+  fg_color=PANE_BG. Original caret + both panes' selection colours.
+  Notice wraplength follows <Configure>. Status wraplength follows its
+  label; while busy, omit the privacy clause so Working… copy stays
+  visible (not a second status line — notes_022 D stays deferred).
+  Clean-view pure deletion: keep "n / count" in the 48px label; put
+  "deletion only — switch to Inline to see it" on the status extra.
+
+Leftover hex
+  #e06c75 → DIFF_DEL_FG; #98c379 → OK_FG; #8b3a3a → DANGER_BG.
+  Same sites notes_032 listed (tone-limit flash, preset/voice status,
+  both Delete buttons). Durations 1800 / 2400 ms unchanged.
+
+Performance. Bind <Configure> on two labels. Guard with "only configure
+if the integer changed" so a wraplength set cannot re-enter Configure.
+No SequenceMatcher change. No worker thread.
+
+Calibration. None. No prompt, role, tone, or voice text is touched.
+
+2.2 B — Dialog commanding
+-------------------------
+State. No config. Pattern already proven on TonePickerDialog (v2.35 C):
+wait_visibility then grab_set. Lift that into arm_modal() and use it
+everywhere a modal currently grabs in __init__.
+
+VoiceProfileDialog. Save / Delete / Close are packed *inside* the
+scrollable body (4152–4161). At minsize 480×480 or 150% DPI the
+commanding row can leave the canvas — the same class of bug notes_017
+fixed on Settings. Reserve the footer on the toplevel first, then pack
+the scroll body. Leave save_status in the scroll body, next to the
+fields.
+
+PresetManagerDialog. Fixed 460×510, not resizable, grab immediate,
+Delete menu packed side="left" on the toplevel after a run of fill="x"
+widgets. Wrap the body in CTkScrollableFrame; put Delete menu + button
+in a transparent row; geometry 460×560, minsize 440×420,
+resizable(False, True).
+
+Settings. grab_set in __init__ (3457). API key width=480, Ollama combo
+360, house-style entry 340: clip at 150–200% DPI or the 480px minimum.
+pack(fill="x"); Detect stays width=110.
+
+HistoryDialog and DiffExportFormatDialog. arm_modal only. No footer
+change. ShortcutsDialog stays non-modal (no grab).
+
+Work-area clamp (new, small, same helper). position_over_parent centres
+on the parent but does not clamp to the monitor work area, so a 640px
+Settings near the bottom of a 768px laptop can sit under the taskbar.
+Query user32 MonitorFromWindow / GetMonitorInfoW against the *parent*
+HWND (already how Explorer drops resolve a window). On any failure,
+keep today's unclamped centre. This is a read of MONITORINFO, not a
+WNDPROC subclass — not in the v2.15 blast-radius class.
+
+Fluent overlay 8 on inner dialog frames is already the OS rounding of
+the HWND on Windows 11. Do not add a second inner radius pass.
+
+2.3 C — Session document identity (new)
+---------------------------------------
+State. self._document_name: basename string or None. Never a full path
+(screenshot / share-bar privacy). Never written to
+scriptorium_config.json. Never an undo-stack field.
+
+Behaviour
+  Successful _load_file_path (Import and Explorer drop) sets it and
+  retitles to "Scriptorium — letter.txt".
+  clear_all clears it and restores the default title
+  ("Scriptorium — British English writing assistant").
+  Accept, Reject, Process, typing, and Undo do not retitle. A stale
+  basename after Undo-of-import is accepted — the title is a hint, not
+  a source of truth. Same compromise Notepad makes.
+  export_file does not retitle from the save path: Export may write the
+  *revision* under a different name and must not pretend Original is
+  that file.
+
+Why this and not Find-in-panes. Fluent Familiar: every Win11 document
+utility shows the open file in the caption. Find (Ctrl+F) would be a
+new overlay widget on both panes; Calm says do not add chrome in the
+same slice as a radius/dialog pass. Recorded as a later candidate, not
+this hand-off.
+
+2.4 Explicitly not this slice
+-----------------------------
+  notes_032 C / D — measurement gate, still.
+  Find-in-panes, recent-files list, session restore of Original text.
+  DwmExtendFrameIntoClientArea / DWMWA_SYSTEMBACKDROP_TYPE — notes_033
+  refused; CTk paints opaque, so Mica cannot show through.
+  notes_028 in full (Mark paused after the v2.32 .exe "running perfectly").
+  Prompt work (D1 calibration, D2/D3 gates, voice Claude spend).
+
+
+3. MODULAR CODE SNIPPETS
+========================
+
+Proposed integrations, not changes applied to scriptorium.py.
+British English in every user-visible string. Existing imports cover
+this code. METHOD blocks are shown without class indentation; indent
+four spaces inside the named class.
+
+3.1 Palette and Fluent spacing (module, after BUSY_BLUE_DARK, line 118)
+
+    # Chrome the two panes and the dialogues share (notes_032 / notes_033).
+    PANE_BORDER = "#2d3033"   # 1px hairline; content-layer stroke
+    SELECT_BG = "#264f78"     # Win11 / VS Code dark selection
+    OK_FG = "#98c379"         # success microcopy on dialogues
+    DANGER_BG = "#8b3a3a"     # destructive Delete buttons
+    AMBER_DISMISS = "#3a3324" # notice ✕ fill (warning layer, not gray30)
+    AMBER_DISMISS_HOVER = "#4a402c"
+    OVERLAY_RADIUS = 8        # Fluent OverlayCornerRadius; pane cards, notice
+
+Also change the existing constant:
+
+    PANE_SPACING_AFTER = 8    # was 7; one step onto the Fluent 4px ramp
+
+Do not rename PANE_BG / DIFF_* / AMBER_* / BUSY_*.
+
+3.2 Monitor work-area query (module, after the _shell32.DragFinish block ~398)
+
+    class MONITORINFO(ctypes.Structure):
+        """MONITORINFO for GetMonitorInfoW — work area excludes the taskbar."""
+
+        _fields_ = (
+            ("cbSize", wintypes.DWORD),
+            ("rcMonitor", wintypes.RECT),
+            ("rcWork", wintypes.RECT),
+            ("dwFlags", wintypes.DWORD),
+        )
+
+    _user32.MonitorFromWindow.argtypes = (wintypes.HWND, wintypes.DWORD)
+    _user32.MonitorFromWindow.restype = wintypes.HANDLE
+    _user32.GetMonitorInfoW.argtypes = (
+        wintypes.HANDLE, ctypes.POINTER(MONITORINFO))
+    _user32.GetMonitorInfoW.restype = wintypes.BOOL
+    _MONITOR_DEFAULTTONEAREST = 2
+
+    def monitor_work_area(widget):
+        """Return (left, top, right, bottom) of the widget's monitor work area.
+
+        Failure (destroyed widget, unexpected Win32 result) returns None so
+        callers can keep their unclamped geometry rather than guessing.
+        """
+        try:
+            hwnd = int(widget.winfo_id())
+        except (tk.TclError, ValueError, TypeError):
+            return None
+        try:
+            hmon = _user32.MonitorFromWindow(hwnd, _MONITOR_DEFAULTTONEAREST)
+            info = MONITORINFO()
+            info.cbSize = ctypes.sizeof(MONITORINFO)
+            if not hmon or not _user32.GetMonitorInfoW(hmon, ctypes.byref(info)):
+                return None
+        except (OSError, ValueError, OverflowError):
+            return None
+        work = info.rcWork
+        return (work.left, work.top, work.right, work.bottom)
+
+3.3 arm_modal and a clamped position_over_parent
+    (next to bind_dialog_chrome, line 3076)
+
+    def arm_modal(window):
+        """Acquire a grab only after the native window is mapped.
+
+        grab_set() in __init__, before Windows has shown the toplevel, is
+        the classic CustomTkinter race on this platform. TonePickerDialog
+        already waits for visibility (v2.35 C); every other modal should
+        use the same order. TclError covers the owner closing while this
+        window is mapping.
+        """
+        if not window.winfo_exists():
+            return
+        try:
+            window.wait_visibility()
+            window.grab_set()
+        except tk.TclError:
+            return
+
+Replace the body of position_over_parent (keep the docstring; add one
+sentence that it now clamps to the parent's monitor work area):
+
+    window.update_idletasks()
+    try:
+        px, py = master.winfo_rootx(), master.winfo_rooty()
+        pw, ph = master.winfo_width(), master.winfo_height()
+    except tk.TclError:
+        return
+    x = px + max(0, (pw - width) // 2)
+    y = py + max(0, (ph - height) // 2)
+    work = monitor_work_area(master)
+    if work is not None:
+        left, top, right, bottom = work
+        x = min(max(x, left), max(left, right - width))
+        y = min(max(y, top), max(top, bottom - height))
+    window.geometry(f"{width}x{height}+{x}+{y}")
+
+3.4 Original caret and selection (configure_ctk_textbox_text_metrics)
+
+    inner.configure(
+        padx=PANE_INSET_X, pady=PANE_INSET_Y,
+        spacing1=PANE_SPACING_BEFORE, spacing3=PANE_SPACING_AFTER,
+        insertbackground=PANE_FG,
+        selectbackground=SELECT_BG,
+        selectforeground=PANE_FG,
+        inactiveselectbackground=SELECT_BG,
+    )
+
+3.5 Pane chrome (inside Scriptorium._build_panes)
+
+Original constructor:
+
+        self.original_box = ctk.CTkTextbox(
+            panes, wrap="word", fg_color=PANE_BG, text_color=PANE_FG,
+            font=ctk.CTkFont(family=PANE_FONT[0], size=PANE_FONT[1]),
+            border_width=1, border_color=PANE_BORDER,
+            corner_radius=OVERLAY_RADIUS)
+
+Revised frame + Text:
+
+        revised_frame = ctk.CTkFrame(
+            panes, fg_color=PANE_BG, border_width=1,
+            border_color=PANE_BORDER, corner_radius=OVERLAY_RADIUS)
+        revised_frame.grid(row=1, column=1, sticky="nsew", padx=(6, 0), pady=4)
+        revised_frame.grid_rowconfigure(0, weight=1)
+        revised_frame.grid_columnconfigure(0, weight=1)
+
+        self.revised_box = tk.Text(
+            revised_frame, wrap="word", bd=0,
+            padx=PANE_INSET_X, pady=PANE_INSET_Y,
+            font=PANE_FONT, background=PANE_BG, foreground=PANE_FG,
+            insertbackground=PANE_FG, relief="flat", state="disabled",
+            highlightthickness=0, spacing1=PANE_SPACING_BEFORE,
+            spacing3=PANE_SPACING_AFTER,
+            selectbackground=SELECT_BG, selectforeground=PANE_FG,
+            inactiveselectbackground=SELECT_BG)
+
+Notice banner: corner_radius=OVERLAY_RADIUS on self.notice_frame;
+bind after packing the labels; amber dismiss chip.
+
+        self.notice_frame = ctk.CTkFrame(
+            self._bottom_frame, fg_color=AMBER_BG,
+            corner_radius=OVERLAY_RADIUS)
+        ...
+        self.notice_frame.bind("<Configure>", self._sync_notice_wraplength)
+        ctk.CTkButton(
+            self.notice_frame, text="✕", width=32,
+            fg_color=AMBER_DISMISS, hover_color=AMBER_DISMISS_HOVER,
+            command=self.notice_frame.pack_forget
+        ).pack(side="right", padx=(0, 8), pady=8)
+
+    def _sync_notice_wraplength(self, event):
+        """Wrap notice body to the banner's live width, not an 880px guess."""
+        if event.widget is not self.notice_frame:
+            return
+        # 4px rule + 32px dismiss + inner padx 10*2 + dismiss padx 8.
+        usable = max(240, event.width - 64)
+        if int(self.notice_label.cget("wraplength") or 0) != usable:
+            self.notice_label.configure(wraplength=usable)
+
+3.6 Status wrap, busy privacy, pulse restore, Clean-view hint
+
+_build_statusbar, after packing self.status:
+
+        self.status.bind("<Configure>", self._sync_status_wraplength)
+
+    def _sync_status_wraplength(self, event):
+        if event.widget is not self.status:
+            return
+        usable = max(200, event.width)
+        if int(self.status.cget("wraplength") or 0) != usable:
+            self.status.configure(wraplength=usable)
+
+_refresh_status, when assembling the opening clause (around 5115):
+
+        if self.busy:
+            msg = f"Backend: {where}   |   {words} words, {chars} characters"
+        else:
+            msg = (f"Backend: {where}  —  {privacy}   |   "
+                   f"{words} words, {chars} characters")
+
+Keep the later readability / revision-delta / extra suffixes as they are.
+
+_set_busy else-branch (line 5318):
+
+            self.process_btn.configure(fg_color=BUSY_BLUE)
+
+_go_to_change tail (from "start, end = …"):
+
+        start, end = self._change_ranges[self._change_cursor]
+        self.revised_box.tag_remove("active_change", "1.0", "end")
+        hidden = self.revised_box.compare(start, "==", end)
+        if not hidden:
+            self.revised_box.tag_add("active_change", start, end)
+            self.revised_box.tag_raise("active_change")
+        self.revised_box.see(start)
+        self.change_position_label.configure(
+            text=f"{self._change_cursor + 1} / {len(self._change_ranges)}")
+        if hidden:
+            self._refresh_status(
+                "deletion only — switch to Inline to see it")
+
+3.7 Leftover warning / success / destructive colours
+
+Replace every text_color="#e06c75" with text_color=DIFF_DEL_FG
+  (3224, 3237, 3877, 3939, 3956, 4148, 4191, 4219).
+Replace every text_color="#98c379" with text_color=OK_FG
+  (3954, 3970, 4224, 4239).
+Replace both Delete-button fg_color="#8b3a3a" with fg_color=DANGER_BG
+  (PresetManagerDialog ~3892, VoiceProfileDialog ~4157).
+Tone-picker flash durations stay 1800 / 2400 ms.
+
+On VoiceProfileDialog / HistoryDialog / Settings helper labels this
+slice already rewrites, bump font=ctk.CTkFont(size=11) to size=12.
+Do not hunt the rest of the file for size=11.
+
+3.8 B — grab_set → arm_modal
+
+Delete the immediate self.grab_set() in:
+  SettingsDialog (3457), DiffExportFormatDialog (3390),
+  PresetManagerDialog (3861), VoiceProfileDialog (4067),
+  HistoryDialog (4294), and the wait_visibility/grab_set try-block in
+  TonePickerDialog (3206–3211).
+
+Call arm_modal(self) *after* widgets are packed, at the end of each
+__init__. Settings example, after _refresh_state / after_idle focus:
+
+        self._refresh_state()
+        self.after_idle(self._focus_initial_control)
+        arm_modal(self)
+
+TonePickerDialog: drop the local try/except; arm_modal(self) at the
+same point (after _refresh_status()).
+
+3.9 B — VoiceProfileDialog reserved footer
+
+Keep every field, callback and British string. Constructor chrome
+becomes:
+
+        self.title("Voice profiles")
+        self.geometry("520x620")
+        self.resizable(False, True)
+        self.minsize(480, 480)
+        self.transient(master)
+        bind_dialog_chrome(self, self.destroy)
+        self.after_idle(lambda: position_over_parent(self, master, 520, 620))
+
+        # Reserve commanding before the list can consume remaining height.
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row.pack(fill="x", padx=16, pady=(6, 18), side="bottom")
+        ctk.CTkButton(btn_row, text="Save", width=100,
+                      command=self._save).pack(side="left")
+        self.delete_btn = ctk.CTkButton(
+            btn_row, text="Delete", width=100, fg_color=DANGER_BG,
+            state="disabled", command=self._delete)
+        self.delete_btn.pack(side="left", padx=(8, 0))
+        ctk.CTkButton(btn_row, text="Close", width=100, fg_color="gray30",
+                      command=self.destroy).pack(side="right")
+
+        body = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=0, pady=0)
+
+Delete the old btn_row block currently inside body (4152–4161). Leave
+save_status packed at the end of the scroll body. arm_modal(self) at
+the very end of __init__.
+
+3.10 B — PresetManagerDialog scroll + delete row
+
+        self.title("Manage presets")
+        self.geometry("460x560")
+        self.resizable(False, True)
+        self.minsize(440, 420)
+        self.transient(master)
+        bind_dialog_chrome(self, self.destroy)
+        self.after_idle(lambda: position_over_parent(self, master, 460, 560))
+
+        body = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=0, pady=0)
+
+Reparent every current child of self (labels, name_entry, save button,
+delete controls, Voice, packs) onto body. Replace the side="left" pair
+with:
+
+        delete_row = ctk.CTkFrame(body, fg_color="transparent")
+        delete_row.pack(fill="x", padx=18, pady=4)
+        self.delete_menu = ctk.CTkOptionMenu(
+            delete_row, values=choices, variable=self.delete_var,
+            state="normal" if user_names else "disabled")
+        self.delete_menu.pack(side="left")
+        ctk.CTkButton(
+            delete_row, text="Delete", width=100, fg_color=DANGER_BG,
+            state="normal" if user_names else "disabled",
+            command=self._delete,
+        ).pack(side="left", padx=(8, 0))
+
+arm_modal(self) at the end of __init__.
+
+3.11 B — Settings fill-x entries
+
+        self.key_entry = ctk.CTkEntry(body, show="*")
+        self.key_entry.insert(0, cfg.get("anthropic_api_key", ""))
+        self.key_entry.pack(fill="x", padx=16, pady=(2, 0))
+
+        self.ollama_combo = ctk.CTkComboBox(ollama_row, values=[current_model])
+        self.ollama_combo.set(current_model)
+        self.ollama_combo.pack(side="left", fill="x", expand=True)
+        self.detect_btn = ctk.CTkButton(ollama_row, text="Detect", width=110,
+                                        command=self._detect_models)
+        self.detect_btn.pack(side="left", padx=(8, 0))
+
+        self.avoid_entry = ctk.CTkEntry(avoid_add_row,
+                                        placeholder_text="e.g. leverage")
+        self.avoid_entry.pack(side="left", fill="x", expand=True)
+
+3.12 C — document identity (v2.37; do not bundle with A+B)
+
+In Scriptorium.__init__, next to the other session-only fields
+(_pending_drop_events etc.):
+
+        self._document_name = None
+
+    def _set_document_identity(self, path=None):
+        """Show a loaded file's basename in the title; never persist a path."""
+        name = os.path.basename(path) if path else None
+        self._document_name = name or None
+        if self._document_name:
+            self.title(f"{APP_NAME} — {self._document_name}")
+        else:
+            self.title(f"{APP_NAME} — British English writing assistant")
+
+After a successful insert in _load_file_path (after line 6098):
+
+        self._set_document_identity(path)
+
+At the end of clear_all, after reject():
+
+        self._set_document_identity(None)
+
+
+4. INSERTION MAP
+================
+
+File: scriptorium.py (v2.35, 6,903 lines, HEAD 6602fa5).
+Line numbers from this audit; they will shift if anything lands first.
+
+Snippet                         Target (approx)  Class / function
+------------------------------- ---------------- ------------------------------------
+A palette + OVERLAY_RADIUS      118              module, after BUSY_BLUE_DARK
+A PANE_SPACING_AFTER 7→8        106              module constant
+B MONITORINFO + work-area fn    398              module, after DragFinish decls
+B arm_modal                     3076             module, after bind_dialog_chrome
+B position_over_parent clamp    3099             position_over_parent
+A caret / Original selection    3094             configure_ctk_textbox_text_metrics
+A Original border radius 8      4861             Scriptorium._build_panes
+A Revised frame + selection     4878 / 4883      Scriptorium._build_panes
+A notice radius / wrap / chip   4923–4944        _build_panes + _sync_notice_wraplength
+A leftover #e06c75              3224, 3237,      TonePickerDialog._toggle_tone;
+                                3877, 3939,      PresetManagerDialog;
+                                3956, 4148,      VoiceProfileDialog
+                                4191, 4219
+A leftover #98c379              3954, 3970,      PresetManagerDialog;
+                                4224, 4239       VoiceProfileDialog
+A leftover #8b3a3a              3892, 4157       both Delete buttons
+A deletion hint                 5720             Scriptorium._go_to_change
+A pulse restore                 5318             Scriptorium._set_busy
+A status wrap + busy privacy    5074 / 5115      _build_statusbar / _refresh_status
+B grab_set removals             3457, 3390,      Settings, Diff export,
+                                3861, 4067,      Preset manager, Voice profiles,
+                                4294, 3206       History, Tone picker
+B Voice footer                  4061–4161        VoiceProfileDialog.__init__
+B Preset scroll + delete row    3857–3941        PresetManagerDialog.__init__
+B Settings fill-x               3498, 3518,      SettingsDialog.__init__
+                                3563
+C _document_name                ~4400            Scriptorium.__init__
+C _set_document_identity        new              Scriptorium
+C set on load / clear on Clear  6098 / 6031      _load_file_path / clear_all
+
+Do not rename or drop: self.process_btn, softer/stronger/accept_btn,
+self.progress, original_box, revised_box, notice_frame,
+notice_title_label, notice_label, original_heading, delete_btn (voice),
+derive_btn.
+
+Hand-test gate before calling A+B done (this environment cannot open
+the Windows GUI):
+  Default 1180×760 and minimum 920×600, 100% and 150% DPI.
+  Original caret visible on the dark pane; selection colour matches Revised.
+  Both panes share a 1px hairline and overlay radius 8; inner cadence
+  unchanged (14/12/4/8).
+  Notice body wraps at 920px; amber ✕ still dismisses.
+  Process pulse restores to the same blue as a fresh launch.
+  Settings near the bottom of a short display stays on the work area.
+  Settings / Manage presets / Voice profiles / History / Export diff /
+  Choose tones: Escape closes, grab does not hang, dialogue opens on the
+  parent monitor.
+  Voice profiles: Save/Delete/Close remain visible at minsize 480×480
+  with a long brief and three samples.
+  Manage presets: Voice and pack buttons reachable at 440×420.
+  Clean view, a pure deletion: status extra appears; "n / count" still
+  fits the 48px label.
+  Existing 155 tests still pass; no GUI tests are added (pytest.ini
+  boundary). ast.parse and ruff check clean.
+
+C extra: Import a named .txt, title shows the basename; Clear restores
+the default title; config file mtime unchanged.
+
+Suggested version slice
+-----------------------
+v2.36  Snippets A + B only. Fluent-filtered chrome and dialog
+       commanding. No prompt change, so no live-model calibration.
+       Needs Mark's 100%/150% DPI look, not a script.
+v2.37  Snippet C (title-bar basename), only after A+B looks right.
+Skip notes_032 C unless that look shows a 920px clip on row 2.
+Do not schedule notes_032 D (toolbar) unless the same look shows
+Role/Tone/Preset clipping at the default 1180×760.
+
+This note is the sole file created. Await explicit direction on which
+items (if any) to initiate.
